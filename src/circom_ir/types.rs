@@ -1,3 +1,7 @@
+use core::panic;
+
+use ark_ff::PrimeField;
+
 pub(crate) type Wire = usize;
 pub(crate) type NodeId = usize;
 
@@ -8,17 +12,18 @@ pub(crate) struct WireInformation {
     pub(crate) produced_by: NodeId,
 }
 
-#[derive(Debug)]
-pub(crate) struct Node {
-    op: Op,
+pub(crate) struct Node<F: PrimeField> {
+    op: Op<F>,
     input: Vec<Wire>,
     output: Vec<Wire>,
 }
 
 #[derive(Debug)]
-pub enum Op {
+pub enum Op<F: PrimeField> {
     Load,
     Store,
+    Constant(F),
+    Add,
     Mul,
 }
 
@@ -30,7 +35,10 @@ enum WireType {
     R1CS,
 }
 
-struct CircomIr {}
+pub(crate) struct CircomAST<F: PrimeField> {
+    pub(crate) wires: Vec<WireInformation>,
+    pub(crate) nodes: Vec<Node<F>>,
+}
 
 impl WireInformation {
     pub(crate) fn r1cs_wire() -> Self {
@@ -65,7 +73,7 @@ impl WireInformation {
     }
 }
 
-impl Node {
+impl<F: PrimeField> Node<F> {
     pub(crate) fn load(input: Wire, output: Wire) -> Self {
         Node {
             op: Op::Load,
@@ -82,11 +90,64 @@ impl Node {
         }
     }
 
-    pub(crate) fn bin_op(op: Op, lhs: Wire, rhs: Wire, output: Wire) -> Self {
+    pub(crate) fn bin_op(op: Op<F>, lhs: Wire, rhs: Wire, output: Wire) -> Self {
         Self {
             op,
             input: vec![lhs, rhs],
             output: vec![output],
         }
+    }
+
+    pub(crate) fn constant(constant: F, output: Wire) -> Self {
+        Self {
+            op: Op::Constant(constant),
+            input: vec![],
+            output: vec![output],
+        }
+    }
+
+    pub(crate) fn get_constant(&self) -> F {
+        if let Op::Constant(constant) = self.op {
+            constant
+        } else {
+            panic!("cannot get constant from non constant op")
+        }
+    }
+}
+
+impl<F: PrimeField> std::fmt::Debug for Node<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Op::Constant(constant) = self.op {
+            let constant = if constant.is_zero() {
+                "0".to_string()
+            } else {
+                constant.to_string()
+            };
+            f.debug_struct("Node")
+                .field("op", &format!("Constant ({constant})"))
+                .field("fan-in", &self.input)
+                .field("fan-out", &self.output)
+                .finish()
+        } else {
+            f.debug_struct("Node")
+                .field("op", &self.op)
+                .field("fan-in", &self.input)
+                .field("fan-out", &self.output)
+                .finish()
+        }
+    }
+}
+
+impl<F: PrimeField> std::fmt::Debug for CircomAST<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== Circom AST ===")?;
+        for (idx, v) in self.wires.iter().enumerate() {
+            writeln!(f, "{idx:0>4}: {v:?}")?;
+        }
+
+        for (idx, n) in self.nodes.iter().enumerate() {
+            writeln!(f, "{idx:0>4}: {n:?}")?;
+        }
+        Ok(())
     }
 }

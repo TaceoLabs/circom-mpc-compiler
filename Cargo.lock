@@ -226,6 +226,7 @@ dependencies = [
  "constraint_generation",
  "eyre",
  "intmap",
+ "num-bigint",
  "parser",
  "program_structure",
  "serde",

@@ -1,11 +1,13 @@
+use core::panic;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 
 use ark_ec::pairing::Pairing;
+use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP};
 use circom_compiler::hir::very_concrete_program::Wire as CircomWire;
 use circom_compiler::intermediate_representation::ir_interface::{
-    ComputeBucket, Instruction, LoadBucket, OperatorType, SizeOption, StoreBucket,
+    AddressType, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket, LoopBucket, OperatorType,
+    SizeOption, StoreBucket, ValueBucket,
 };
 use circom_compiler::intermediate_representation::ir_interface::{LocationRule, ValueType};
 use circom_constraint_generation::BuildConfig;
@@ -13,32 +15,31 @@ use circom_program_structure::ast::SignalType;
 use circom_program_structure::error_definition::Report;
 use circom_program_structure::program_archive::ProgramArchive;
 use circom_type_analysis::check_types;
+use eyre::Result;
+use intmap::IntMap;
+use num_bigint::BigUint;
 
 use crate::{CompilerConfig, SimplificationLevel};
 use ark_ff::{BigInteger, PrimeField};
 
-use super::types::{self, Node, NodeId, Wire, WireInformation};
+use super::types::{self, CircomAST, Node, NodeId, Wire, WireInformation};
 
-macro_rules! to_wire {
-    ($v: expr) => {
-        u64::try_from($v).expect("usize fits into u64")
+macro_rules! to_u64 {
+    ($x: expr) => {
+        u64::try_from($x).expect("fits into u64")
     };
 }
 
-macro_rules! to_node_id {
-    ($v: expr) => {
-        u64::try_from($v).expect("usize fits into u64")
-    };
-}
-
-struct CompilationCtx<P: Pairing> {
+pub(crate) struct GraphCompiler<'a, P: Pairing> {
     wires: Vec<WireInformation>,
+    nodes: Vec<types::Node<P::ScalarField>>,
+    code: TemplateCode,
     next_wire: Wire,
-    nodes: Vec<types::Node>,
-    file: String, // must be a String because circom wants one instead of PathBuf
-    config: CompilerConfig,
-    offset_stack: Vec<Wire>,
-    phandom_data: PhantomData<P>,
+    offset_jump: Wire,
+    templates: &'a mut HashMap<String, TemplateCode>,
+    compiled_graphs: &'a mut HashMap<String, CircomAST<P::ScalarField>>,
+    constant_table: &'a [P::ScalarField],
+    var_to_wire: IntMap<Wire>,
 }
 
 /// A list of inputs (Name, offset, size).
@@ -63,16 +64,25 @@ fn get_size_from_size_option(size_option: &SizeOption) -> usize {
     }
 }
 
-impl<P: Pairing> CompilationCtx<P> {
-    fn new(file: String, config: CompilerConfig) -> Self {
+impl<'a, P: Pairing> GraphCompiler<'a, P> {
+    fn new(
+        code: TemplateCode,
+        templates: &'a mut HashMap<String, TemplateCode>,
+        compiled_graphs: &'a mut HashMap<String, CircomAST<P::ScalarField>>,
+        constant_table: &'a [P::ScalarField],
+        input_wires: Vec<WireInformation>,
+        offset_jump: Wire,
+    ) -> Self {
         Self {
-            wires: Vec::with_capacity(1024),
-            next_wire: 1,
+            code,
+            next_wire: input_wires.len(),
+            wires: input_wires,
             nodes: Vec::with_capacity(1024),
-            file,
-            offset_stack: vec![],
-            config,
-            phandom_data: PhantomData,
+            offset_jump,
+            templates,
+            compiled_graphs,
+            constant_table,
+            var_to_wire: IntMap::new(),
         }
     }
 
@@ -87,28 +97,34 @@ impl<P: Pairing> CompilationCtx<P> {
      *   pub dest: LocationRule,
      *   pub src: InstructionPointer,
      */
-    fn handle_store_bucket(&mut self, store_bucket: &StoreBucket) {
-        tracing::trace!("lowering store bucket line: {}", store_bucket.line);
-        self.handle_inst(&store_bucket.src);
+    fn handle_store_bucket(&mut self, store_bucket: &StoreBucket) -> Result<()> {
+        self.handle_inst(&store_bucket.src)?;
         // TODO later we can store multiple - then we need to link more
         let last_wire = self.peek_next_wire() - 1;
 
-        let my_offset = *self.offset_stack.last().expect("must be here");
+        let my_offset = self.offset_jump;
         match &store_bucket.dest {
             LocationRule::Indexed {
                 location,
                 template_header: _,
             } => {
-                // load the index - must be a value
-                if let Instruction::Value(value_bucket) = location.as_ref() {
-                    assert!(
-                        matches!(value_bucket.parse_as, ValueType::U32),
-                        "must be a u32"
-                    );
-                    self.add_store_node(last_wire, value_bucket.value + my_offset)
-                } else {
-                    unreachable!("must be value bucket");
-                };
+                tracing::trace!("indexed store at line {}", store_bucket.line);
+                let index = self.get_constant_value(&location);
+                match &store_bucket.dest_address_type {
+                    AddressType::Variable => {
+                        self.var_to_wire.insert(to_u64!(index) + 1, last_wire);
+                    }
+                    AddressType::Signal => self.add_store_node(last_wire, index + my_offset),
+                    AddressType::SubcmpSignal {
+                        cmp_address: _,
+                        uniform_parallel_value: _,
+                        is_output: _,
+                        input_information: _,
+                    } => {
+                        self.print_ast();
+                        todo!();
+                    }
+                }
             }
             LocationRule::Mapped {
                 signal_code,
@@ -120,6 +136,7 @@ impl<P: Pairing> CompilationCtx<P> {
                 //(true, *signal_code)
             }
         };
+        Ok(())
         //match dest_addr {
         //    AddressType::Variable => (),
         //    AddressType::Signal => self
@@ -138,18 +155,108 @@ impl<P: Pairing> CompilationCtx<P> {
         //}
     }
 
-    fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) {
-        tracing::trace!("lowering compute bucket line: {}", compute_bucket.line);
-        //tracing::trace!("{}", compute_bucket.to_string());
+    fn handle_create_cmp_bucket(&mut self, create_cmp_bucket: &CreateCmpBucket) -> Result<()> {
+        tracing::debug!(
+            "we need to create {} {} times",
+            create_cmp_bucket.symbol,
+            create_cmp_bucket.number_of_cmp
+        );
+        if self.compiled_graphs.contains_key(&create_cmp_bucket.symbol) {
+            todo!()
+        } else {
+            // we need to compile the graph
+            let template_code = self
+                .templates
+                .remove(&create_cmp_bucket.symbol)
+                .expect("must be here");
 
-        compute_bucket.stack.iter().for_each(|inst| {
-            self.handle_inst(inst);
-        });
+            let mut cmp_wires = vec![];
+
+            for _ in 0..template_code.number_of_outputs {
+                // set to true for the moment - we change it as soon
+                // as we provide the input
+                cmp_wires.push(WireInformation::output_wire());
+            }
+            for _ in 0..template_code.number_of_inputs {
+                // set to true for the moment - we change it as soon
+                // as we provide the input
+                cmp_wires.push(WireInformation::input_wire(true));
+            }
+            tracing::debug!("start compilation of {}", create_cmp_bucket.symbol);
+            // create a new graph compiler
+            let sub_cmp_compiler = GraphCompiler::<P>::new(
+                template_code,
+                self.templates,
+                self.compiled_graphs,
+                self.constant_table,
+                cmp_wires,
+                0, //create_cmp_bucket.signal_offset, // offset
+            );
+            let sub_cmp = sub_cmp_compiler.parse()?;
+
+            tracing::debug!("LOOK");
+            tracing::debug!("{sub_cmp:?}");
+            tracing::debug!("ok stop it");
+        }
+        Ok(())
+    }
+
+    // unwraps the value until if finds a constant value - if not possible panics
+    pub(crate) fn get_constant_value(&self, inst: &Instruction) -> usize {
+        tracing::info!("constant value: {}", inst.to_string());
+        match inst {
+            Instruction::Value(value_bucket) => match value_bucket.parse_as {
+                ValueType::U32 => value_bucket.value,
+                ValueType::BigInt => {
+                    let constant = self.constant_table[value_bucket.value];
+                    tracing::trace!("constant: {constant}");
+                    let big_int: BigUint = constant.into_bigint().into();
+                    usize::try_from(big_int).expect("{big_int} not possible to fit into usize")
+                }
+            },
+            Instruction::Load(load_bucket) => {
+                let index = if let LocationRule::Indexed {
+                    location,
+                    template_header: _,
+                } = &load_bucket.src
+                {
+                    // we must have an index here, otherwise something is broken
+                    self.get_constant_value(&location)
+                } else {
+                    todo!("get_constant_load not indexed")
+                };
+                if let AddressType::Variable = &load_bucket.address_type {
+                    let wire_mapping = self
+                        .var_to_wire
+                        .get(to_u64!(index + self.offset_jump))
+                        .expect("must be there");
+                    let producing_node = self.wires[*wire_mapping].produced_by;
+                    let constant = self.nodes[producing_node].get_constant();
+                    let big_int: BigUint = constant.into_bigint().into();
+                    usize::try_from(big_int).expect("{big_int} not possible to fit into usize")
+                } else {
+                    panic!("non variable loading in get constant value");
+                }
+            }
+            x => panic!("cannot get constant of {}", x.to_string()),
+        }
+    }
+
+    fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) -> Result<()> {
+        for inst in compute_bucket.stack.iter() {
+            self.handle_inst(inst)?;
+        }
 
         match compute_bucket.op {
-            OperatorType::Add => todo!(),
+            OperatorType::Add => {
+                tracing::trace!("lowering mul at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "mul is a binary opcode");
+                let peek_wire = self.peek_next_wire();
+                self.add_bin_op_node(types::Op::Add, peek_wire - 2, peek_wire - 1);
+            }
             OperatorType::Sub => todo!(),
             OperatorType::Mul => {
+                tracing::trace!("lowering mul at line: {}", compute_bucket.line);
                 debug_assert_eq!(compute_bucket.stack.len(), 2, "mul is a binary opcode");
                 let peek_wire = self.peek_next_wire();
                 self.add_bin_op_node(types::Op::Mul, peek_wire - 2, peek_wire - 1);
@@ -191,10 +298,7 @@ impl<P: Pairing> CompilationCtx<P> {
                 //self.emit_opcode(MpcOpCode::AddIndex);
             }
         }
-    }
-
-    fn add_node(&mut self, node: Node) {
-        self.nodes.push(node)
+        Ok(())
     }
 
     fn peek_next_wire(&self) -> Wire {
@@ -211,12 +315,23 @@ impl<P: Pairing> CompilationCtx<P> {
         wire
     }
 
-    fn add_load_node(&mut self, input: Wire) {
+    fn add_load_signal_node(&mut self, input: Wire) {
         let next_wire = self.next_wire();
         let is_public = self.wires[input].public;
         let wire_information = WireInformation::new(is_public, self.peek_next_node());
         self.wires.push(wire_information);
         self.nodes.push(Node::load(input, next_wire));
+    }
+
+    fn add_load_var_node(&mut self, input: Wire) {
+        tracing::trace!("wire: {input}");
+        self.print_ast();
+        let wire_mapping = *self.var_to_wire.get(to_u64!(input)).expect("must be there");
+        let next_wire = self.next_wire();
+        let is_public = self.wires[wire_mapping].public;
+        let wire_information = WireInformation::new(is_public, self.peek_next_node());
+        self.wires.push(wire_information);
+        self.nodes.push(Node::load(wire_mapping, next_wire));
     }
 
     fn add_store_node(&mut self, input: Wire, output: Wire) {
@@ -226,7 +341,7 @@ impl<P: Pairing> CompilationCtx<P> {
         self.nodes.push(Node::store(input));
     }
 
-    fn add_bin_op_node(&mut self, op: types::Op, lhs: Wire, rhs: Wire) {
+    fn add_bin_op_node(&mut self, op: types::Op<P::ScalarField>, lhs: Wire, rhs: Wire) {
         let next_wire = self.next_wire();
         let is_public = self.wires[lhs].public && self.wires[rhs].public;
         let wire_information = WireInformation::new(is_public, self.peek_next_node());
@@ -234,9 +349,24 @@ impl<P: Pairing> CompilationCtx<P> {
         self.nodes.push(Node::bin_op(op, lhs, rhs, next_wire))
     }
 
-    fn handle_load_bucket(&mut self, load_bucket: &LoadBucket) {
-        tracing::trace!("lowering load bucket line: {}", load_bucket.line);
-        tracing::trace!("{}", load_bucket.to_string());
+    fn add_constant_node(&mut self, index: usize) {
+        let next_wire = self.next_wire();
+        let constant = self.constant_table[index];
+        let wire_information = WireInformation::new(true, self.peek_next_node());
+        self.wires.push(wire_information);
+        self.nodes.push(Node::constant(constant, next_wire))
+    }
+
+    fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> Result<()> {
+        let index = value_bucket.value;
+        match value_bucket.parse_as {
+            ValueType::BigInt => self.add_constant_node(index),
+            ValueType::U32 => unreachable!("this should never happen!!!! (I guess )"),
+        }
+        Ok(())
+    }
+
+    fn handle_load_bucket(&mut self, load_bucket: &LoadBucket) -> Result<()> {
         // for load we have three cases.
         //     1.) we want to load a signal
         //     2.) we want to load a variable
@@ -246,21 +376,18 @@ impl<P: Pairing> CompilationCtx<P> {
         // because circom compiler was happy
         let context_size = get_size_from_size_option(&load_bucket.context.size);
 
-        let my_offset = *self.offset_stack.last().expect("must be here");
+        let my_offset = self.offset_jump;
         match &load_bucket.src {
             LocationRule::Indexed {
                 location,
                 template_header: _,
             } => {
-                // load the index - must be a value
-                if let Instruction::Value(value_bucket) = location.as_ref() {
-                    assert!(
-                        matches!(value_bucket.parse_as, ValueType::U32),
-                        "must be a u32"
-                    );
-                    self.add_load_node(value_bucket.value + my_offset)
-                } else {
-                    unreachable!("must be value bucket");
+                tracing::trace!("indexed load at line {}", load_bucket.line);
+                let index = self.get_constant_value(&location);
+                match load_bucket.address_type {
+                    AddressType::Variable => self.add_load_var_node(index + my_offset),
+                    AddressType::Signal => self.add_load_signal_node(index + my_offset),
+                    _ => todo!(),
                 };
             }
             LocationRule::Mapped {
@@ -278,6 +405,7 @@ impl<P: Pairing> CompilationCtx<P> {
                 //(true, *signal_code)
             }
         };
+        Ok(())
         //match &load_bucket.address_type {
         //    AddressType::Variable => todo!(),
         //    AddressType::Signal => self
@@ -294,9 +422,10 @@ impl<P: Pairing> CompilationCtx<P> {
         //}
     }
 
-    fn handle_inst(&mut self, inst: &Instruction) {
+    pub(crate) fn handle_inst(&mut self, inst: &Instruction) -> Result<()> {
+        tracing::trace!("{}", inst.to_string());
         match inst {
-            Instruction::Value(_) => todo!(),
+            Instruction::Value(value_bucket) => self.handle_value_bucket(value_bucket),
             Instruction::Load(load_bucket) => self.handle_load_bucket(load_bucket),
             Instruction::Store(store_bucket) => self.handle_store_bucket(store_bucket),
             Instruction::Compute(compute_bucket) => self.handle_compute_bucket(compute_bucket),
@@ -305,144 +434,34 @@ impl<P: Pairing> CompilationCtx<P> {
             Instruction::Return(_) => todo!(),
             Instruction::Assert(_) => todo!(),
             Instruction::Log(_) => todo!(),
-            Instruction::Loop(_) => todo!(),
-            Instruction::CreateCmp(_) => todo!(),
-        }
-    }
-
-    fn get_program_archive(&self) -> eyre::Result<ProgramArchive> {
-        let field = P::ScalarField::MODULUS;
-        let field_dig = circom_compiler::num_bigint::BigInt::from_bytes_be(
-            circom_compiler::num_bigint::Sign::Plus,
-            field.to_bytes_be().as_slice(),
-        );
-        match circom_parser::run_parser(
-            self.file.clone(),
-            &self.config.version,
-            self.config.link_library.clone(),
-            &field_dig,
-        ) {
-            Ok((mut program_archive, warnings)) => {
-                Report::print_reports(&warnings, &program_archive.file_library);
-                match check_types::check_types(&mut program_archive) {
-                    Ok(warnings) => {
-                        Report::print_reports(&warnings, &program_archive.file_library);
-                        Ok(program_archive)
-                    }
-                    Err(errors) => {
-                        Report::print_reports(&errors, &program_archive.file_library);
-                        eyre::bail!("Error during type checking");
-                    }
-                }
-            }
-            Err((file_lib, errors)) => {
-                Report::print_reports(&errors, &file_lib);
-                eyre::bail!("Error during compilation");
+            Instruction::Loop(loop_bucket) => self.handle_loop_bucket(loop_bucket),
+            Instruction::CreateCmp(create_cmp_bucket) => {
+                self.handle_create_cmp_bucket(create_cmp_bucket)
             }
         }
     }
 
-    fn build_circuit(
-        &self,
-        program_archive: ProgramArchive,
-    ) -> eyre::Result<(CircomCircuit, OutputMapping)> {
-        let build_config = BuildConfig {
-            no_rounds: if let SimplificationLevel::O2(r) = self.config.simplification {
-                r
-            } else {
-                0
-            },
-            flag_json_sub: false,
-            json_substitutions: String::new(),
-            flag_s: self.config.simplification == SimplificationLevel::O1,
-            flag_f: self.config.simplification == SimplificationLevel::O0,
-            flag_p: false,
-            flag_verbose: self.config.verbose,
-            flag_old_heuristics: false,
-            inspect_constraints: self.config.inspect,
-            prime: "bn128".to_owned(),
-        };
-        let (_, vcp) = circom_constraint_generation::build_circuit(program_archive, build_config)
-            .map_err(|_| eyre::eyre!("cannot build vcp"))?;
-        let output_mapping = self.get_output_mapping(&vcp);
-
-        let flags = CompilationFlags {
-            main_inputs_log: false,
-            wat_flag: false,
-        };
-        Ok((
-            CircomCircuit::build(vcp, flags, &self.config.version),
-            output_mapping,
-        ))
+    fn parse(mut self) -> Result<CircomAST<P::ScalarField>> {
+        tracing::debug!("parsing {}", self.code.header);
+        let body = std::mem::take(&mut self.code.body);
+        for inst in body.iter() {
+            self.handle_inst(inst)?;
+        }
+        self.print_ast();
+        Ok(CircomAST::from(self))
     }
 
-    fn get_output_mapping(&self, vcp: &VCP) -> OutputMapping {
-        let mut output_mappings = HashMap::new();
-        let initial_node = vcp.get_main_id();
-        let main = &vcp.templates[initial_node];
-        for s in &main.wires {
-            if let CircomWire::TSignal(s) = s {
-                if s.xtype == SignalType::Output {
-                    output_mappings.insert(s.name.clone(), (s.dag_local_id, s.size));
-                }
-            }
-            // TODO: Can buses be outputs?
-        }
-        output_mappings
-    }
-    fn parse(mut self) -> eyre::Result<()> {
-        let program_archive = self.get_program_archive()?;
-        let public_inputs = program_archive.public_inputs.clone();
-        let (circuit, output_mapping) = self.build_circuit(program_archive)?;
-        let constant_table = circuit
-            .c_producer
-            .get_field_constant_list()
-            .iter()
-            .map(|s| s.parse::<P::ScalarField>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| eyre::eyre!("cannot parse string in constant list"))?;
-        let string_table = circuit.c_producer.get_string_table().clone();
-
-        let main_template = circuit
-            .templates
-            .iter()
-            .find(|t| t.header == circuit.c_producer.main_header)
-            .expect("main component must be here");
-
-        let main_inputs = circuit.c_producer.number_of_main_inputs;
-        let main_outputs = circuit.c_producer.number_of_main_outputs;
-        let input_list = circuit
-            .c_producer
-            .main_input_list
-            .into_iter()
-            .map(|x| (x.name, x.start, x.size))
-            .collect::<InputList>();
-
-        self.wires.push(WireInformation::r1cs_wire());
-
-        for _ in 0..main_outputs {
-            self.wires.push(WireInformation::output_wire())
-        }
-
-        for (name, start, size) in input_list.iter() {
-            for i in *start..start + size {
-                self.next_wire = self.next_wire.max(i);
-                self.wires
-                    .push(WireInformation::input_wire(public_inputs.contains(name)));
-            }
-        }
-        self.next_wire += 1;
-
-        self.offset_stack.push(1); //offset for main component
-        for templ in circuit.templates.iter() {
-            tracing::debug!("parsing template: {}", templ.header);
-            templ.body.iter().for_each(|inst| {
-                self.handle_inst(inst);
-            });
-        }
+    pub(crate) fn print_ast(&self) {
         self.print_wires();
         self.print_nodes();
-        Ok(())
+        self.print_var_mapping();
+    }
+
+    fn print_var_mapping(&self) {
+        tracing::debug!("==== var mapping ====");
+        for (k, v) in self.var_to_wire.iter() {
+            tracing::debug!("{k:0>4}: {v:?}")
+        }
     }
 
     fn print_wires(&self) {
@@ -452,66 +471,158 @@ impl<P: Pairing> CompilationCtx<P> {
     }
 
     fn print_nodes(&self) {
-        for n in self.nodes.iter() {
-            tracing::debug!("{n:?}")
+        for (idx, n) in self.nodes.iter().enumerate() {
+            tracing::debug!("{idx:0>4}: {n:?}")
         }
     }
 }
 
-pub(crate) fn build_circom_ir<P: Pairing>(
+fn get_program_archive<F: PrimeField>(
     file: String,
-    config: CompilerConfig,
-) -> eyre::Result<()> {
-    CompilationCtx::<P>::new(file, config).parse()?;
-    //for templ in circuit.templates.iter() {
-    //    tracing::debug!("parsing template: {}", templ.header);
-    //    templ.body.iter().for_each(|inst| {
-    //        handle_inst(inst);
-    //    });
-    //let mut new_code_block = CodeBlock::default();
-    //std::mem::swap(&mut new_code_block, &mut self.current_code_block);
-    //new_code_block.push(MpcOpCode::Return);
-    //tracing::debug!("template has {} opcodes", new_code_block.len());
-    ////check if we need mapping for store bucket
-    //let mappings = if let Some(mappings) = circuit.c_producer.io_map.get(&templ.id) {
-    //    mappings.iter().map(|m| m.offset).collect_vec()
-    //} else {
-    //    vec![]
-    //};
-    //self.templ_decls.insert(
-    //    templ.header.clone(),
-    //    TemplateDecl::new(
-    //        templ.header.clone(),
-    //        templ.name.clone(),
-    //        templ.number_of_inputs,
-    //        templ.number_of_outputs,
-    //        templ.number_of_components,
-    //        templ.var_stack_depth,
-    //        mappings,
-    //        new_code_block,
-    //    ),
-    //);
-    //}
+    config: &CompilerConfig,
+) -> Result<ProgramArchive> {
+    let field = F::MODULUS;
+    let field_dig = circom_compiler::num_bigint::BigInt::from_bytes_be(
+        circom_compiler::num_bigint::Sign::Plus,
+        field.to_bytes_be().as_slice(),
+    );
+    match circom_parser::run_parser(
+        file,
+        &config.version,
+        config.link_library.clone(),
+        &field_dig,
+    ) {
+        Ok((mut program_archive, warnings)) => {
+            Report::print_reports(&warnings, &program_archive.file_library);
+            match check_types::check_types(&mut program_archive) {
+                Ok(warnings) => {
+                    Report::print_reports(&warnings, &program_archive.file_library);
+                    Ok(program_archive)
+                }
+                Err(errors) => {
+                    Report::print_reports(&errors, &program_archive.file_library);
+                    eyre::bail!("Error during type checking");
+                }
+            }
+        }
+        Err((file_lib, errors)) => {
+            Report::print_reports(&errors, &file_lib);
+            eyre::bail!("Error during compilation");
+        }
+    }
+}
+
+fn build_circuit(
+    program_archive: ProgramArchive,
+    config: &CompilerConfig,
+) -> Result<(CircomCircuit, OutputMapping)> {
+    let build_config = BuildConfig {
+        no_rounds: if let SimplificationLevel::O2(r) = config.simplification {
+            r
+        } else {
+            0
+        },
+        flag_json_sub: false,
+        json_substitutions: String::new(),
+        flag_s: config.simplification == SimplificationLevel::O1,
+        flag_f: config.simplification == SimplificationLevel::O0,
+        flag_p: false,
+        flag_verbose: config.verbose,
+        flag_old_heuristics: false,
+        inspect_constraints: config.inspect,
+        prime: "bn128".to_owned(),
+    };
+    let (_, vcp) = circom_constraint_generation::build_circuit(program_archive, build_config)
+        .map_err(|_| eyre::eyre!("cannot build vcp"))?;
+    let output_mapping = get_output_mapping(&vcp);
+
+    let flags = CompilationFlags {
+        main_inputs_log: false,
+        wat_flag: false,
+    };
+    Ok((
+        CircomCircuit::build(vcp, flags, &config.version),
+        output_mapping,
+    ))
+}
+
+fn get_output_mapping(vcp: &VCP) -> OutputMapping {
+    let mut output_mappings = HashMap::new();
+    let initial_node = vcp.get_main_id();
+    let main = &vcp.templates[initial_node];
+    for s in &main.wires {
+        if let CircomWire::TSignal(s) = s {
+            if s.xtype == SignalType::Output {
+                output_mappings.insert(s.name.clone(), (s.dag_local_id, s.size));
+            }
+        }
+        // TODO: Can buses be outputs?
+    }
+    output_mappings
+}
+
+pub(crate) fn build_circom_ir<P: Pairing>(file: String, config: CompilerConfig) -> Result<()> {
+    let program_archive = get_program_archive::<P::ScalarField>(file, &config)?;
+    let public_inputs = program_archive.public_inputs.clone();
+    let (mut circuit, output_mapping) = build_circuit(program_archive, &config)?;
+    let constant_table = circuit
+        .c_producer
+        .get_field_constant_list()
+        .iter()
+        .map(|s| s.parse::<P::ScalarField>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| eyre::eyre!("cannot parse string in constant list"))?;
+    let string_table = circuit.c_producer.get_string_table().clone();
+
+    let mut templates = std::mem::take(&mut circuit.templates)
+        .into_iter()
+        .map(|t| (t.header.clone(), t))
+        .collect::<HashMap<_, _>>();
+
+    let main_template = templates
+        .remove(&circuit.c_producer.main_header)
+        .expect("main component must be here");
+
+    let main_inputs = circuit.c_producer.number_of_main_inputs;
+    let main_outputs = circuit.c_producer.number_of_main_outputs;
+    let input_list = circuit
+        .c_producer
+        .main_input_list
+        .into_iter()
+        .map(|x| (x.name, x.start, x.size))
+        .collect::<InputList>();
+    let mut wires = Vec::with_capacity(1024);
+
+    wires.push(WireInformation::r1cs_wire());
+
+    for _ in 0..main_outputs {
+        wires.push(WireInformation::output_wire())
+    }
+
+    for (name, start, size) in input_list.iter() {
+        for _ in *start..start + size {
+            wires.push(WireInformation::input_wire(public_inputs.contains(name)));
+        }
+    }
+    let mut compiled_graphs = HashMap::new();
+
+    let main_graph = GraphCompiler::<P>::new(
+        main_template,
+        &mut templates,
+        &mut compiled_graphs,
+        &constant_table,
+        wires,
+        1, // offset
+    );
+    let _circom_ast = main_graph.parse()?;
     Ok(())
 }
 
-/*
-#[derive(Default)]
-pub struct TemplateCodeInfo {
-    pub id: TemplateID,
-    pub header: String,
-    pub name: String,
-    pub is_parallel: bool,
-    pub is_parallel_component: bool,
-    pub is_not_parallel_component: bool,
-    pub has_parallel_sub_cmp: bool,
-    pub number_of_inputs: usize,
-    pub number_of_outputs: usize,
-    pub number_of_intermediates: usize, // Not used now
-    pub body: InstructionList,
-    pub var_stack_depth: usize,
-    pub expression_stack_depth: usize,
-    pub signal_stack_depth: usize, // Not used now
-    pub number_of_components: usize,
+impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for CircomAST<P::ScalarField> {
+    fn from(value: GraphCompiler<'a, P>) -> Self {
+        Self {
+            wires: value.wires,
+            nodes: value.nodes,
+        }
+    }
 }
-*/

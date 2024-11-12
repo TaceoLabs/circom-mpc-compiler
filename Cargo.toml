@@ -14,6 +14,7 @@ circom-compiler = { version = "2.1.9", git = "https://github.com/TaceoLabs/circo
 circom-program_structure = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "program_structure", rev = "1cc17fb" }
 eyre = "0.6.12"
 intmap = "2.0.0"
+num-bigint = { version = "0.4.6" }
 serde = { version = "1.0.214", features = ["derive"] }
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
