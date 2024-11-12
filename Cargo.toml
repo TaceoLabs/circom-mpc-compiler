@@ -1,0 +1,19 @@
+[package]
+name = "circom-mpc-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-bn254 = "0.4.0"
+ark-ec = { version = "0.4.2", default-features = false }
+ark-ff = "0.4.2"
+circom-type_analysis = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "type_analysis", rev = "1cc17fb" }
+circom-constraint_generation = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "constraint_generation", rev = "1cc17fb" }
+circom-parser = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "parser", rev = "1cc17fb" }
+circom-compiler = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "compiler", rev = "1cc17fb" }
+circom-program_structure = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "program_structure", rev = "1cc17fb" }
+eyre = "0.6.12"
+intmap = "2.0.0"
+serde = { version = "1.0.214", features = ["derive"] }
+tracing = { version = "0.1.40" }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
