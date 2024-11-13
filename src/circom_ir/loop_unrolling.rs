@@ -8,6 +8,7 @@ use eyre::Result;
 
 use super::translate::GraphCompiler;
 
+#[derive(Debug)]
 enum StepType {
     Add(usize),
     Sub(usize),
@@ -22,6 +23,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         } else {
             panic!("must be top level store bucket for step size");
         };
+        tracing::info!("{}", compute_inst.to_string());
         let compute_bucket = if let Instruction::Compute(compute_bucket) = compute_inst {
             compute_bucket
         } else {
@@ -56,36 +58,52 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
         // get last instruction of loop body - this is step size
         let step_size = if let Some(step_instruction) = loop_bucket.body.last().as_ref() {
-            self.get_step_size(step_instruction);
+            self.get_step_size(step_instruction)
         } else {
             panic!();
         };
 
-        //self.handle_instruction(&loop_bucket.continue_condition);
-        if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
-            debug_assert_eq!(
-                compute_bucket.stack.len(),
-                2,
-                "only allows binary ops in loop conditions"
-            );
-            let lhs = self.get_constant_value(&compute_bucket.stack[0]);
-            let rhs = self.get_constant_value(&compute_bucket.stack[1]);
-            tracing::trace!("lhs {lhs}");
-            tracing::trace!("rhs {rhs}");
-            //self.print_ast();
-            //match compute_bucket.op {
-            //    OperatorType::LesserEq => todo!(),
-            //    OperatorType::GreaterEq => todo!(),
-            //    OperatorType::Lesser => todo!(),
-            //    OperatorType::Greater => todo!(),
-            //    OperatorType::Eq(_) => todo!(),
-            //    OperatorType::NotEq => todo!(),
-            //    x => panic!("got type {} in loop unrolling compute", x.to_string()),
-            //}
-        } else {
-            todo!("condition not a compute for loop unrolling!");
-        }
-        for _ in 0..15 {
+        let round_trips =
+            if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
+                debug_assert_eq!(
+                    compute_bucket.stack.len(),
+                    2,
+                    "only allows binary ops in loop conditions"
+                );
+                let lhs = self.get_constant_value(&compute_bucket.stack[0]);
+                let mut rhs = self.get_constant_value(&compute_bucket.stack[1]);
+                tracing::trace!("lhs {lhs}");
+                tracing::trace!("rhs {rhs}");
+                tracing::trace!("step size {:?}", step_size);
+                match compute_bucket.op {
+                    OperatorType::LesserEq => {
+                        rhs += 1;
+                        let diff = rhs - lhs.min(rhs);
+                        match step_size {
+                            StepType::Add(step) => diff.div_ceil(step),
+                            StepType::Sub(step) => todo!(),
+                            StepType::Mul(step) => todo!(),
+                        }
+                    }
+                    OperatorType::GreaterEq => todo!(),
+                    OperatorType::Lesser => {
+                        let diff = rhs - lhs.min(rhs);
+                        match step_size {
+                            StepType::Add(step) => diff.div_ceil(step),
+                            StepType::Sub(step) => todo!(),
+                            StepType::Mul(step) => todo!(),
+                        }
+                    }
+                    OperatorType::Greater => todo!(),
+                    OperatorType::Eq(_) => todo!(),
+                    OperatorType::NotEq => todo!(),
+                    x => panic!("got type {} in loop unrolling compute", x.to_string()),
+                }
+            } else {
+                todo!("condition not a compute for loop unrolling!");
+            };
+        tracing::info!("round trip: {}", round_trips);
+        for _ in 0..round_trips {
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
                 self.handle_inst(inst)?
             }

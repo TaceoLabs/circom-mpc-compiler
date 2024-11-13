@@ -105,10 +105,11 @@ impl<P: Pairing> CoCircomCompiler<P> {
         Pth: std::fmt::Debug,
     {
         tracing::debug!("compiler starts parsing..");
-        circom_ir::translate::build_circom_ir::<P>(
+        let circom_ir = circom_ir::translate::build_circom_ir::<P>(
             PathBuf::from(file).display().to_string(),
             config,
         )?;
+        //tracing::debug!("AST:\n{:?}", circom_ir);
         tracing::debug!("success!");
         Ok(())
     }

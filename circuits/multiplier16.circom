@@ -31,4 +31,4 @@ template MultiplierN (N){
    out <== comp[N-2].out;
 }
 
-component main = MultiplierN(16);
+component main = MultiplierN(4);
