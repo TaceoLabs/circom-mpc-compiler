@@ -10,6 +10,7 @@ template AddPlus1 (N){
    signal output out3[N+1];
    signal output out4[N+1];
    signal output out5[N+1][N+1][N+1][N+1];
+   signal output out6;
 
    for (var i = 0;i<N;i++) {
       out1[i] <== in[i] + i;
@@ -29,6 +30,10 @@ template AddPlus1 (N){
 
    for (var i = N+1;i<N;i++) {
       i = i + 420;
+   }
+
+   for (var i = 0;i<1;i++) {
+      out6 <== in[i] + 2;
    }
 
    var addition = 69;

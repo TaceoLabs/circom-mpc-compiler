@@ -7,6 +7,7 @@ use circom_compiler::intermediate_representation::ir_interface::{
     AddressType, Instruction, LocationRule, LoopBucket, OperatorType,
 };
 use eyre::Result;
+use serde::de::value;
 
 use super::{
     translate::GraphCompiler,
@@ -50,29 +51,38 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             panic!("must be top level store bucket for step size");
         };
         tracing::info!("{}", compute_inst.to_string());
-        let compute_bucket = if let Instruction::Compute(compute_bucket) = compute_inst {
-            compute_bucket
-        } else {
-            panic!("must be compute for step size");
-        };
-        assert_eq!(compute_bucket.stack.len(), 2, "must be binary op");
-        let lhs = &compute_bucket.stack[0];
-        let rhs = &compute_bucket.stack[1];
-        let step_size = if matches!(lhs.as_ref(), Instruction::Value(_)) {
-            self.get_constant_value(lhs)
-        } else if matches!(rhs.as_ref(), Instruction::Value(_)) {
-            self.get_constant_value(rhs)
-        } else {
-            panic!("non value inst for compute step size")
-        };
-        tracing::trace!("step size is: {step_size}");
-        let step_type = match compute_bucket.op {
-            OperatorType::Add => StepType::Add(step_size),
-            OperatorType::Sub => StepType::Sub(step_size),
-            OperatorType::Mul => StepType::Mul(step_size),
-            x => todo!("not supported for step size {}", x.to_string()),
-        };
-        (var_index, step_type)
+        // we can either have compute bucket or value bucket
+        match compute_inst {
+            Instruction::Compute(compute_bucket) => {
+                assert_eq!(compute_bucket.stack.len(), 2, "must be binary op");
+                let lhs = &compute_bucket.stack[0];
+                let rhs = &compute_bucket.stack[1];
+                let step_size = if matches!(lhs.as_ref(), Instruction::Value(_)) {
+                    self.get_constant_value(lhs)
+                } else if matches!(rhs.as_ref(), Instruction::Value(_)) {
+                    self.get_constant_value(rhs)
+                } else {
+                    panic!("non value inst for compute step size")
+                };
+                tracing::trace!("step size is: {step_size}");
+                let step_type = match compute_bucket.op {
+                    OperatorType::Add => StepType::Add(step_size),
+                    OperatorType::Sub => StepType::Sub(step_size),
+                    OperatorType::Mul => StepType::Mul(step_size),
+                    x => todo!("not supported for step size {}", x.to_string()),
+                };
+                (var_index, step_type)
+            }
+            inst @ Instruction::Value(_) => {
+                // we are a constant round trip
+                tracing::trace!("this is a constant round trip");
+                (var_index, StepType::Add(self.get_constant_value(inst)))
+            }
+            x => panic!(
+                "must be compute or value for step size but is {}",
+                x.to_string()
+            ),
+        }
     }
 
     // we unroll the loop if it is public - if it is shared we panic for the moment
@@ -113,7 +123,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.handle_inst(inst)?;
             }
         }
-
         Ok(())
     }
 
