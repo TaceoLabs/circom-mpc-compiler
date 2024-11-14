@@ -23,7 +23,7 @@ impl<F: PrimeField> Interpreter<F> {
         match info.ty {
             WireType::Input => Some(self.signals[wire + 1]),
             WireType::Output => panic!(),
-            WireType::Intermediate => self.wires.remove(wire as u64),
+            WireType::Intermediate => self.wires.get(wire as u64).copied(),
         }
     }
 
@@ -85,6 +85,16 @@ impl<F: PrimeField> Interpreter<F> {
                     let lhs = self.get_in_wire(lhs_wire).unwrap();
                     let rhs = self.get_in_wire(rhs_wire).unwrap();
                     self.set_out_wire(out_wire, lhs * rhs);
+                }
+                Op::Sub => {
+                    assert_eq!(node.input.len(), 2);
+                    assert_eq!(node.output.len(), 1);
+                    let lhs_wire = *node.input.first().unwrap();
+                    let rhs_wire = *node.input.get(1).unwrap();
+                    let out_wire = *node.output.first().unwrap();
+                    let lhs = self.get_in_wire(lhs_wire).unwrap();
+                    let rhs = self.get_in_wire(rhs_wire).unwrap();
+                    self.set_out_wire(out_wire, lhs - rhs);
                 }
             }
         }

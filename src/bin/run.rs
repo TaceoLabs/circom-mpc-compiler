@@ -25,23 +25,21 @@ fn main() -> eyre::Result<()> {
     config.simplification = SimplificationLevel::O2(usize::MAX);
     let ast =
         CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/loop_unrolling.circom"), config)?;
-    let signals = vec![
-        ark_bn254::Fr::from(1),
-        ark_bn254::Fr::from(0),
-        ark_bn254::Fr::from(0),
-        ark_bn254::Fr::from(0),
-        ark_bn254::Fr::from(0),
-        ark_bn254::Fr::from(2),
-        ark_bn254::Fr::from(3),
-        ark_bn254::Fr::from(4),
-        ark_bn254::Fr::from(5),
-    ];
+    let mut signals = vec![ark_bn254::Fr::from(1)];
+    let n = 6usize;
+    for _ in 0..(n + 1).pow(4) + n + 3 * (n + 1) {
+        signals.push(ark_bn254::Fr::from(0))
+    }
 
-    tracing::info!("signals before = {signals:?}");
+    for i in 0..(n + 1) {
+        signals.push(ark_bn254::Fr::from(i as u64 + 2))
+    }
+
+    // tracing::info!("signals before = {signals:?}");
     let mut interpreter = Interpreter::new(ast, signals);
     let signals = interpreter.run();
 
-    tracing::info!("signals after = {signals:?}");
+    // tracing::info!("signals after = {signals:?}");
 
     Ok(())
 }
