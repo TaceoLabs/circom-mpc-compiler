@@ -38,6 +38,8 @@ pub(crate) struct GraphCompiler<'a, P: Pairing> {
     pub(crate) var_to_wire: IntMap<Wire>,
     sub_graphs: Vec<SubGraph<P::ScalarField>>,
     code: TemplateCode,
+    num_inputs: usize,
+    num_outputs: usize,
     offset: Wire,
     templates: &'a mut HashMap<String, TemplateCode>,
     compiled_graphs: &'a mut HashMap<String, NotInlinedCircomAST<P::ScalarField>>,
@@ -69,6 +71,8 @@ fn get_size_from_size_option(size_option: &SizeOption) -> usize {
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
     fn new(
         code: TemplateCode,
+        num_inputs: usize,
+        num_outputs: usize,
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut HashMap<String, NotInlinedCircomAST<P::ScalarField>>,
         constant_table: &'a [P::ScalarField],
@@ -79,6 +83,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             // TODO maybe merge this
             sub_graphs: Vec::with_capacity(code.number_of_components),
             code,
+            num_inputs,
+            num_outputs,
             wires: input_wires,
             nodes: Vec::with_capacity(1024),
             offset: offset_jump,
@@ -191,14 +197,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             let template_code = self.templates.remove(&symbol).expect("must be here");
 
             let mut cmp_wires = vec![];
-            let output_wires = template_code.number_of_outputs;
-            let input_wires = template_code.number_of_inputs;
-            for _ in 0..output_wires {
+            let num_outputs = template_code.number_of_outputs;
+            let num_inputs = template_code.number_of_inputs;
+            for _ in 0..num_outputs {
                 // set to true for the moment - we change it as soon
                 // as we provide the input
                 cmp_wires.push(WireInformation::output_wire());
             }
-            for _ in 0..input_wires {
+            for _ in 0..num_inputs {
                 // set to true for the moment - we change it as soon
                 // as we provide the input
                 cmp_wires.push(WireInformation::input_wire());
@@ -207,6 +213,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             // create a new graph compiler
             let sub_cmp_compiler = GraphCompiler::<P>::new(
                 template_code,
+                num_inputs,
+                num_outputs,
                 self.templates,
                 self.compiled_graphs,
                 self.constant_table,
@@ -221,7 +229,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             for _ in 0..create_cmp_bucket.number_of_cmp {
                 let sub_graph = SubGraph::new(
                     symbol.clone(),
-                    input_wires + output_wires,
+                    num_inputs + num_outputs,
                     sub_cmp.clone(),
                     offset,
                 );
@@ -699,6 +707,8 @@ pub(crate) fn build_circom_ir<P: Pairing>(
 
     let main_graph = GraphCompiler::<P>::new(
         main_template,
+        main_inputs,
+        main_outputs,
         &mut templates,
         &mut compiled_graphs,
         &constant_table,
@@ -706,7 +716,6 @@ pub(crate) fn build_circom_ir<P: Pairing>(
         0, // offset for r1cs
     );
     let not_inlined_circom_ast = main_graph.parse()?;
-    panic!();
     Ok(CircomAST::from_main_component(not_inlined_circom_ast))
 }
 
@@ -716,6 +725,8 @@ impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for NotInlinedCircomAST<P::Scala
             wires: value.wires,
             nodes: value.nodes,
             sub_graphs: value.sub_graphs,
+            num_inputs: value.num_inputs,
+            num_outputs: value.num_outputs,
         }
     }
 }
@@ -725,6 +736,8 @@ impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for CircomAST<P::ScalarField> {
         Self {
             wires: value.wires,
             nodes: value.nodes,
+            num_inputs: value.num_inputs,
+            num_outputs: value.num_outputs,
         }
     }
 }

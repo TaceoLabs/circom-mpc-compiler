@@ -13,7 +13,7 @@ macro_rules! to_u64 {
     };
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct WireInformation {
     pub(crate) ty: WireType,
     pub(crate) produced_by: NodeId,
@@ -21,9 +21,9 @@ pub(crate) struct WireInformation {
 
 #[derive(Clone)]
 pub(crate) struct Node<F: PrimeField> {
-    op: Op<F>,
-    input: Vec<Wire>,
-    output: Vec<Wire>,
+    pub(crate) op: Op<F>,
+    pub(crate) input: Vec<Wire>,
+    pub(crate) output: Vec<Wire>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,8 +38,8 @@ pub enum Op<F: PrimeField> {
     Mul,
 }
 
-#[derive(Clone, Debug)]
-enum WireType {
+#[derive(Clone, Debug, Copy)]
+pub enum WireType {
     Input,
     Output,
     Intermediate,
@@ -50,6 +50,8 @@ pub(crate) struct NotInlinedCircomAST<F: PrimeField> {
     pub(crate) wires: Vec<WireInformation>,
     pub(crate) nodes: Vec<Node<F>>,
     pub(crate) sub_graphs: Vec<SubGraph<F>>,
+    pub(crate) num_inputs: usize,
+    pub(crate) num_outputs: usize,
 }
 
 pub(crate) struct SubCmpWireIndices {
@@ -72,9 +74,11 @@ pub(crate) struct SubGraph<F: PrimeField> {
 }
 
 #[derive(Clone)]
-pub(crate) struct CircomAST<F: PrimeField> {
+pub struct CircomAST<F: PrimeField> {
     pub(crate) wires: Vec<WireInformation>,
     pub(crate) nodes: Vec<Node<F>>,
+    pub num_inputs: usize,
+    pub num_outputs: usize,
 }
 
 impl<F: PrimeField> SubGraph<F> {
@@ -136,7 +140,7 @@ impl<F: PrimeField> Node<F> {
         Node {
             op: Op::Store(output),
             input: vec![input],
-            output: vec![output],
+            output: vec![],
         }
     }
 
@@ -206,7 +210,12 @@ impl<F: PrimeField> CircomAST<F> {
                 tracing::info!("{:?} now is {}", &nodes[i], test);
             }
         }
-        Self { wires, nodes }
+        Self {
+            wires,
+            nodes,
+            num_inputs: ast.num_inputs,
+            num_outputs: ast.num_outputs,
+        }
     }
 
     fn inline(

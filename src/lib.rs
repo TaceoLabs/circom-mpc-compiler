@@ -8,6 +8,7 @@ use circom_compiler::{
     hir::very_concrete_program::Wire,
 };
 use circom_constraint_generation::BuildConfig;
+use circom_ir::types::CircomAST;
 use circom_program_structure::{
     ast::SignalType, error_definition::Report, program_archive::ProgramArchive,
 };
@@ -15,6 +16,7 @@ use circom_type_analysis::check_types;
 use serde::{Deserialize, Serialize};
 
 mod circom_ir;
+pub mod interpreter;
 
 /// The simplification level applied during constraint generation
 #[derive(
@@ -99,7 +101,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
             phantom_data: PhantomData,
         }
     }
-    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<()>
+    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<CircomAST<P::ScalarField>>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,
@@ -111,7 +113,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
         )?;
         tracing::debug!("AST:\n{:?}", circom_ir);
         tracing::debug!("success!");
-        Ok(())
+        Ok(circom_ir)
     }
 
     fn parse_inner(&mut self) -> eyre::Result<()> {

@@ -7,6 +7,8 @@ edition = "2021"
 ark-bn254 = "0.4.0"
 ark-ec = { version = "0.4.2", default-features = false }
 ark-ff = "0.4.2"
+ark-serialize = { version = "0.4", features = ["derive", "std"] }
+byteorder = "1.5.0"
 circom-type_analysis = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "type_analysis", rev = "1cc17fb" }
 circom-constraint_generation = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "constraint_generation", rev = "1cc17fb" }
 circom-parser = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "parser", rev = "1cc17fb" }
@@ -15,6 +17,9 @@ circom-program_structure = { version = "2.1.9", git = "https://github.com/TaceoL
 eyre = "0.6.12"
 intmap = "2.0.0"
 num-bigint = { version = "0.4.6" }
+rayon = "1.8.1"
 serde = { version = "1.0.214", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0.59"
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

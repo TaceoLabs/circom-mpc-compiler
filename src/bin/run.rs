@@ -1,7 +1,7 @@
-use std::usize;
-
 use ark_bn254::Bn254;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{
+    interpreter::Interpreter, CoCircomCompiler, CompilerConfig, SimplificationLevel,
+};
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
@@ -23,7 +23,25 @@ fn main() -> eyre::Result<()> {
     let root = std::env!("CARGO_MANIFEST_DIR");
     let mut config = CompilerConfig::new();
     config.simplification = SimplificationLevel::O2(usize::MAX);
-    //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier16.circom"), config)
-    //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier2.circom"), config)
-    CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/loop_unrolling.circom"), config)
+    let ast =
+        CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/loop_unrolling.circom"), config)?;
+    let signals = vec![
+        ark_bn254::Fr::from(1),
+        ark_bn254::Fr::from(0),
+        ark_bn254::Fr::from(0),
+        ark_bn254::Fr::from(0),
+        ark_bn254::Fr::from(0),
+        ark_bn254::Fr::from(2),
+        ark_bn254::Fr::from(3),
+        ark_bn254::Fr::from(4),
+        ark_bn254::Fr::from(5),
+    ];
+
+    tracing::info!("signals before = {signals:?}");
+    let mut interpreter = Interpreter::new(ast, signals);
+    let signals = interpreter.run();
+
+    tracing::info!("signals after = {signals:?}");
+
+    Ok(())
 }
