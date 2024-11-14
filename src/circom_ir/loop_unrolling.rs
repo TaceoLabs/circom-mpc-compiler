@@ -91,7 +91,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 panic!();
             };
 
-        let round_trips =
+        let round_trips: Vec<usize> =
             if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
                 debug_assert_eq!(
                     compute_bucket.stack.len(),
@@ -108,25 +108,29 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     OperatorType::LesserEq => {
                         rhs += 1;
                         match step_size {
-                            StepType::Add(step) => (lhs..rhs).step_by(step),
+                            StepType::Add(step) => (lhs..rhs).step_by(step).collect(),
                             StepType::Sub(step) => todo!(),
                             StepType::Mul(step) => todo!(),
                         }
                     }
-                    OperatorType::GreaterEq => todo!(),
-                    OperatorType::Lesser => {
-                        let diff = rhs - lhs.min(rhs);
+                    OperatorType::GreaterEq => match step_size {
+                        StepType::Add(step) => todo!(),
+                        StepType::Sub(step) => (rhs..=lhs).rev().step_by(step).collect(),
+                        StepType::Mul(step) => todo!(),
+                    },
+                    OperatorType::Lesser => match step_size {
+                        StepType::Add(step) => (lhs..rhs).step_by(step).collect(),
+                        StepType::Sub(step) => todo!(),
+                        StepType::Mul(step) => todo!(),
+                    },
+                    OperatorType::Greater => {
+                        rhs += 1;
                         match step_size {
-                            StepType::Add(step) => match step_size {
-                                StepType::Add(step) => (lhs..rhs).step_by(step),
-                                StepType::Sub(step) => todo!(),
-                                StepType::Mul(step) => todo!(),
-                            },
-                            StepType::Sub(step) => todo!(),
+                            StepType::Add(step) => todo!(),
+                            StepType::Sub(step) => (rhs..=lhs).rev().step_by(step).collect(),
                             StepType::Mul(step) => todo!(),
                         }
                     }
-                    OperatorType::Greater => todo!(),
                     OperatorType::Eq(_) => todo!(),
                     OperatorType::NotEq => todo!(),
                     x => panic!("got type {} in loop unrolling compute", x.to_string()),
@@ -134,7 +138,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             } else {
                 todo!("condition not a compute for loop unrolling!");
             };
-        tracing::info!("round trip: {:?}", round_trips.clone().collect::<Vec<_>>());
+        tracing::info!("round trip: {:?}", round_trips);
         for induction_var in round_trips {
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
                 self.add_induction_variable_node(var_index, induction_var);

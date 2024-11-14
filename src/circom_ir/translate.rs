@@ -319,7 +319,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 let peek_wire = self.next_wire();
                 self.add_bin_op_node(types::Op::Add, peek_wire - 2, peek_wire - 1);
             }
-            OperatorType::Sub => todo!(),
+            OperatorType::Sub => {
+                tracing::trace!("lowering mul at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "mul is a binary opcode");
+                let peek_wire = self.next_wire();
+                self.add_bin_op_node(types::Op::Add, peek_wire - 2, peek_wire - 1);
+            }
             OperatorType::Mul => {
                 tracing::trace!("lowering mul at line: {}", compute_bucket.line);
                 debug_assert_eq!(compute_bucket.stack.len(), 2, "mul is a binary opcode");

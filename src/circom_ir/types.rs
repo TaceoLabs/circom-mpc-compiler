@@ -34,6 +34,7 @@ pub enum Op<F: PrimeField> {
     Store(usize),
     Constant(F),
     Add,
+    Sub,
     Mul,
 }
 
