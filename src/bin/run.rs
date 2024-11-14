@@ -23,6 +23,7 @@ fn main() -> eyre::Result<()> {
     let root = std::env!("CARGO_MANIFEST_DIR");
     let mut config = CompilerConfig::new();
     config.simplification = SimplificationLevel::O2(usize::MAX);
-    CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier16.circom"), config)
+    //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier16.circom"), config)
     //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier2.circom"), config)
+    CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/loop_unrolling.circom"), config)
 }

@@ -1,12 +1,23 @@
 use core::panic;
+use std::usize;
 
 use ark_ec::pairing::Pairing;
+use ark_ff::PrimeField;
 use circom_compiler::intermediate_representation::ir_interface::{
-    Instruction, LoopBucket, OperatorType,
+    AddressType, Instruction, LocationRule, LoopBucket, OperatorType,
 };
 use eyre::Result;
 
-use super::translate::GraphCompiler;
+use super::{
+    translate::GraphCompiler,
+    types::{Node, WireInformation},
+};
+
+macro_rules! to_u64 {
+    ($x: expr) => {
+        u64::try_from($x).expect("fits into u64")
+    };
+}
 
 #[derive(Debug)]
 enum StepType {
@@ -16,10 +27,25 @@ enum StepType {
 }
 
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
-    fn get_step_size(&self, inst: &Instruction) -> StepType {
+    fn get_step_size(&self, inst: &Instruction) -> (usize, StepType) {
         // must be a top level store
-        let compute_inst = if let Instruction::Store(store_bucket) = inst {
-            store_bucket.src.as_ref()
+        let (var_index, compute_inst) = if let Instruction::Store(store_bucket) = inst {
+            // we store a var here - we need to get the index and update it after every round
+            // trip for the unrolling
+            if let LocationRule::Indexed {
+                location,
+                template_header: _,
+            } = &store_bucket.dest
+            {
+                assert!(
+                    matches!(store_bucket.dest_address_type, AddressType::Variable),
+                    "must be a variable store for step size"
+                );
+                let index = self.get_constant_value(&location);
+                (index, store_bucket.src.as_ref())
+            } else {
+                panic!("must be an indexed store for induction variable")
+            }
         } else {
             panic!("must be top level store bucket for step size");
         };
@@ -40,12 +66,13 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             panic!("non value inst for compute step size")
         };
         tracing::trace!("step size is: {step_size}");
-        match compute_bucket.op {
+        let step_type = match compute_bucket.op {
             OperatorType::Add => StepType::Add(step_size),
             OperatorType::Sub => StepType::Sub(step_size),
             OperatorType::Mul => StepType::Mul(step_size),
             x => todo!("not supported for step size {}", x.to_string()),
-        }
+        };
+        (var_index, step_type)
     }
 
     // we unroll the loop if it is public - if it is shared we panic for the moment
@@ -57,11 +84,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             tracing::trace!("{}", inst.to_string());
         }
         // get last instruction of loop body - this is step size
-        let step_size = if let Some(step_instruction) = loop_bucket.body.last().as_ref() {
-            self.get_step_size(step_instruction)
-        } else {
-            panic!();
-        };
+        let (var_index, step_size) =
+            if let Some(step_instruction) = loop_bucket.body.last().as_ref() {
+                self.get_step_size(step_instruction)
+            } else {
+                panic!();
+            };
 
         let round_trips =
             if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
@@ -75,12 +103,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 tracing::trace!("lhs {lhs}");
                 tracing::trace!("rhs {rhs}");
                 tracing::trace!("step size {:?}", step_size);
+
                 match compute_bucket.op {
                     OperatorType::LesserEq => {
                         rhs += 1;
-                        let diff = rhs - lhs.min(rhs);
                         match step_size {
-                            StepType::Add(step) => diff.div_ceil(step),
+                            StepType::Add(step) => (lhs..rhs).step_by(step),
                             StepType::Sub(step) => todo!(),
                             StepType::Mul(step) => todo!(),
                         }
@@ -89,7 +117,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     OperatorType::Lesser => {
                         let diff = rhs - lhs.min(rhs);
                         match step_size {
-                            StepType::Add(step) => diff.div_ceil(step),
+                            StepType::Add(step) => match step_size {
+                                StepType::Add(step) => (lhs..rhs).step_by(step),
+                                StepType::Sub(step) => todo!(),
+                                StepType::Mul(step) => todo!(),
+                            },
                             StepType::Sub(step) => todo!(),
                             StepType::Mul(step) => todo!(),
                         }
@@ -102,13 +134,26 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             } else {
                 todo!("condition not a compute for loop unrolling!");
             };
-        tracing::info!("round trip: {}", round_trips);
-        for _ in 0..round_trips {
+        tracing::info!("round trip: {:?}", round_trips.clone().collect::<Vec<_>>());
+        for induction_var in round_trips {
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
-                self.handle_inst(inst)?
+                self.add_induction_variable_node(var_index, induction_var);
+                self.handle_inst(inst)?;
             }
         }
 
         Ok(())
+    }
+
+    pub fn add_induction_variable_node(&mut self, var_index: usize, induction_var: usize) {
+        let induction_var = <P::ScalarField as PrimeField>::BigInt::from(to_u64!(induction_var));
+        let next_wire = self.next_wire();
+        let wire_information = WireInformation::new(self.next_node());
+        self.wires.push(wire_information);
+        self.nodes.push(Node::constant(
+            P::ScalarField::from(induction_var),
+            next_wire,
+        ));
+        self.var_to_wire.insert(to_u64!(var_index), next_wire);
     }
 }

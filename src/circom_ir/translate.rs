@@ -1,3 +1,4 @@
+use core::panic;
 use std::collections::HashMap;
 
 use ark_ec::pairing::Pairing;
@@ -32,15 +33,15 @@ macro_rules! to_u64 {
 }
 
 pub(crate) struct GraphCompiler<'a, P: Pairing> {
-    wires: Vec<WireInformation>,
-    nodes: Vec<types::Node<P::ScalarField>>,
+    pub(crate) wires: Vec<WireInformation>,
+    pub(crate) nodes: Vec<types::Node<P::ScalarField>>,
+    pub(crate) var_to_wire: IntMap<Wire>,
     sub_graphs: Vec<SubGraph<P::ScalarField>>,
     code: TemplateCode,
     offset: Wire,
     templates: &'a mut HashMap<String, TemplateCode>,
     compiled_graphs: &'a mut HashMap<String, NotInlinedCircomAST<P::ScalarField>>,
     constant_table: &'a [P::ScalarField],
-    var_to_wire: IntMap<Wire>,
 }
 
 /// A list of inputs (Name, offset, size).
@@ -123,8 +124,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                         is_output,
                         input_information: _,
                     } => {
+                        tracing::info!("LOOK AT MEEEEEEEEEE");
                         debug_assert!(!is_output);
+                        tracing::info!("{}", cmp_address.to_string());
                         let cmp_index = self.get_constant_value(cmp_address);
+                        tracing::info!("OK STOP IT {cmp_index}");
                         self.add_store_sub_cmp_node(last_wire, cmp_index, index);
                     }
                 }
@@ -188,12 +192,13 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 
             let mut cmp_wires = vec![];
             let output_wires = template_code.number_of_outputs;
+            let input_wires = template_code.number_of_inputs;
             for _ in 0..output_wires {
                 // set to true for the moment - we change it as soon
                 // as we provide the input
                 cmp_wires.push(WireInformation::output_wire());
             }
-            for _ in 0..template_code.number_of_inputs {
+            for _ in 0..input_wires {
                 // set to true for the moment - we change it as soon
                 // as we provide the input
                 cmp_wires.push(WireInformation::input_wire());
@@ -214,7 +219,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             let mut offset = self.offset + create_cmp_bucket.signal_offset;
             let offset_jump = create_cmp_bucket.signal_offset_jump;
             for _ in 0..create_cmp_bucket.number_of_cmp {
-                let sub_graph = SubGraph::new(symbol.clone(), sub_cmp.clone(), offset);
+                let sub_graph = SubGraph::new(
+                    symbol.clone(),
+                    input_wires + output_wires,
+                    sub_cmp.clone(),
+                    offset,
+                );
                 self.sub_graphs.push(sub_graph);
                 offset += offset_jump;
             }
@@ -225,15 +235,16 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 
     // unwraps the value until if finds a constant value - if not possible panics
     pub(crate) fn get_constant_value(&self, inst: &Instruction) -> usize {
-        tracing::info!("constant value: {}", inst.to_string());
         match inst {
             Instruction::Value(value_bucket) => match value_bucket.parse_as {
                 ValueType::U32 => value_bucket.value,
                 ValueType::BigInt => {
                     let constant = self.constant_table[value_bucket.value];
-                    tracing::trace!("constant: {constant}");
                     let big_int: BigUint = constant.into_bigint().into();
-                    usize::try_from(big_int).expect("{big_int} not possible to fit into usize")
+                    let constant =
+                        usize::try_from(big_int).expect("{big_int} not possible to fit into usize");
+                    tracing::trace!("> got constant {constant}");
+                    constant
                 }
             },
             Instruction::Load(load_bucket) => {
@@ -243,7 +254,9 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 } = &load_bucket.src
                 {
                     // we must have an index here, otherwise something is broken
-                    self.get_constant_value(&location)
+                    let index = self.get_constant_value(&location);
+                    tracing::trace!("> got index {index} to load for constant value");
+                    index
                 } else {
                     todo!("get_constant_load not indexed")
                 };
@@ -252,7 +265,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     let producing_node = self.wires[*wire_mapping].produced_by;
                     let constant = self.nodes[producing_node].get_constant();
                     let big_int: BigUint = constant.into_bigint().into();
-                    usize::try_from(big_int).expect("{big_int} not possible to fit into usize")
+                    let constant =
+                        usize::try_from(big_int).expect("{big_int} not possible to fit into usize");
+                    tracing::trace!("> loaded constant {constant}");
+                    constant
                 } else {
                     panic!("non variable loading in get constant value");
                 }
@@ -265,17 +281,21 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                         assert_eq!(compute_bucket.stack.len(), 2, "mul is a bin op");
                         let lhs = self.get_constant_value(&compute_bucket.stack[0]);
                         let rhs = self.get_constant_value(&compute_bucket.stack[1]);
+                        tracing::trace!("> mul address {lhs}*{rhs}={}", lhs * rhs);
                         lhs * rhs
                     }
                     OperatorType::AddAddress => {
                         assert_eq!(compute_bucket.stack.len(), 2, "add is a bin op");
                         let lhs = self.get_constant_value(&compute_bucket.stack[0]);
                         let rhs = self.get_constant_value(&compute_bucket.stack[1]);
+                        tracing::trace!("> add address {lhs}+{rhs}={}", lhs + rhs);
                         lhs + rhs
                     }
                     OperatorType::ToAddress => {
                         assert_eq!(compute_bucket.stack.len(), 1, "to address is a unary op");
-                        self.get_constant_value(&compute_bucket.stack[0])
+                        let constant = self.get_constant_value(&compute_bucket.stack[0]);
+                        tracing::trace!("> to address {constant}");
+                        constant
                     }
                     x => panic!(
                         "compute for constant must be add/mul address but is {}",
@@ -346,11 +366,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         Ok(())
     }
 
-    fn next_node(&self) -> NodeId {
+    pub(crate) fn next_node(&self) -> NodeId {
         self.nodes.len()
     }
 
-    fn next_wire(&mut self) -> Wire {
+    pub(crate) fn next_wire(&mut self) -> Wire {
         self.wires.len()
     }
 
@@ -399,7 +419,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         self.nodes.push(Node::bin_op(op, lhs, rhs, next_wire))
     }
 
-    fn add_constant_node(&mut self, index: usize) {
+    pub fn add_constant_node(&mut self, index: usize) {
         let next_wire = self.next_wire();
         let constant = self.constant_table[index];
         let wire_information = WireInformation::new(self.next_node());
@@ -505,6 +525,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         for inst in body.iter() {
             self.handle_inst(inst)?;
         }
+        self.print_ast();
         Ok(NotInlinedCircomAST::from(self))
     }
 
@@ -680,7 +701,7 @@ pub(crate) fn build_circom_ir<P: Pairing>(
         0, // offset for r1cs
     );
     let not_inlined_circom_ast = main_graph.parse()?;
-    tracing::info!("{not_inlined_circom_ast:?}");
+    panic!();
     Ok(CircomAST::from_main_component(not_inlined_circom_ast))
 }
 

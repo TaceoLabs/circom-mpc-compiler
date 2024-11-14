@@ -109,7 +109,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
             PathBuf::from(file).display().to_string(),
             config,
         )?;
-        //tracing::debug!("AST:\n{:?}", circom_ir);
+        tracing::debug!("AST:\n{:?}", circom_ir);
         tracing::debug!("success!");
         Ok(())
     }
