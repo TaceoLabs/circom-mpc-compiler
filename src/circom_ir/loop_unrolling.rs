@@ -91,7 +91,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 panic!();
             };
 
-        let round_trips: Vec<usize> =
+        let round_trips =
             if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
                 debug_assert_eq!(
                     compute_bucket.stack.len(),
@@ -99,46 +99,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     "only allows binary ops in loop conditions"
                 );
                 let lhs = self.get_constant_value(&compute_bucket.stack[0]);
-                let mut rhs = self.get_constant_value(&compute_bucket.stack[1]);
+                let rhs = self.get_constant_value(&compute_bucket.stack[1]);
                 tracing::trace!("lhs {lhs}");
                 tracing::trace!("rhs {rhs}");
                 tracing::trace!("step size {:?}", step_size);
-
-                match compute_bucket.op {
-                    OperatorType::LesserEq => {
-                        rhs += 1;
-                        match step_size {
-                            StepType::Add(step) => (lhs..rhs).step_by(step).collect(),
-                            StepType::Sub(step) => todo!(),
-                            StepType::Mul(step) => todo!(),
-                        }
-                    }
-                    OperatorType::GreaterEq => match step_size {
-                        StepType::Add(step) => todo!(),
-                        StepType::Sub(step) => (rhs..=lhs).rev().step_by(step).collect(),
-                        StepType::Mul(step) => todo!(),
-                    },
-                    OperatorType::Lesser => match step_size {
-                        StepType::Add(step) => (lhs..rhs).step_by(step).collect(),
-                        StepType::Sub(step) => todo!(),
-                        StepType::Mul(step) => todo!(),
-                    },
-                    OperatorType::Greater => {
-                        rhs += 1;
-                        match step_size {
-                            StepType::Add(step) => todo!(),
-                            StepType::Sub(step) => (rhs..=lhs).rev().step_by(step).collect(),
-                            StepType::Mul(step) => todo!(),
-                        }
-                    }
-                    OperatorType::Eq(_) => todo!(),
-                    OperatorType::NotEq => todo!(),
-                    x => panic!("got type {} in loop unrolling compute", x.to_string()),
-                }
+                get_induction_iter(&compute_bucket.op, lhs, rhs, step_size)
             } else {
                 todo!("condition not a compute for loop unrolling!");
             };
-        tracing::info!("round trip: {:?}", round_trips);
         for induction_var in round_trips {
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
                 self.add_induction_variable_node(var_index, induction_var);
@@ -159,5 +127,44 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             next_wire,
         ));
         self.var_to_wire.insert(to_u64!(var_index), next_wire);
+    }
+}
+
+fn get_induction_iter(
+    op: &OperatorType,
+    lhs: usize,
+    mut rhs: usize,
+    step: StepType,
+) -> Box<dyn Iterator<Item = usize>> {
+    match op {
+        OperatorType::LesserEq => {
+            rhs += 1;
+            match step {
+                StepType::Add(step) => Box::new((lhs..rhs).step_by(step)),
+                StepType::Sub(_) => todo!(),
+                StepType::Mul(_) => todo!(),
+            }
+        }
+        OperatorType::GreaterEq => match step {
+            StepType::Add(_) => todo!(),
+            StepType::Sub(step) => Box::new((rhs..=lhs).rev().step_by(step)),
+            StepType::Mul(_) => todo!(),
+        },
+        OperatorType::Lesser => match step {
+            StepType::Add(step) => Box::new((lhs..rhs).step_by(step)),
+            StepType::Sub(_) => todo!(),
+            StepType::Mul(_) => todo!(),
+        },
+        OperatorType::Greater => {
+            rhs += 1;
+            match step {
+                StepType::Add(_) => todo!(),
+                StepType::Sub(step) => Box::new((rhs..=lhs).rev().step_by(step)),
+                StepType::Mul(_) => todo!(),
+            }
+        }
+        OperatorType::Eq(_) => todo!(),
+        OperatorType::NotEq => todo!(),
+        x => panic!("got type {} in loop unrolling compute", x.to_string()),
     }
 }
