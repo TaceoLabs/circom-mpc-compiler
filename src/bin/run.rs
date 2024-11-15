@@ -23,10 +23,16 @@ fn main() -> eyre::Result<()> {
     let root = std::env!("CARGO_MANIFEST_DIR");
     let mut config = CompilerConfig::new();
     config.simplification = SimplificationLevel::O2(usize::MAX);
-    let ast =
-        CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier3.circom"), config)?;
+    config
+        .link_library
+        .push(format!("{root}/circuits/libs/").into());
+    //let ast =
+    //    CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier3.circom"), config)?;
     //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier2.circom"), config)?;
-    //    let ast = CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/mux1_1.circom"), config)?;
+    let ast = CoCircomCompiler::<Bn254>::parse(
+        format!("{root}/circuits/poseidon_hasher1.circom"),
+        config,
+    )?;
     dbg!(ast);
 
     //let vec = (2..6).map(|i| ark_bn254::Fr::from(i)).collect::<Vec<_>>();

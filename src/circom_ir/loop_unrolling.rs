@@ -50,7 +50,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         } else {
             panic!("must be top level store bucket for step size");
         };
-        tracing::info!("{}", compute_inst.to_string());
         // we can either have compute bucket or value bucket
         match compute_inst {
             Instruction::Compute(compute_bucket) => {

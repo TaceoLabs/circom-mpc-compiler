@@ -185,8 +185,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             create_cmp_bucket.number_of_cmp
         );
         let symbol = create_cmp_bucket.symbol.clone();
-        if self.compiled_graphs.contains_key(&symbol) {
-            todo!()
+        let sub_cmp = if let Some(sub_cmp) = self.compiled_graphs.get(&symbol) {
+            sub_cmp.clone()
         } else {
             // we need to compile the graph
             let template_code = self.templates.remove(&symbol).expect("must be here");
@@ -205,21 +205,22 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             );
             //create_cmp_bucket.signal_offset, // offset
             let sub_cmp = sub_cmp_compiler.parse()?;
+            self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
+            sub_cmp
+        };
 
-            // now add it amount times
-            let mut offset = create_cmp_bucket.signal_offset;
-            let offset_jump = create_cmp_bucket.signal_offset_jump;
-            for _ in 0..create_cmp_bucket.number_of_cmp {
-                let sub_graph = SubGraph::new(
-                    symbol.clone(),
-                    num_inputs + num_outputs,
-                    sub_cmp.clone(),
-                    offset,
-                );
-                self.sub_graphs.push(sub_graph);
-                offset += offset_jump;
-            }
-            self.compiled_graphs.insert(symbol.clone(), sub_cmp);
+        // now add it amount times
+        let mut offset = create_cmp_bucket.signal_offset;
+        let offset_jump = create_cmp_bucket.signal_offset_jump;
+        for _ in 0..create_cmp_bucket.number_of_cmp {
+            let sub_graph = SubGraph::new(
+                symbol.clone(),
+                sub_cmp.num_inputs + sub_cmp.num_outputs,
+                sub_cmp.clone(),
+                offset,
+            );
+            self.sub_graphs.push(sub_graph);
+            offset += offset_jump;
         }
         Ok(())
     }
@@ -300,14 +301,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    fn handle_assert_bucket(&mut self, assert_bucket: &AssertBucket) -> Result<()> {
-        //tracing::info!("{}", assert_bucket.to_string());
-        //panic!();
+    fn handle_assert_bucket(&mut self, _: &AssertBucket) -> Result<()> {
+        // we don't do anything for the assert bucket
         Ok(())
     }
 
     fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) -> Result<()> {
-        tracing::info!("{}", compute_bucket.to_string());
         for inst in compute_bucket.stack.iter() {
             self.handle_inst(inst)?;
         }
@@ -575,7 +574,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         for inst in body.iter() {
             self.handle_inst(inst)?;
         }
-        self.print_ast();
         Ok(NotInlinedCircomAST::from(self))
     }
 
