@@ -79,7 +79,7 @@ impl<F: PrimeField> Interpreter<F> {
                     let out_wire = node.output[0];
                     let lhs = self.wires[lhs_wire];
                     let rhs = self.wires[rhs_wire];
-                    tracing::info!("{lhs}*{rhs} = {}", lhs * rhs);
+                    tracing::trace!("{lhs}*{rhs} = {}", lhs * rhs);
                     self.wires[out_wire] = lhs * rhs;
                 }
                 Op::Sub => {
@@ -92,12 +92,17 @@ impl<F: PrimeField> Interpreter<F> {
                     let rhs = self.wires[rhs_wire];
                     self.wires[out_wire] = lhs - rhs;
                 }
+                Op::Div => todo!(),
+                Op::Pow => todo!(),
+                Op::IntDiv => todo!(),
+                Op::ShiftL => todo!(),
+                Op::ShiftR => todo!(),
+                Op::BitOr => todo!(),
+                Op::BitAnd => todo!(),
+                Op::BitXor => todo!(),
                 Op::Load => {
                     // for the time being
-                    assert_eq!(node.input.len(), 1);
-                    assert_eq!(node.output.len(), 1);
-                    let loaded = self.wires[node.input[0]];
-                    self.wires[node.output[0]] = loaded;
+                    unreachable!("removed");
                 }
             }
         }

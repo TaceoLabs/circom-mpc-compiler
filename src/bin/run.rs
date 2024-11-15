@@ -24,18 +24,18 @@ fn main() -> eyre::Result<()> {
     let mut config = CompilerConfig::new();
     config.simplification = SimplificationLevel::O2(usize::MAX);
     let ast =
-        CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier16.circom"), config)?;
+        CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier3.circom"), config)?;
     //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier2.circom"), config)?;
-    // let ast =
-    //     CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/loop_unrolling.circom"), config)?;
+    //    let ast = CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/mux1_1.circom"), config)?;
+    dbg!(ast);
 
-    let vec = (2..6).map(|i| ark_bn254::Fr::from(i)).collect::<Vec<_>>();
+    //let vec = (2..6).map(|i| ark_bn254::Fr::from(i)).collect::<Vec<_>>();
 
-    let mut interpreter = Interpreter::new(ast, vec);
-    let signals = interpreter.run();
-    for signal in signals {
-        println!("{signal}");
-    }
+    //let mut interpreter = Interpreter::new(ast, vec);
+    //let signals = interpreter.run();
+    //for signal in signals {
+    //    println!("{signal}");
+    //}
 
     Ok(())
 }

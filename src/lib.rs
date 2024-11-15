@@ -1,18 +1,8 @@
-use std::{collections::HashMap, marker::PhantomData, path::PathBuf};
+use std::{marker::PhantomData, path::PathBuf};
 
 use ark_ec::pairing::Pairing;
-use ark_ff::{BigInteger, PrimeField};
 
-use circom_compiler::{
-    compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP},
-    hir::very_concrete_program::Wire,
-};
-use circom_constraint_generation::BuildConfig;
 use circom_ir::types::CircomAST;
-use circom_program_structure::{
-    ast::SignalType, error_definition::Report, program_archive::ProgramArchive,
-};
-use circom_type_analysis::check_types;
 use serde::{Deserialize, Serialize};
 
 mod circom_ir;
@@ -83,9 +73,7 @@ impl CompilerConfig {
 }
 
 pub struct CoCircomCompiler<P: Pairing> {
-    file: PathBuf,
     phantom_data: PhantomData<P>,
-    config: CompilerConfig,
 }
 
 impl<P: Pairing> CoCircomCompiler<P> {
@@ -97,8 +85,6 @@ impl<P: Pairing> CoCircomCompiler<P> {
     {
         tracing::debug!("creating compiler for circuit {file:?} with config: {config:?}");
         Self {
-            file: PathBuf::from(file),
-            config,
             phantom_data: PhantomData,
         }
     }
@@ -118,9 +104,5 @@ impl<P: Pairing> CoCircomCompiler<P> {
         let circom_ir = passes::load_elimination::load_elimination(circom_ir)?;
         let circom_ir = passes::reduce_wire_indices::reduce_wire_indices(circom_ir)?;
         Ok(circom_ir)
-    }
-
-    fn parse_inner(&mut self) -> eyre::Result<()> {
-        Ok(())
     }
 }

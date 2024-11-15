@@ -6,8 +6,8 @@ use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP};
 use circom_compiler::hir::very_concrete_program::Wire as CircomWire;
 use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket, OperatorType, SizeOption,
-    StoreBucket, ValueBucket,
+    AddressType, AssertBucket, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket,
+    OperatorType, SizeOption, StoreBucket, ValueBucket,
 };
 use circom_compiler::intermediate_representation::ir_interface::{LocationRule, ValueType};
 use circom_constraint_generation::BuildConfig;
@@ -300,7 +300,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
+    fn handle_assert_bucket(&mut self, assert_bucket: &AssertBucket) -> Result<()> {
+        //tracing::info!("{}", assert_bucket.to_string());
+        //panic!();
+        Ok(())
+    }
+
     fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) -> Result<()> {
+        tracing::info!("{}", compute_bucket.to_string());
         for inst in compute_bucket.stack.iter() {
             self.handle_inst(inst)?;
         }
@@ -324,12 +331,55 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 let peek_wire = self.peek_wire();
                 self.add_bin_op_node(types::Op::Mul, peek_wire - 2, peek_wire - 1);
             }
-            OperatorType::Div => todo!(),
-            OperatorType::Pow => todo!(),
-            OperatorType::IntDiv => todo!(),
+            OperatorType::Div => {
+                tracing::trace!("lowering div at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::Div, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::Pow => {
+                tracing::trace!("lowering pow at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::Pow, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::IntDiv => {
+                tracing::trace!("lowering int_div at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::IntDiv, peek_wire - 2, peek_wire - 1);
+            }
             OperatorType::Mod => todo!(),
-            OperatorType::ShiftL => todo!(),
-            OperatorType::ShiftR => todo!(),
+            OperatorType::ShiftL => {
+                tracing::trace!("lowering shift_l at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::ShiftL, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::ShiftR => {
+                tracing::trace!("lowering shift_r at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::ShiftR, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::BitOr => {
+                tracing::trace!("lowering bit or at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::BitOr, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::BitAnd => {
+                tracing::trace!("lowering bit and at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::BitAnd, peek_wire - 2, peek_wire - 1);
+            }
+            OperatorType::BitXor => {
+                tracing::trace!("lowering bit xor at line: {}", compute_bucket.line);
+                debug_assert_eq!(compute_bucket.stack.len(), 2, "div is a binary opcode");
+                let peek_wire = self.peek_wire();
+                self.add_bin_op_node(types::Op::BitXor, peek_wire - 2, peek_wire - 1);
+            }
             OperatorType::LesserEq => todo!(),
             OperatorType::GreaterEq => todo!(),
             OperatorType::Lesser => todo!(),
@@ -342,9 +392,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             OperatorType::NotEq => todo!(),
             OperatorType::BoolOr => todo!(),
             OperatorType::BoolAnd => todo!(),
-            OperatorType::BitOr => todo!(),
-            OperatorType::BitAnd => todo!(),
-            OperatorType::BitXor => todo!(),
             OperatorType::PrefixSub => todo!(),
             OperatorType::BoolNot => todo!(),
             OperatorType::Complement => todo!(),
@@ -513,7 +560,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             Instruction::Call(_) => todo!(),
             Instruction::Branch(_) => todo!(),
             Instruction::Return(_) => todo!(),
-            Instruction::Assert(_) => todo!(),
+            Instruction::Assert(assert_bucket) => self.handle_assert_bucket(assert_bucket),
             Instruction::Log(_) => todo!(),
             Instruction::Loop(loop_bucket) => self.handle_loop_bucket(loop_bucket),
             Instruction::CreateCmp(create_cmp_bucket) => {
