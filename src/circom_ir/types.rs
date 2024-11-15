@@ -29,9 +29,10 @@ pub(crate) struct Node<F: PrimeField> {
 #[derive(Debug, Clone)]
 pub enum Op<F: PrimeField> {
     LoadSubCmp(usize, usize),
+    Input(usize),
     Load,
     StoreSubCmp(usize, usize),
-    Store(usize),
+    Output(usize),
     Constant(F),
     Add,
     Sub,
@@ -47,7 +48,6 @@ pub enum WireType {
 
 #[derive(Clone)]
 pub(crate) struct NotInlinedCircomAST<F: PrimeField> {
-    pub(crate) wires: Vec<WireInformation>,
     pub(crate) nodes: Vec<Node<F>>,
     pub(crate) sub_graphs: Vec<SubGraph<F>>,
     pub(crate) num_inputs: usize,
@@ -68,17 +68,19 @@ impl SubCmpWireIndices {
 #[derive(Clone, Debug)]
 pub(crate) struct SubGraph<F: PrimeField> {
     pub(crate) ast: NotInlinedCircomAST<F>,
+    pub(crate) signal_offset: usize,
     symbol: String,
     num_input_outputs: usize,
-    signal_offset: usize,
 }
 
 #[derive(Clone)]
 pub struct CircomAST<F: PrimeField> {
-    pub(crate) wires: Vec<WireInformation>,
     pub(crate) nodes: Vec<Node<F>>,
+    pub signal_to_witness: Vec<usize>,
     pub num_inputs: usize,
     pub num_outputs: usize,
+    pub num_signals: usize,
+    pub amount_wires: usize,
 }
 
 impl<F: PrimeField> SubGraph<F> {
@@ -98,6 +100,11 @@ impl<F: PrimeField> SubGraph<F> {
 }
 
 impl WireInformation {
+    pub(crate) fn inline(mut self, offset: NodeId) -> Self {
+        self.produced_by += offset;
+        self
+    }
+
     pub(crate) fn is_output(&self) -> bool {
         matches!(self.ty, WireType::Output)
     }
@@ -128,6 +135,30 @@ impl WireInformation {
 }
 
 impl<F: PrimeField> Node<F> {
+    pub(crate) fn inline(mut self, signal_offset: usize, wire: Wire) -> Self {
+        if let Op::Output(loc) = &mut self.op {
+            *loc += signal_offset;
+        }
+        #[allow(unused_mut)]
+        for mut input in self.input.iter_mut() {
+            *input += wire;
+        }
+
+        #[allow(unused_mut)]
+        for mut output in self.output.iter_mut() {
+            *output += wire;
+        }
+        self
+    }
+
+    pub(crate) fn input(signal: usize, output: Wire) -> Self {
+        Node {
+            op: Op::Input(signal),
+            input: vec![],
+            output: vec![output],
+        }
+    }
+
     pub(crate) fn load(input: Wire, output: Wire) -> Self {
         Node {
             op: Op::Load,
@@ -138,7 +169,7 @@ impl<F: PrimeField> Node<F> {
 
     pub(crate) fn store(input: Wire, output: Wire) -> Self {
         Node {
-            op: Op::Store(output),
+            op: Op::Output(output),
             input: vec![input],
             output: vec![],
         }
@@ -186,65 +217,106 @@ impl<F: PrimeField> Node<F> {
 }
 
 impl<F: PrimeField> CircomAST<F> {
-    pub(crate) fn from_main_component(mut ast: NotInlinedCircomAST<F>) -> Self {
-        tracing::debug!("{ast:?}");
-        let mut i = 0;
-        // append all nodes and wires
-        let mut wires = std::mem::take(&mut ast.wires);
-        let mut nodes = std::mem::take(&mut ast.nodes);
+    pub(crate) fn test_inline(
+        nodes: &mut Vec<Node<F>>,
+        wire_offset: usize,
+        sub_graph: &SubGraph<F>,
+    ) -> (usize, IntMap<Wire>) {
+        let my_wires = 0; //sub_graph.ast.wires.len() - 1;
+        tracing::debug!(
+            "inlining {} with wire offset {}",
+            sub_graph.symbol,
+            wire_offset
+        );
+        let signal_offset = sub_graph.signal_offset;
+        let mut int_map = IntMap::new();
+        let mut new_wire_counter = 0;
 
-        let mut io_wires_map = Vec::with_capacity(ast.sub_graphs.len());
-        for sub_graph in ast.sub_graphs {
-            let (inlined_wires, inlined_nodes, io_wires) =
-                CircomAST::inline(sub_graph, wires.len());
-            wires.extend(inlined_wires);
-            nodes.extend(inlined_nodes);
-            io_wires_map.push(io_wires);
-        }
-        for i in 0..nodes.len() {
-            // remove load
-            // remove sub_cmp calls
-            // remove dead nodes
-            if let Op::StoreSubCmp(sub_cmp, sub_cmp_wire) = &nodes[i].op {
-                let test = io_wires_map[*sub_cmp][*sub_cmp_wire];
-                tracing::info!("{:?} now is {}", &nodes[i], test);
+        for node in sub_graph.ast.nodes.iter() {
+            match &node.op {
+                Op::Input(input) => {
+                    let mut node = node.clone();
+                    node.op = Op::Output(*input);
+                    let mut node = node.inline(signal_offset, wire_offset);
+                    int_map.insert(
+                        to_u64!(*input),
+                        node.output[0] - sub_graph.num_input_outputs,
+                    );
+                    node.input.push(wire_offset + new_wire_counter);
+                    new_wire_counter += 1;
+                    nodes.push(node);
+                }
+                _ => {
+                    let node = node.clone().inline(signal_offset, wire_offset);
+                    new_wire_counter += 1;
+                    nodes.push(node);
+                }
             }
         }
+        tracing::info!("{int_map:?}");
+        (my_wires, int_map)
+    }
+    pub(crate) fn from_main_component(
+        num_signals: usize,
+        signal_to_witness: Vec<usize>,
+        ast: NotInlinedCircomAST<F>,
+    ) -> Self {
+        tracing::debug!("inlining");
+        // append all nodes and wires (maybe alloc the vec before hand)
+        let mut nodes = Vec::with_capacity(1024);
+        let sub_graphs = &ast.sub_graphs;
+        let mut already_inlined = vec![];
+        let mut amount_wires = ast.num_inputs + ast.num_outputs;
+        let mut outer_offset = 0;
+        let mut sub_cmp_maps = vec![];
+        sub_cmp_maps.resize(ast.sub_graphs.len(), IntMap::new());
+
+        for node in ast.nodes.into_iter() {
+            // remove sub cmp calls
+            match node.op {
+                Op::LoadSubCmp(sub_cmp, index) => {
+                    // we want the output -> inline if not already inlined
+                    if !already_inlined.contains(&sub_cmp) {
+                        already_inlined.push(sub_cmp);
+                        let (inner_offset, map) =
+                            Self::test_inline(&mut nodes, amount_wires, &sub_graphs[sub_cmp]);
+                        outer_offset += inner_offset;
+                        amount_wires += inner_offset;
+                        sub_cmp_maps[sub_cmp] = map;
+                    }
+                }
+                _ => {
+                    amount_wires += node.output.len();
+                    nodes.push(node.inline(0, outer_offset));
+                }
+            }
+        }
+
+        for (idx, n) in nodes.iter().enumerate() {
+            tracing::debug!("{idx:0>4}: {n:?}")
+        }
+        tracing::debug!("==============");
+        for node in nodes.iter_mut() {
+            if let Op::StoreSubCmp(sub_cmp, index) = node.op {
+                let fan_out = sub_cmp_maps[sub_cmp]
+                    .get(index as u64)
+                    .expect("must be here");
+                *node = Node::load(node.input[0], *fan_out);
+            }
+        }
+
+        for (idx, n) in nodes.iter().enumerate() {
+            tracing::debug!("{idx:0>4}: {n:?}")
+        }
+
         Self {
-            wires,
+            num_signals,
+            signal_to_witness,
+            amount_wires,
             nodes,
             num_inputs: ast.num_inputs,
             num_outputs: ast.num_outputs,
         }
-    }
-
-    fn inline(
-        mut sub_graph: SubGraph<F>,
-        wire_offset: usize,
-    ) -> (Vec<WireInformation>, Vec<Node<F>>, Vec<Wire>) {
-        let wires = std::mem::take(&mut sub_graph.ast.wires);
-        let mut nodes = std::mem::take(&mut sub_graph.ast.nodes);
-        let mut io_wires = Vec::with_capacity(sub_graph.num_input_outputs);
-        for i in 0..sub_graph.num_input_outputs {
-            io_wires.push(i + wire_offset);
-        }
-        #[allow(unused_mut)]
-        for mut node in nodes.iter_mut() {
-            if let Op::Store(signal) = &mut node.op {
-                *signal += sub_graph.signal_offset;
-            }
-            #[allow(unused_mut)]
-            for mut input in node.input.iter_mut() {
-                *input += wire_offset;
-            }
-
-            #[allow(unused_mut)]
-            for mut output in node.output.iter_mut() {
-                *output += wire_offset;
-            }
-        }
-
-        (wires, nodes, io_wires)
     }
 }
 
@@ -274,9 +346,6 @@ impl<F: PrimeField> std::fmt::Debug for Node<F> {
 impl<F: PrimeField> std::fmt::Debug for NotInlinedCircomAST<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Circom AST ===")?;
-        for (idx, v) in self.wires.iter().enumerate() {
-            writeln!(f, "{idx:0>4}: {v:?}")?;
-        }
 
         for (idx, n) in self.nodes.iter().enumerate() {
             writeln!(f, "{idx:0>4}: {n:?}")?;
@@ -296,9 +365,6 @@ impl<F: PrimeField> std::fmt::Debug for NotInlinedCircomAST<F> {
 impl<F: PrimeField> std::fmt::Debug for CircomAST<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Circom AST ===")?;
-        for (idx, v) in self.wires.iter().enumerate() {
-            writeln!(f, "{idx:0>4}: {v:?}")?;
-        }
 
         for (idx, n) in self.nodes.iter().enumerate() {
             writeln!(f, "{idx:0>4}: {n:?}")?;

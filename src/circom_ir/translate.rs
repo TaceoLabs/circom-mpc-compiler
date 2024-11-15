@@ -33,14 +33,14 @@ macro_rules! to_u64 {
 }
 
 pub(crate) struct GraphCompiler<'a, P: Pairing> {
-    pub(crate) wires: Vec<WireInformation>,
     pub(crate) nodes: Vec<types::Node<P::ScalarField>>,
     pub(crate) var_to_wire: IntMap<Wire>,
+    pub(crate) wire_to_constant: IntMap<P::ScalarField>,
     sub_graphs: Vec<SubGraph<P::ScalarField>>,
     code: TemplateCode,
     num_inputs: usize,
     num_outputs: usize,
-    offset: Wire,
+    current_wire: Wire,
     templates: &'a mut HashMap<String, TemplateCode>,
     compiled_graphs: &'a mut HashMap<String, NotInlinedCircomAST<P::ScalarField>>,
     constant_table: &'a [P::ScalarField],
@@ -76,8 +76,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut HashMap<String, NotInlinedCircomAST<P::ScalarField>>,
         constant_table: &'a [P::ScalarField],
-        input_wires: Vec<WireInformation>,
-        offset_jump: Wire,
     ) -> Self {
         Self {
             // TODO maybe merge this
@@ -85,13 +83,13 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             code,
             num_inputs,
             num_outputs,
-            wires: input_wires,
+            current_wire: 0,
             nodes: Vec::with_capacity(1024),
-            offset: offset_jump,
             templates,
             compiled_graphs,
             constant_table,
             var_to_wire: IntMap::new(),
+            wire_to_constant: IntMap::new(),
         }
     }
 
@@ -110,7 +108,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         self.handle_inst(&store_bucket.src)?;
         tracing::trace!("THIS WILL BE STORED: {}", store_bucket.src.to_string());
         // TODO later we can store multiple - then we need to link more
-        let last_wire = self.next_wire() - 1;
+        let last_wire = self.peek_wire() - 1;
 
         match &store_bucket.dest {
             LocationRule::Indexed {
@@ -130,11 +128,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                         is_output,
                         input_information: _,
                     } => {
-                        tracing::info!("LOOK AT MEEEEEEEEEE");
                         debug_assert!(!is_output);
-                        tracing::info!("{}", cmp_address.to_string());
                         let cmp_index = self.get_constant_value(cmp_address);
-                        tracing::info!("OK STOP IT {cmp_index}");
                         self.add_store_sub_cmp_node(last_wire, cmp_index, index);
                     }
                 }
@@ -196,19 +191,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             // we need to compile the graph
             let template_code = self.templates.remove(&symbol).expect("must be here");
 
-            let mut cmp_wires = vec![];
             let num_outputs = template_code.number_of_outputs;
             let num_inputs = template_code.number_of_inputs;
-            for _ in 0..num_outputs {
-                // set to true for the moment - we change it as soon
-                // as we provide the input
-                cmp_wires.push(WireInformation::output_wire());
-            }
-            for _ in 0..num_inputs {
-                // set to true for the moment - we change it as soon
-                // as we provide the input
-                cmp_wires.push(WireInformation::input_wire());
-            }
             tracing::debug!("start compilation of {}", symbol);
             // create a new graph compiler
             let sub_cmp_compiler = GraphCompiler::<P>::new(
@@ -218,13 +202,12 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.templates,
                 self.compiled_graphs,
                 self.constant_table,
-                cmp_wires,
-                create_cmp_bucket.signal_offset, // offset
             );
+            //create_cmp_bucket.signal_offset, // offset
             let sub_cmp = sub_cmp_compiler.parse()?;
 
             // now add it amount times
-            let mut offset = self.offset + create_cmp_bucket.signal_offset;
+            let mut offset = create_cmp_bucket.signal_offset;
             let offset_jump = create_cmp_bucket.signal_offset_jump;
             for _ in 0..create_cmp_bucket.number_of_cmp {
                 let sub_graph = SubGraph::new(
@@ -270,8 +253,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 };
                 if let AddressType::Variable = &load_bucket.address_type {
                     let wire_mapping = self.var_to_wire.get(to_u64!(index)).expect("must be there");
-                    let producing_node = self.wires[*wire_mapping].produced_by;
-                    let constant = self.nodes[producing_node].get_constant();
+                    let constant = self
+                        .wire_to_constant
+                        .get(to_u64!(*wire_mapping))
+                        .expect("must be there");
                     let big_int: BigUint = constant.into_bigint().into();
                     let constant =
                         usize::try_from(big_int).expect("{big_int} not possible to fit into usize");
@@ -324,19 +309,19 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             OperatorType::Add => {
                 tracing::trace!("lowering add at line: {}", compute_bucket.line);
                 debug_assert_eq!(compute_bucket.stack.len(), 2, "sub is a binary opcode");
-                let peek_wire = self.next_wire();
+                let peek_wire = self.peek_wire();
                 self.add_bin_op_node(types::Op::Add, peek_wire - 2, peek_wire - 1);
             }
             OperatorType::Sub => {
                 tracing::trace!("lowering sub at line: {}", compute_bucket.line);
                 debug_assert_eq!(compute_bucket.stack.len(), 2, "sub is a binary opcode");
-                let peek_wire = self.next_wire();
+                let peek_wire = self.peek_wire();
                 self.add_bin_op_node(types::Op::Sub, peek_wire - 2, peek_wire - 1);
             }
             OperatorType::Mul => {
                 tracing::trace!("lowering mul at line: {}", compute_bucket.line);
                 debug_assert_eq!(compute_bucket.stack.len(), 2, "mul is a binary opcode");
-                let peek_wire = self.next_wire();
+                let peek_wire = self.peek_wire();
                 self.add_bin_op_node(types::Op::Mul, peek_wire - 2, peek_wire - 1);
             }
             OperatorType::Div => todo!(),
@@ -384,43 +369,40 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     pub(crate) fn next_wire(&mut self) -> Wire {
-        self.wires.len()
+        let next_wire = self.current_wire;
+        self.current_wire += 1;
+        next_wire
     }
 
-    fn add_load_signal_node(&mut self, input: Wire) {
+    pub(crate) fn peek_wire(&mut self) -> Wire {
+        self.current_wire
+    }
+
+    fn add_input_node(&mut self, input: Wire) {
         let next_wire = self.next_wire();
         let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
-        self.nodes.push(Node::load(input, next_wire));
+        self.nodes.push(Node::input(input, next_wire));
     }
 
     fn add_load_var_node(&mut self, input: Wire) {
         let wire_mapping = *self.var_to_wire.get(to_u64!(input)).expect("must be there");
         let next_wire = self.next_wire();
-        let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
         self.nodes.push(Node::load(wire_mapping, next_wire));
     }
 
     fn add_load_sub_cmp_node(&mut self, sub_cmp: usize, sub_cmp_wire: Wire) {
-        let output_wire = &self.sub_graphs[sub_cmp].ast.wires[sub_cmp_wire];
-        assert!(output_wire.is_output(), "must be output to load sub cmp");
         let next_wire = self.next_wire();
         let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
         let input_cmp = Node::output_sub_cmp(sub_cmp, sub_cmp_wire, next_wire);
         self.nodes.push(input_cmp);
     }
 
     fn add_store_node(&mut self, input: Wire, output: Wire) {
         // we produce not a new wire, but update the output wire
-        self.wires[output].produced_by = self.next_node();
         self.nodes.push(Node::store(input, output));
     }
 
     fn add_store_sub_cmp_node(&mut self, input: Wire, sub_cmp: usize, sub_cmp_wire: Wire) {
-        let output_wire = &self.sub_graphs[sub_cmp].ast.wires[sub_cmp_wire];
-        assert!(output_wire.is_input(), "must be input to store to sub cmp");
         let input_cmp = Node::input_sub_cmp(sub_cmp, sub_cmp_wire, input);
         self.nodes.push(input_cmp);
     }
@@ -428,15 +410,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     fn add_bin_op_node(&mut self, op: types::Op<P::ScalarField>, lhs: Wire, rhs: Wire) {
         let next_wire = self.next_wire();
         let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
         self.nodes.push(Node::bin_op(op, lhs, rhs, next_wire))
     }
 
     pub fn add_constant_node(&mut self, index: usize) {
         let next_wire = self.next_wire();
         let constant = self.constant_table[index];
+        self.wire_to_constant.insert(to_u64!(next_wire), constant);
         let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
         self.nodes.push(Node::constant(constant, next_wire))
     }
 
@@ -467,8 +448,15 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 tracing::trace!("indexed load at line {}", load_bucket.line);
                 let index = self.get_constant_value(&location);
                 match &load_bucket.address_type {
-                    AddressType::Variable => self.add_load_var_node(index),
-                    AddressType::Signal => self.add_load_signal_node(index),
+                    AddressType::Variable => {
+                        self.add_load_var_node(index);
+                    }
+                    AddressType::Signal => {
+                        // TODO handle load for output
+                        if index < self.num_inputs + self.num_outputs {
+                            self.add_input_node(index);
+                        }
+                    }
                     AddressType::SubcmpSignal {
                         cmp_address,
                         uniform_parallel_value,
@@ -543,7 +531,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     pub(crate) fn print_ast(&self) {
-        self.print_wires();
         self.print_nodes();
         self.print_var_mapping();
         self.print_sub_graphs();
@@ -559,12 +546,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         tracing::debug!("==== var mapping ====");
         for (k, v) in self.var_to_wire.iter() {
             tracing::debug!("{k:0>4}: {v:?}")
-        }
-    }
-
-    fn print_wires(&self) {
-        for (idx, v) in self.wires.iter().enumerate() {
-            tracing::debug!("{idx:0>4}: {v:?}")
         }
     }
 
@@ -712,30 +693,20 @@ pub(crate) fn build_circom_ir<P: Pairing>(
         &mut templates,
         &mut compiled_graphs,
         &constant_table,
-        wires,
-        0, // offset for r1cs
     );
     let not_inlined_circom_ast = main_graph.parse()?;
-    Ok(CircomAST::from_main_component(not_inlined_circom_ast))
+    Ok(CircomAST::from_main_component(
+        circuit.c_producer.total_number_of_signals,
+        circuit.c_producer.witness_to_signal_list,
+        not_inlined_circom_ast,
+    ))
 }
 
 impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for NotInlinedCircomAST<P::ScalarField> {
     fn from(value: GraphCompiler<'a, P>) -> Self {
         Self {
-            wires: value.wires,
             nodes: value.nodes,
             sub_graphs: value.sub_graphs,
-            num_inputs: value.num_inputs,
-            num_outputs: value.num_outputs,
-        }
-    }
-}
-
-impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for CircomAST<P::ScalarField> {
-    fn from(value: GraphCompiler<'a, P>) -> Self {
-        Self {
-            wires: value.wires,
-            nodes: value.nodes,
             num_inputs: value.num_inputs,
             num_outputs: value.num_outputs,
         }

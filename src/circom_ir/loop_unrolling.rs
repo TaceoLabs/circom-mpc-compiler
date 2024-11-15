@@ -130,12 +130,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         let induction_var = <P::ScalarField as PrimeField>::BigInt::from(to_u64!(induction_var));
         let next_wire = self.next_wire();
         let wire_information = WireInformation::new(self.next_node());
-        self.wires.push(wire_information);
-        self.nodes.push(Node::constant(
-            P::ScalarField::from(induction_var),
-            next_wire,
-        ));
+        let constant = P::ScalarField::from(induction_var);
+        self.nodes.push(Node::constant(constant, next_wire));
         self.var_to_wire.insert(to_u64!(var_index), next_wire);
+        self.wire_to_constant.insert(to_u64!(next_wire), constant);
     }
 }
 

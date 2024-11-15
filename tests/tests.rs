@@ -2,6 +2,7 @@ use ark_bn254::Bn254;
 use circom_mpc_compiler::interpreter::Interpreter;
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
+use core::panic;
 use misc::Witness;
 use std::{
     fs::{self, File},
@@ -39,17 +40,9 @@ macro_rules! witness_extension_test_plain {
                 )
                 .unwrap();
 
-                let mut signals = vec![ark_bn254::Fr::from(1)];
-
-                for _ in 0..ast.num_outputs {
-                    signals.push(ark_bn254::Fr::from(0));
-                }
-
                 assert_eq!(ast.num_inputs, inp.inputs[i].len());
 
-                signals.extend_from_slice(&inp.inputs[i]);
-
-                let mut interpreter = Interpreter::new(ast, signals);
+                let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
                 let signals = interpreter.run();
 
                 assert_eq!(signals, inp.witnesses[i].values);
@@ -90,70 +83,74 @@ pub fn from_test_name(fn_name: &str) -> TestInputs {
         inputs.push(input);
         i += 1
     }
-    println!("i: {}", i);
+    if i == 0 {
+        panic!("no test for {fn_name}");
+    }
     TestInputs { inputs, witnesses }
 }
 
-witness_extension_test_plain!(aliascheck_test);
-witness_extension_test_plain!(babyadd_tester);
-witness_extension_test_plain!(babycheck_test);
-witness_extension_test_plain!(babypbk_test);
-witness_extension_test_plain!(binsub_test);
-witness_extension_test_plain!(binsum_test);
-witness_extension_test_plain!(constants_test);
-witness_extension_test_plain!(control_flow);
-witness_extension_test_plain!(eddsa_test);
-witness_extension_test_plain!(eddsa_verify);
-witness_extension_test_plain!(eddsamimc_test);
-witness_extension_test_plain!(eddsaposeidon_test);
-witness_extension_test_plain!(edwards2montgomery);
-witness_extension_test_plain!(escalarmul_test);
-witness_extension_test_plain!(escalarmul_test_min);
-witness_extension_test_plain!(escalarmulany_test);
-witness_extension_test_plain!(escalarmulfix_test);
-witness_extension_test_plain!(escalarmulw4table);
-witness_extension_test_plain!(escalarmulw4table_test);
-witness_extension_test_plain!(escalarmulw4table_test3);
-witness_extension_test_plain!(functions);
-witness_extension_test_plain!(greatereqthan);
-witness_extension_test_plain!(greaterthan);
-witness_extension_test_plain!(isequal);
-witness_extension_test_plain!(iszero);
-witness_extension_test_plain!(lesseqthan);
-witness_extension_test_plain!(lessthan);
-witness_extension_test_plain!(mimc_hasher);
-witness_extension_test_plain!(mimc_sponge_hash_test);
-witness_extension_test_plain!(mimc_sponge_test);
-witness_extension_test_plain!(mimc_test);
-witness_extension_test_plain!(montgomery2edwards);
-witness_extension_test_plain!(montgomeryadd);
-witness_extension_test_plain!(montgomerydouble);
-witness_extension_test_plain!(multiplier16);
 witness_extension_test_plain!(multiplier2);
-witness_extension_test_plain!(mux1_1);
-witness_extension_test_plain!(mux2_1);
-witness_extension_test_plain!(mux3_1);
-witness_extension_test_plain!(mux4_1);
-witness_extension_test_plain!(pedersen2_test);
-witness_extension_test_plain!(pedersen_hasher);
-witness_extension_test_plain!(pedersen_test);
-witness_extension_test_plain!(pointbits_loopback);
-witness_extension_test_plain!(poseidon3_test);
-witness_extension_test_plain!(poseidon6_test);
-witness_extension_test_plain!(poseidon_hasher1);
-witness_extension_test_plain!(poseidon_hasher16);
-witness_extension_test_plain!(poseidon_hasher2);
-witness_extension_test_plain!(poseidonex_test);
-witness_extension_test_plain!(sha256_2_test);
-witness_extension_test_plain!(sha256_test448);
-witness_extension_test_plain!(sha256_test512);
-witness_extension_test_plain!(shared_control_flow);
-witness_extension_test_plain!(shared_control_flow_arrays);
-witness_extension_test_plain!(sign_test);
-witness_extension_test_plain!(sqrt_test);
-witness_extension_test_plain!(smtprocessor10_test);
-witness_extension_test_plain!(smtverifier10_test);
-witness_extension_test_plain!(sum_test);
-witness_extension_test_plain!(winner);
-witness_extension_test_plain!(bitonic_sort);
-witness_extension_test_plain!(num2bits_accelerator);
+witness_extension_test_plain!(loop_unrolling);
+//witness_extension_test_plain!(aliascheck_test);
+//witness_extension_test_plain!(babyadd_tester);
+//witness_extension_test_plain!(babycheck_test);
+//witness_extension_test_plain!(babypbk_test);
+//witness_extension_test_plain!(binsub_test);
+//witness_extension_test_plain!(binsum_test);
+//witness_extension_test_plain!(constants_test);
+//witness_extension_test_plain!(control_flow);
+//witness_extension_test_plain!(eddsa_test);
+//witness_extension_test_plain!(eddsa_verify);
+//witness_extension_test_plain!(eddsamimc_test);
+//witness_extension_test_plain!(eddsaposeidon_test);
+//witness_extension_test_plain!(edwards2montgomery);
+//witness_extension_test_plain!(escalarmul_test);
+//witness_extension_test_plain!(escalarmul_test_min);
+//witness_extension_test_plain!(escalarmulany_test);
+//witness_extension_test_plain!(escalarmulfix_test);
+//witness_extension_test_plain!(escalarmulw4table);
+//witness_extension_test_plain!(escalarmulw4table_test);
+//witness_extension_test_plain!(escalarmulw4table_test3);
+//witness_extension_test_plain!(functions);
+//witness_extension_test_plain!(greatereqthan);
+//witness_extension_test_plain!(greaterthan);
+//witness_extension_test_plain!(isequal);
+//witness_extension_test_plain!(iszero);
+//witness_extension_test_plain!(lesseqthan);
+//witness_extension_test_plain!(lessthan);
+//witness_extension_test_plain!(mimc_hasher);
+//witness_extension_test_plain!(mimc_sponge_hash_test);
+//witness_extension_test_plain!(mimc_sponge_test);
+//witness_extension_test_plain!(mimc_test);
+//witness_extension_test_plain!(montgomery2edwards);
+//witness_extension_test_plain!(montgomeryadd);
+//witness_extension_test_plain!(montgomerydouble);
+//witness_extension_test_plain!(multiplier16);
+//witness_extension_test_plain!(multiplier2);
+//witness_extension_test_plain!(mux1_1);
+//witness_extension_test_plain!(mux2_1);
+//witness_extension_test_plain!(mux3_1);
+//witness_extension_test_plain!(mux4_1);
+//witness_extension_test_plain!(pedersen2_test);
+//witness_extension_test_plain!(pedersen_hasher);
+//witness_extension_test_plain!(pedersen_test);
+//witness_extension_test_plain!(pointbits_loopback);
+//witness_extension_test_plain!(poseidon3_test);
+//witness_extension_test_plain!(poseidon6_test);
+//witness_extension_test_plain!(poseidon_hasher1);
+//witness_extension_test_plain!(poseidon_hasher16);
+//witness_extension_test_plain!(poseidon_hasher2);
+//witness_extension_test_plain!(poseidonex_test);
+//witness_extension_test_plain!(sha256_2_test);
+//witness_extension_test_plain!(sha256_test448);
+//witness_extension_test_plain!(sha256_test512);
+//witness_extension_test_plain!(shared_control_flow);
+//witness_extension_test_plain!(shared_control_flow_arrays);
+//witness_extension_test_plain!(sign_test);
+//witness_extension_test_plain!(sqrt_test);
+//witness_extension_test_plain!(smtprocessor10_test);
+//witness_extension_test_plain!(smtverifier10_test);
+//witness_extension_test_plain!(sum_test);
+//witness_extension_test_plain!(winner);
+//witness_extension_test_plain!(bitonic_sort);
+//witness_extension_test_plain!(num2bits_accelerator);

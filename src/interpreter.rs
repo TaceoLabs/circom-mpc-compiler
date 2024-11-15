@@ -1,103 +1,103 @@
 use ark_ff::PrimeField;
-use intmap::IntMap;
 
-use crate::circom_ir::types::{CircomAST, Op, Wire, WireType};
+use crate::circom_ir::types::{CircomAST, Op};
 
 pub struct Interpreter<F: PrimeField> {
     ast: CircomAST<F>,
     signals: Vec<F>,
-    wires: IntMap<F>,
+    wires: Vec<F>,
 }
 
 impl<F: PrimeField> Interpreter<F> {
-    pub fn new(ast: CircomAST<F>, signals: Vec<F>) -> Self {
+    pub fn new(ast: CircomAST<F>, input_signals: Vec<F>) -> Self {
+        let mut wires = vec![];
+        let mut signals = vec![];
+        wires.resize(ast.amount_wires, F::zero());
+        signals.resize(ast.num_signals, F::zero());
+        signals[0] = F::one();
+        signals[1 + ast.num_outputs..1 + ast.num_outputs + ast.num_inputs]
+            .clone_from_slice(&input_signals);
         Self {
             ast,
             signals,
-            wires: IntMap::new(),
+            wires,
         }
     }
 
-    fn get_in_wire(&mut self, wire: Wire) -> Option<F> {
-        let info = self.ast.wires[wire];
-        match info.ty {
-            WireType::Input => Some(self.signals[wire + 1]),
-            WireType::Output => panic!(),
-            WireType::Intermediate => self.wires.get(wire as u64).copied(),
+    fn output_mapping(&mut self) -> Vec<F> {
+        let mut witness = Vec::with_capacity(self.ast.signal_to_witness.len());
+        for idx in self.ast.signal_to_witness.iter() {
+            witness.push(self.signals[*idx]);
         }
-    }
-
-    fn set_out_wire(&mut self, wire: Wire, value: F) {
-        let info = self.ast.wires[wire];
-        match info.ty {
-            WireType::Input => panic!(),
-            WireType::Output => self.signals[wire + 1] = value,
-            WireType::Intermediate => {
-                assert!(self.wires.insert(wire as u64, value).is_none());
-            }
-        }
+        witness
     }
 
     pub fn run(&mut self) -> Vec<F> {
-        // TODO we dont need to clone
-        for node in self.ast.nodes.clone() {
+        println!("{:?}", self.ast);
+        for node in self.ast.nodes.iter() {
             tracing::info!("node = {node:?}");
             match node.op {
-                Op::LoadSubCmp(_, _) => todo!(),
-                Op::Load => {
-                    assert_eq!(node.input.len(), 1);
+                Op::LoadSubCmp(_, _) => unreachable!("is removed"),
+                Op::StoreSubCmp(_, _) => unreachable!("is removed"),
+                Op::Input(input) => {
+                    assert!(node.input.is_empty());
                     assert_eq!(node.output.len(), 1);
-                    let in_wire = *node.input.first().unwrap();
-                    let out_wire = *node.output.first().unwrap();
-                    let value = self.get_in_wire(in_wire).unwrap();
-                    self.set_out_wire(out_wire, value);
+                    let value = self.signals[input + 1];
+                    let out_wire = node.output[0];
+                    self.wires[out_wire] = value;
                 }
-                Op::StoreSubCmp(_, _) => todo!(),
-                Op::Store(idx) => {
+                Op::Output(idx) => {
                     assert_eq!(node.input.len(), 1);
                     assert!(node.output.is_empty());
-                    let in_wire = *node.input.first().unwrap();
-                    let value = self.get_in_wire(in_wire).unwrap();
+                    let in_wire = node.input[0];
+                    let value = self.wires[in_wire];
                     self.signals[idx + 1] = value;
                 }
                 Op::Constant(c) => {
                     assert!(node.input.is_empty());
                     assert_eq!(node.output.len(), 1);
                     let out_wire = *node.output.first().unwrap();
-                    self.set_out_wire(out_wire, c);
+                    self.wires[out_wire] = c;
                 }
                 Op::Add => {
                     assert_eq!(node.input.len(), 2);
                     assert_eq!(node.output.len(), 1);
-                    let lhs_wire = *node.input.first().unwrap();
-                    let rhs_wire = *node.input.get(1).unwrap();
-                    let out_wire = *node.output.first().unwrap();
-                    let lhs = self.get_in_wire(lhs_wire).unwrap();
-                    let rhs = self.get_in_wire(rhs_wire).unwrap();
-                    self.set_out_wire(out_wire, lhs + rhs);
+                    let lhs_wire = node.input[0];
+                    let rhs_wire = node.input[1];
+                    let out_wire = node.output[0];
+                    let lhs = self.wires[lhs_wire];
+                    let rhs = self.wires[rhs_wire];
+                    self.wires[out_wire] = lhs + rhs;
                 }
                 Op::Mul => {
                     assert_eq!(node.input.len(), 2);
                     assert_eq!(node.output.len(), 1);
-                    let lhs_wire = *node.input.first().unwrap();
-                    let rhs_wire = *node.input.get(1).unwrap();
-                    let out_wire = *node.output.first().unwrap();
-                    let lhs = self.get_in_wire(lhs_wire).unwrap();
-                    let rhs = self.get_in_wire(rhs_wire).unwrap();
-                    self.set_out_wire(out_wire, lhs * rhs);
+                    let lhs_wire = node.input[0];
+                    let rhs_wire = node.input[1];
+                    let out_wire = node.output[0];
+                    let lhs = self.wires[lhs_wire];
+                    let rhs = self.wires[rhs_wire];
+                    self.wires[out_wire] = lhs * rhs;
                 }
                 Op::Sub => {
                     assert_eq!(node.input.len(), 2);
                     assert_eq!(node.output.len(), 1);
-                    let lhs_wire = *node.input.first().unwrap();
-                    let rhs_wire = *node.input.get(1).unwrap();
-                    let out_wire = *node.output.first().unwrap();
-                    let lhs = self.get_in_wire(lhs_wire).unwrap();
-                    let rhs = self.get_in_wire(rhs_wire).unwrap();
-                    self.set_out_wire(out_wire, lhs - rhs);
+                    let lhs_wire = node.input[0];
+                    let rhs_wire = node.input[1];
+                    let out_wire = node.output[0];
+                    let lhs = self.wires[lhs_wire];
+                    let rhs = self.wires[rhs_wire];
+                    self.wires[out_wire] = lhs - rhs;
+                }
+                Op::Load => {
+                    // for the time being
+                    assert_eq!(node.input.len(), 1);
+                    assert_eq!(node.output.len(), 1);
+                    let loaded = self.wires[node.input[0]];
+                    self.wires[node.output[0]] = loaded;
                 }
             }
         }
-        self.signals.clone()
+        self.output_mapping()
     }
 }
