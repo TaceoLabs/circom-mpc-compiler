@@ -33,7 +33,7 @@ impl<F: PrimeField> Interpreter<F> {
     }
 
     pub fn run(&mut self) -> Vec<F> {
-        println!("{:?}", self.ast);
+        // println!("{:?}", self.ast);
         for node in self.ast.nodes.iter() {
             tracing::info!("node = {node:?}");
             match node.op {

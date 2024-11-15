@@ -26,7 +26,7 @@ pub(crate) struct Node<F: PrimeField> {
     pub(crate) output: Vec<Wire>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op<F: PrimeField> {
     LoadSubCmp(usize, usize),
     Input(usize),

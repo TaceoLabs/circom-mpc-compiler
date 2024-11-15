@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 mod circom_ir;
 pub mod interpreter;
+mod passes;
 
 /// The simplification level applied during constraint generation
 #[derive(
@@ -113,6 +114,8 @@ impl<P: Pairing> CoCircomCompiler<P> {
         )?;
         tracing::debug!("AST:\n{:?}", circom_ir);
         tracing::debug!("success!");
+        let circom_ir = passes::dead_code::dead_code_elimination(circom_ir)?;
+        let circom_ir = passes::load_elimination::load_elimination(circom_ir)?;
         Ok(circom_ir)
     }
 

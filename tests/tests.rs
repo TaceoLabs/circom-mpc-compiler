@@ -91,6 +91,7 @@ pub fn from_test_name(fn_name: &str) -> TestInputs {
 
 witness_extension_test_plain!(multiplier2);
 witness_extension_test_plain!(loop_unrolling);
+witness_extension_test_plain!(dead_code);
 //witness_extension_test_plain!(aliascheck_test);
 //witness_extension_test_plain!(babyadd_tester);
 //witness_extension_test_plain!(babycheck_test);
