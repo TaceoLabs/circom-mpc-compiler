@@ -30,7 +30,7 @@ pub(crate) fn dead_code_elimination<F: PrimeField>(
     for (i, node) in nodes.iter().rev().enumerate() {
         // correct node index
         let i = nodes.len() - i - 1;
-        // keep output nodes and mark their inputs and outputs as keep
+        // keep output nodes and mark their inputs as keep
         if let Op::Output(_) = node.op {
             keep_nodes[i] = true;
             keep_wires[*node.input.first().unwrap()] = true;

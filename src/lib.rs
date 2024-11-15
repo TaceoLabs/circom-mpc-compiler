@@ -116,6 +116,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
         tracing::debug!("success!");
         let circom_ir = passes::dead_code::dead_code_elimination(circom_ir)?;
         let circom_ir = passes::load_elimination::load_elimination(circom_ir)?;
+        let circom_ir = passes::reduce_wire_indices::reduce_wire_indices(circom_ir)?;
         Ok(circom_ir)
     }
 
