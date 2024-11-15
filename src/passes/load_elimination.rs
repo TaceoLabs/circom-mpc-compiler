@@ -22,10 +22,14 @@ pub(crate) fn load_elimination<F: PrimeField>(ast: CircomAST<F>) -> eyre::Result
         // keep store nodes and mark their inputs and outputs as keep
         if let Op::Load = node.op {
             keep_nodes[i] = false;
-            rewire.insert(
-                *node.output.first().unwrap() as u64,
-                *node.input.first().unwrap(),
-            );
+            if let Some(entry) = rewire.remove(*node.input.first().unwrap() as u64) {
+                rewire.insert(*node.output.first().unwrap() as u64, entry);
+            } else {
+                rewire.insert(
+                    *node.output.first().unwrap() as u64,
+                    *node.input.first().unwrap(),
+                );
+            }
         } else {
             for in_wire in node.input.iter_mut() {
                 if let Some(new_in_wire) = rewire.get(*in_wire as u64) {

@@ -48,10 +48,12 @@ impl<F: PrimeField> Interpreter<F> {
                 }
                 Op::Output(idx) => {
                     assert_eq!(node.input.len(), 1);
-                    assert!(node.output.is_empty());
+                    assert_eq!(node.output.len(), 1);
                     let in_wire = node.input[0];
+                    let out_wire = node.output[0];
                     let value = self.wires[in_wire];
                     self.signals[idx + 1] = value;
+                    self.wires[out_wire] = value;
                 }
                 Op::Constant(c) => {
                     assert!(node.input.is_empty());
@@ -77,6 +79,7 @@ impl<F: PrimeField> Interpreter<F> {
                     let out_wire = node.output[0];
                     let lhs = self.wires[lhs_wire];
                     let rhs = self.wires[rhs_wire];
+                    tracing::info!("{lhs}*{rhs} = {}", lhs * rhs);
                     self.wires[out_wire] = lhs * rhs;
                 }
                 Op::Sub => {

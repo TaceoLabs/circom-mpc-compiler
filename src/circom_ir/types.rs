@@ -52,6 +52,7 @@ pub(crate) struct NotInlinedCircomAST<F: PrimeField> {
     pub(crate) sub_graphs: Vec<SubGraph<F>>,
     pub(crate) num_inputs: usize,
     pub(crate) num_outputs: usize,
+    pub(crate) num_wires: usize,
 }
 
 pub(crate) struct SubCmpWireIndices {
@@ -167,11 +168,11 @@ impl<F: PrimeField> Node<F> {
         }
     }
 
-    pub(crate) fn store(input: Wire, output: Wire) -> Self {
+    pub(crate) fn store(signal: usize, input: Wire, output: Wire) -> Self {
         Node {
-            op: Op::Output(output),
+            op: Op::Output(signal),
             input: vec![input],
-            output: vec![],
+            output: vec![output],
         }
     }
 
@@ -207,11 +208,16 @@ impl<F: PrimeField> Node<F> {
         }
     }
 
-    pub(crate) fn input_sub_cmp(sub_cmp: usize, sub_cmp_wire: Wire, input: Wire) -> Node<F> {
+    pub(crate) fn input_sub_cmp(
+        sub_cmp: usize,
+        sub_cmp_wire: Wire,
+        input: Wire,
+        output: Wire,
+    ) -> Node<F> {
         Node {
             op: Op::StoreSubCmp(sub_cmp, sub_cmp_wire),
             input: vec![input],
-            output: vec![],
+            output: vec![output],
         }
     }
 }
@@ -221,8 +227,9 @@ impl<F: PrimeField> CircomAST<F> {
         nodes: &mut Vec<Node<F>>,
         wire_offset: usize,
         sub_graph: &SubGraph<F>,
+        input_mapping: &IntMap<Wire>,
     ) -> (usize, IntMap<Wire>) {
-        let my_wires = 0; //sub_graph.ast.wires.len() - 1;
+        let my_wires = sub_graph.ast.num_wires;
         tracing::debug!(
             "inlining {} with wire offset {}",
             sub_graph.symbol,
@@ -230,7 +237,6 @@ impl<F: PrimeField> CircomAST<F> {
         );
         let signal_offset = sub_graph.signal_offset;
         let mut int_map = IntMap::new();
-        let mut new_wire_counter = 0;
 
         for node in sub_graph.ast.nodes.iter() {
             match &node.op {
@@ -242,13 +248,17 @@ impl<F: PrimeField> CircomAST<F> {
                         to_u64!(*input),
                         node.output[0] - sub_graph.num_input_outputs,
                     );
-                    node.input.push(wire_offset + new_wire_counter);
-                    new_wire_counter += 1;
+                    node.input
+                        .push(*input_mapping.get(to_u64!(*input)).expect("must be there"));
+                    nodes.push(node);
+                }
+                Op::Output(output) => {
+                    let node = node.clone().inline(signal_offset, wire_offset);
+                    int_map.insert(to_u64!(*output), node.output[0]);
                     nodes.push(node);
                 }
                 _ => {
                     let node = node.clone().inline(signal_offset, wire_offset);
-                    new_wire_counter += 1;
                     nodes.push(node);
                 }
             }
@@ -266,10 +276,12 @@ impl<F: PrimeField> CircomAST<F> {
         let mut nodes = Vec::with_capacity(1024);
         let sub_graphs = &ast.sub_graphs;
         let mut already_inlined = vec![];
-        let mut amount_wires = ast.num_inputs + ast.num_outputs;
+        let mut amount_wires = 0;
         let mut outer_offset = 0;
-        let mut sub_cmp_maps = vec![];
-        sub_cmp_maps.resize(ast.sub_graphs.len(), IntMap::new());
+        let mut sub_cmp_outputs = vec![];
+        let mut sub_cmp_inputs = vec![];
+        sub_cmp_outputs.resize(ast.sub_graphs.len(), IntMap::new());
+        sub_cmp_inputs.resize(ast.sub_graphs.len(), IntMap::new());
 
         for node in ast.nodes.into_iter() {
             // remove sub cmp calls
@@ -278,12 +290,34 @@ impl<F: PrimeField> CircomAST<F> {
                     // we want the output -> inline if not already inlined
                     if !already_inlined.contains(&sub_cmp) {
                         already_inlined.push(sub_cmp);
-                        let (inner_offset, map) =
-                            Self::test_inline(&mut nodes, amount_wires, &sub_graphs[sub_cmp]);
+
+                        let (inner_offset, map) = Self::test_inline(
+                            &mut nodes,
+                            amount_wires,
+                            &sub_graphs[sub_cmp],
+                            &sub_cmp_inputs[sub_cmp],
+                        );
                         outer_offset += inner_offset;
                         amount_wires += inner_offset;
-                        sub_cmp_maps[sub_cmp] = map;
+                        sub_cmp_outputs[sub_cmp] = map;
                     }
+
+                    amount_wires += node.output.len();
+                    let mut node = node.inline(0, outer_offset);
+                    node.op = Op::Load;
+                    assert!(node.input.is_empty());
+                    node.input.push(
+                        *sub_cmp_outputs[sub_cmp]
+                            .get(to_u64!(index))
+                            .expect("is here"),
+                    );
+                    nodes.push(node);
+                }
+                Op::StoreSubCmp(sub_cmp, index) => {
+                    let mappings = &mut sub_cmp_inputs[sub_cmp];
+                    mappings.insert(to_u64!(index), node.output[0] + outer_offset);
+                    amount_wires += node.output.len();
+                    nodes.push(node.inline(0, outer_offset));
                 }
                 _ => {
                     amount_wires += node.output.len();
@@ -297,11 +331,8 @@ impl<F: PrimeField> CircomAST<F> {
         }
         tracing::debug!("==============");
         for node in nodes.iter_mut() {
-            if let Op::StoreSubCmp(sub_cmp, index) = node.op {
-                let fan_out = sub_cmp_maps[sub_cmp]
-                    .get(index as u64)
-                    .expect("must be here");
-                *node = Node::load(node.input[0], *fan_out);
+            if let Op::StoreSubCmp(_, _) = node.op {
+                node.op = Op::Load;
             }
         }
 

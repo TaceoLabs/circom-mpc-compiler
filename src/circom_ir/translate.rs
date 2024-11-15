@@ -121,7 +121,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     AddressType::Variable => {
                         self.var_to_wire.insert(to_u64!(index), last_wire);
                     }
-                    AddressType::Signal => self.add_store_node(last_wire, index),
+                    AddressType::Signal => self.add_output_node(index, last_wire),
                     AddressType::SubcmpSignal {
                         cmp_address,
                         uniform_parallel_value: _,
@@ -397,13 +397,15 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         self.nodes.push(input_cmp);
     }
 
-    fn add_store_node(&mut self, input: Wire, output: Wire) {
-        // we produce not a new wire, but update the output wire
-        self.nodes.push(Node::store(input, output));
+    fn add_output_node(&mut self, signal: Wire, input: Wire) {
+        // top level outputs will have a dangling wire - we will remove it later anyways
+        let next_wire = self.next_wire();
+        self.nodes.push(Node::store(signal, input, next_wire));
     }
 
     fn add_store_sub_cmp_node(&mut self, input: Wire, sub_cmp: usize, sub_cmp_wire: Wire) {
-        let input_cmp = Node::input_sub_cmp(sub_cmp, sub_cmp_wire, input);
+        let next_wire = self.next_wire(); // reserve one for the later input node
+        let input_cmp = Node::input_sub_cmp(sub_cmp, sub_cmp_wire, input, next_wire);
         self.nodes.push(input_cmp);
     }
 
@@ -706,6 +708,7 @@ impl<'a, P: Pairing> From<GraphCompiler<'a, P>> for NotInlinedCircomAST<P::Scala
     fn from(value: GraphCompiler<'a, P>) -> Self {
         Self {
             nodes: value.nodes,
+            num_wires: value.current_wire,
             sub_graphs: value.sub_graphs,
             num_inputs: value.num_inputs,
             num_outputs: value.num_outputs,
