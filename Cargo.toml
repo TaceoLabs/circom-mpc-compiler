@@ -17,9 +17,15 @@ circom-program_structure = { version = "2.1.9", git = "https://github.com/TaceoL
 eyre = "0.6.12"
 intmap = "2.0.0"
 num-bigint = { version = "0.4.6" }
+num-traits = { version = "0.2.18", default-features = false }
+mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cbc5905" }
+co-circom-snarks = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cbc5905" }
 rayon = "1.8.1"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0.59"
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+bytes = "1.8.0"
+rand = "0.8.5"
+itertools = "0.13.0"

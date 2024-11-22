@@ -43,9 +43,9 @@ macro_rules! witness_extension_test_plain {
                 assert_eq!(ast.num_inputs, inp.inputs[i].len());
 
                 let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
-                let signals = interpreter.run();
+                let witness = interpreter.run();
 
-                assert_eq!(signals, inp.witnesses[i].values);
+                assert_eq!(witness, inp.witnesses[i].values);
             }
         }
     };
@@ -94,6 +94,7 @@ witness_extension_test_plain!(multiplier3);
 witness_extension_test_plain!(multiplier16);
 witness_extension_test_plain!(loop_unrolling);
 witness_extension_test_plain!(dead_code);
+witness_extension_test_plain!(multiplier2_public);
 //witness_extension_test_plain!(aliascheck_test);
 //witness_extension_test_plain!(babyadd_tester);
 //witness_extension_test_plain!(babycheck_test);

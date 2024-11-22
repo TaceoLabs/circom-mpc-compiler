@@ -11,6 +11,8 @@ pub(crate) fn load_elimination<F: PrimeField>(ast: CircomAST<F>) -> eyre::Result
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     } = ast;
 
     let mut keep_nodes = vec![true; nodes.len()];
@@ -54,5 +56,7 @@ pub(crate) fn load_elimination<F: PrimeField>(ast: CircomAST<F>) -> eyre::Result
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     })
 }

@@ -11,6 +11,8 @@ pub(crate) fn reduce_wire_indices<F: PrimeField>(ast: CircomAST<F>) -> eyre::Res
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     } = ast;
 
     println!("amount wires = {amount_wires}");
@@ -38,5 +40,7 @@ pub(crate) fn reduce_wire_indices<F: PrimeField>(ast: CircomAST<F>) -> eyre::Res
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     })
 }

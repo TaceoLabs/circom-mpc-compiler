@@ -4,6 +4,8 @@ use std::usize;
 use ark_ff::PrimeField;
 use intmap::IntMap;
 
+use super::translate::InputList;
+
 pub(crate) type Wire = usize;
 pub(crate) type NodeId = usize;
 
@@ -90,6 +92,8 @@ pub struct CircomAST<F: PrimeField> {
     pub num_outputs: usize,
     pub num_signals: usize,
     pub amount_wires: usize,
+    pub input_list: InputList,
+    pub public_inputs: Vec<String>,
 }
 
 impl<F: PrimeField> SubGraph<F> {
@@ -332,6 +336,8 @@ impl<F: PrimeField> CircomAST<F> {
     pub(crate) fn from_main_component(
         num_signals: usize,
         signal_to_witness: Vec<usize>,
+        input_list: InputList,
+        public_inputs: Vec<String>,
         ast: NotInlinedCircomAST<F>,
     ) -> Self {
         // TODO get the amount of nodes we have so that we can allocate this here
@@ -360,6 +366,8 @@ impl<F: PrimeField> CircomAST<F> {
             nodes,
             num_inputs,
             num_outputs,
+            input_list,
+            public_inputs,
         }
     }
 }

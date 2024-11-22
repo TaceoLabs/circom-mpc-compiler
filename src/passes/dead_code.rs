@@ -12,6 +12,8 @@ pub(crate) fn dead_code_elimination<F: PrimeField>(
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     } = ast;
 
     // remove trailing nodes that are not stores
@@ -69,5 +71,7 @@ pub(crate) fn dead_code_elimination<F: PrimeField>(
         num_outputs,
         num_signals,
         amount_wires,
+        input_list,
+        public_inputs,
     })
 }

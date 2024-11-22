@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 mod circom_ir;
 pub mod interpreter;
-mod passes;
+pub mod mpc;
+pub mod mpc_interpreter;
+pub mod mpc_ir;
+pub mod passes;
 
 /// The simplification level applied during constraint generation
 #[derive(
@@ -88,6 +91,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
             phantom_data: PhantomData,
         }
     }
+
     pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<CircomAST<P::ScalarField>>
     where
         PathBuf: From<Pth>,

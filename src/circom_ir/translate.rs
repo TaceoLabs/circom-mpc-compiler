@@ -745,6 +745,8 @@ pub(crate) fn build_circom_ir<P: Pairing>(
     Ok(CircomAST::from_main_component(
         circuit.c_producer.total_number_of_signals,
         circuit.c_producer.witness_to_signal_list,
+        input_list,
+        public_inputs,
         not_inlined_circom_ast,
     ))
 }
