@@ -34,6 +34,7 @@ fn main() -> eyre::Result<()> {
 
     let graph = CoCircomCompiler::<Bn254>::parse(circuit, config)?;
     tracing::info!("graph:\n{graph:?}");
+    tracing::info!("mpc summary: {:?}", graph.mpc_summary());
 
     Ok(())
 }

@@ -55,6 +55,72 @@ impl PrecomputeId {
     }
 }
 
+/// Identifies one entry in [`Graph::rounds`]: one rep3 network round (currently always a reshare -
+/// see [`RoundKind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoundId(u32);
+
+impl RoundId {
+    pub(crate) fn new(index: usize) -> Self {
+        Self(u32::try_from(index).expect("more rounds than fit into u32"))
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// What a [`RoundDesc`] batches. `Reshare` (one `net.reshare_many` call, rep3's `local_mul_vec` +
+/// `reshare_vec`) is the only kind produced today - see `docs/ARCHITECTURE.md`, "MPC lowering", for
+/// the domain lattice this implements. `Open` (for when `Div`/comparisons return, per the "Known
+/// gaps" roadmap) is a real future variant, not stubbed here - it has no producer yet, and this enum
+/// isn't public API, so there's nothing to keep source-compatible by pre-declaring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoundKind {
+    Reshare,
+}
+
+/// One batched MPC network round: every [`Op::MulLocal`] value that feeds this round's
+/// [`Op::Round`] node reshares in the same message (`len` slots, one [`Op::RoundResult`] each).
+/// `depth` is the round's position in the circuit's multiplicative-depth order - diagnostic only
+/// (used by `Graph::mpc_summary`), not consulted structurally.
+#[derive(Debug, Clone)]
+pub(crate) struct RoundDesc {
+    // Only ever `Reshare` today (see `RoundKind`) and only read back by pass unit tests so far -
+    // real second-kind dispatch arrives with `Open`.
+    #[allow(dead_code)]
+    pub(crate) kind: RoundKind,
+    pub(crate) len: usize,
+    // Diagnostic - not consulted by anything but pass unit tests today; `mpc_summary` reports
+    // rounds in creation order, which already *is* depth order, so it doesn't need this field too.
+    #[allow(dead_code)]
+    pub(crate) depth: usize,
+}
+
+/// Which lowering stage a [`Graph`] is in. Internal bookkeeping, not a config surface - every public
+/// entry point (`CoCircomCompiler::parse`) always returns `MpcLowered`; this exists so
+/// [`Graph::verify`] knows which invariants apply between passes, and so pass-level unit tests can
+/// build a `Plain` graph by hand without needing to run the whole lowering pipeline first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Stage {
+    #[default]
+    Plain,
+    MpcLowered,
+}
+
+/// The effect of MPC lowering, as reported by [`Graph::mpc_summary`]. Diagnostic - logged under
+/// `tracing` and asserted in `tests/mpc_lowering.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MpcSummary {
+    pub rounds: usize,
+    pub reshare_elements: usize,
+    pub min_slots_per_round: Option<usize>,
+    pub max_slots_per_round: Option<usize>,
+    pub local_muls: usize,
+    pub public_muls: usize,
+    pub precompute_sites: usize,
+}
+
 /// One `TACEO_PRECOMPUTATION_*`-wrapped component: the shape the runtime must supply a trace for.
 /// See `docs/ARCHITECTURE.md`, "Precomputation", for the exact result-slot -> signal contract
 /// (kept byte-compatible with the co-snarks VM's `ComponentAcceleratorOutput`).
@@ -76,7 +142,7 @@ pub struct PrecomputeSite {
 /// either rejected outright or, where all its operands are compile-time constants, folded away
 /// before it ever reaches this enum (`frontend::fold`). See `docs/ARCHITECTURE.md` for why, and for
 /// the MPC share-kind specialization this enum used to also carry (removed, see "Non-goals").
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Op<F: PrimeField> {
     /// Reads a circuit input signal.
     Input(SignalIdx),
@@ -95,6 +161,19 @@ pub enum Op<F: PrimeField> {
     /// `0..num_outputs` are the wrapped component's outputs; `num_outputs..` are its subtree's
     /// intermediate signals, in flat circuit order. See `docs/ARCHITECTURE.md`, "Precomputation".
     PrecomputeResult(u32),
+    /// The free, local half of a secret x secret multiplication: `a*b + mask`, computed without a
+    /// message (rep3's `local_mul_vec`). Not a valid share on its own - only a rep3 additive-3
+    /// sharing (see `docs/ARCHITECTURE.md`, "MPC lowering", for why that's still sound to add/
+    /// scale) until reshared via the [`Op::Round`] it feeds.
+    MulLocal,
+    /// One batched network round (see [`RoundDesc`]/[`Graph::rounds`]): arity equals the round's
+    /// `len` (checked by [`Graph::verify`], not [`Node::new`] - see [`Arity::RoundLen`]), one input
+    /// per [`Op::MulLocal`] value being reshared together. This node's own value is never read
+    /// directly, only through the [`Op::RoundResult`] nodes that reference it.
+    Round(RoundId),
+    /// Reads one slot of the [`Op::Round`] node that is this node's sole input - the reshared
+    /// (`Shared`-domain) result of that slot's local product.
+    RoundResult(u32),
 }
 
 /// How many inputs a node's op requires. Almost every op has a fixed arity known without any
@@ -106,6 +185,9 @@ pub(crate) enum Arity {
     /// Equal to the `num_inputs` of the [`PrecomputeSite`] the node's [`PrecomputeId`] refers to -
     /// only [`Graph::verify`] can check this, since it alone has access to the site table.
     SiteInputs,
+    /// Equal to the `len` of the [`RoundDesc`] the node's [`RoundId`] refers to - only
+    /// [`Graph::verify`] can check this, for the same reason as [`Arity::SiteInputs`].
+    RoundLen,
 }
 
 impl<F: PrimeField> Op<F> {
@@ -113,24 +195,25 @@ impl<F: PrimeField> Op<F> {
     pub(crate) fn arity(&self) -> Arity {
         match self {
             Op::Input(_) | Op::Constant(_) => Arity::Fixed(0),
-            Op::Add | Op::Sub | Op::Mul => Arity::Fixed(2),
+            Op::Add | Op::Sub | Op::Mul | Op::MulLocal => Arity::Fixed(2),
             Op::Precompute(_) => Arity::SiteInputs,
-            Op::PrecomputeResult(_) => Arity::Fixed(1),
+            Op::PrecomputeResult(_) | Op::RoundResult(_) => Arity::Fixed(1),
+            Op::Round(_) => Arity::RoundLen,
         }
     }
 
     /// Whether this op is free of side effects a rewrite pass must preserve exactly once each -
     /// `false` for the precomputation ops, since merging or duplicating a site would change how
-    /// many traces the runtime has to supply (see `docs/ARCHITECTURE.md`, "Precomputation").
-    /// Everything else is pure arithmetic or a plain read, safe to deduplicate or reorder freely.
-    ///
-    /// Not consulted yet - no pass merges or reorders nodes across sites today - but it's the
-    /// signal a future CSE/GVN pass (`docs/ARCHITECTURE.md`, "Where this is headed") needs to
-    /// avoid merging two precomputation sites, so it's added alongside the ops it must protect
-    /// rather than bolted on later.
-    #[allow(dead_code)]
+    /// many traces the runtime has to supply (see `docs/ARCHITECTURE.md`, "Precomputation"), and
+    /// `false` for the MPC round ops for the same reason: `Op::MulLocal` consumes a fresh mask per
+    /// evaluation, so merging two occurrences would desync a round's slot count from what the
+    /// runtime's `local_mul_vec`/`reshare_vec` calls actually produce. Everything else is pure
+    /// arithmetic or a plain read, safe to deduplicate or reorder freely.
     pub(crate) fn is_pure(&self) -> bool {
-        !matches!(self, Op::Precompute(_) | Op::PrecomputeResult(_))
+        !matches!(
+            self,
+            Op::Precompute(_) | Op::PrecomputeResult(_) | Op::MulLocal | Op::Round(_) | Op::RoundResult(_)
+        )
     }
 }
 
@@ -170,6 +253,13 @@ pub(crate) enum RewriteAction<F: PrimeField> {
     /// Emit a different node in its place. `node.inputs` must reference only already-emitted
     /// (new-space) values.
     Emit(Node<F>),
+    /// Emit several nodes in its place; the *last* one is this original node's value (what later
+    /// references to it resolve to). Each node's `inputs` may reference any already-emitted value,
+    /// including the earlier nodes in this same `Vec` (they are pushed in order, so they are
+    /// "already emitted" from the next one's point of view). Used by passes that expand one node
+    /// into a small fixed-shape group - e.g. `passes::mpc::mul_split` splitting a secret `Mul` into
+    /// its local part, a singleton round, and that round's result.
+    EmitMany(Vec<Node<F>>),
 }
 
 /// A list of circuit inputs: (name, witness offset, size).
@@ -188,6 +278,10 @@ pub struct Graph<F: PrimeField> {
     /// encountered - that order *is* the trace order the runtime must supply results in. See
     /// `docs/ARCHITECTURE.md`, "Precomputation".
     precompute_sites: Vec<PrecomputeSite>,
+    /// Every batched MPC network round, indexed by [`RoundId`]. Empty until `passes::mpc` lowers
+    /// the graph. See `docs/ARCHITECTURE.md`, "MPC lowering".
+    rounds: Vec<RoundDesc>,
+    stage: Stage,
     pub signal_to_witness: Vec<usize>,
     pub input_list: InputList,
     pub public_inputs: Vec<String>,
@@ -197,6 +291,8 @@ pub struct Graph<F: PrimeField> {
 }
 
 impl<F: PrimeField> Graph<F> {
+    /// Builds a fresh, not-yet-lowered ([`Stage::Plain`], no rounds) graph - the frontend's output,
+    /// and what pass-level unit tests build by hand to exercise a single pass in isolation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         nodes: Vec<Node<F>>,
@@ -213,6 +309,8 @@ impl<F: PrimeField> Graph<F> {
             nodes,
             outputs,
             precompute_sites,
+            rounds: Vec::new(),
+            stage: Stage::Plain,
             signal_to_witness,
             input_list,
             public_inputs,
@@ -245,6 +343,71 @@ impl<F: PrimeField> Graph<F> {
 
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {
         &self.outputs
+    }
+
+    /// Every batched MPC network round, indexed by [`RoundId`]. Empty before `passes::mpc` runs.
+    // Only exercised by pass unit tests so far (`Graph::mpc_summary` reads the private field
+    // directly) - same situation as `Graph::node` above.
+    #[allow(dead_code)]
+    pub(crate) fn rounds(&self) -> &[RoundDesc] {
+        &self.rounds
+    }
+
+    /// Installs a fresh round table, replacing whatever was there. `mul_split` calls this once, to
+    /// install its initial one-round-per-product table; `round_schedule` calls it again to replace
+    /// that with the batched-by-depth table it computes. Nothing between those two calls reads the
+    /// intermediate table, so there is no append-only requirement here.
+    pub(crate) fn set_rounds(&mut self, rounds: Vec<RoundDesc>) {
+        self.rounds = rounds;
+    }
+
+    /// Marks the graph as fully MPC-lowered. Called exactly once, by the `PassManager` after its
+    /// lowering-stage passes finish - see `docs/ARCHITECTURE.md`, "MPC lowering".
+    pub(crate) fn mark_lowered(&mut self) {
+        self.stage = Stage::MpcLowered;
+    }
+
+    /// Replaces the whole node list at once, remapping `outputs` through `remap` (`None` for a
+    /// dropped node an output still depends on is a bug in the caller, and panics loudly). Unlike
+    /// [`Graph::rewrite`], the caller builds `nodes` itself in whatever order it needs - this is
+    /// for passes whose transformation isn't a node-for-node substitution (merging several existing
+    /// nodes into one, as `passes::mpc::round_schedule` does, changes arity, which no `rewrite`
+    /// callback can express; see that pass for why, and [`Graph::gc`]'s own hand-rolled sweep for
+    /// the precedent of reaching for something other than `rewrite` when it doesn't fit).
+    pub(crate) fn rebuild_nodes(&mut self, nodes: Vec<Node<F>>, remap: &[Option<ValueId>]) {
+        self.nodes = nodes;
+        for (_, value) in self.outputs.iter_mut() {
+            *value = remap[value.index()].expect("rebuild_nodes dropped a node an output depends on");
+        }
+    }
+
+    /// Reports the effect of MPC lowering: rounds, total reshare elements (one field element per
+    /// round slot), min/mean/max slots per round, free local multiplications, free public
+    /// multiplications, and precomputation sites. Not a rewrite - this is what makes every claim
+    /// about round batching in `docs/ARCHITECTURE.md` falsifiable instead of asserted; see
+    /// `tests/mpc_lowering.rs`.
+    pub fn mpc_summary(&self) -> MpcSummary {
+        let slot_counts: Vec<usize> = self.rounds.iter().map(|r| r.len).collect();
+        let reshare_elements: usize = slot_counts.iter().sum();
+        let local_muls = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, Op::MulLocal))
+            .count();
+        let public_muls = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, Op::Mul))
+            .count();
+        MpcSummary {
+            rounds: self.rounds.len(),
+            reshare_elements,
+            min_slots_per_round: slot_counts.iter().copied().min(),
+            max_slots_per_round: slot_counts.iter().copied().max(),
+            local_muls,
+            public_muls,
+            precompute_sites: self.precompute_sites.len(),
+        }
     }
 
     /// Marks every node reachable from `outputs`, drops the rest, and compacts `ValueId`s so the
@@ -342,6 +505,31 @@ impl<F: PrimeField> Graph<F> {
                         );
                     }
                 }
+                Arity::RoundLen => {
+                    let Op::Round(round_id) = &node.op else {
+                        unreachable!("only Op::Round has Arity::RoundLen");
+                    };
+                    let round = self.rounds.get(round_id.index()).ok_or_else(|| {
+                        eyre::eyre!(
+                            "node {i} references round {} which does not exist",
+                            round_id.index()
+                        )
+                    })?;
+                    if node.inputs.len() != round.len {
+                        eyre::bail!(
+                            "node {i} (Round({})) has {} inputs, expected {} (round len)",
+                            round_id.index(),
+                            node.inputs.len(),
+                            round.len
+                        );
+                    }
+                    // Every slot's mask comes from the local product that feeds it - a round with
+                    // no slots would have nothing to reshare. See docs/ARCHITECTURE.md, "MPC
+                    // lowering".
+                    if round.len == 0 {
+                        eyre::bail!("round {} has no slots", round_id.index());
+                    }
+                }
             }
             if let Op::PrecomputeResult(slot) = &node.op {
                 let referenced = &self.nodes[node.inputs[0].index()];
@@ -356,6 +544,25 @@ impl<F: PrimeField> Graph<F> {
                          (site has {total_results} results)"
                     );
                 }
+            }
+            if let Op::RoundResult(slot) = &node.op {
+                let referenced = &self.nodes[node.inputs[0].index()];
+                let Op::Round(round_id) = &referenced.op else {
+                    eyre::bail!("node {i} (RoundResult) does not reference a Round node");
+                };
+                let round = &self.rounds[round_id.index()];
+                if *slot as usize >= round.len {
+                    eyre::bail!(
+                        "node {i} (RoundResult({slot})) references out-of-range slot \
+                         (round has {} slots)",
+                        round.len
+                    );
+                }
+            }
+            if self.stage == Stage::Plain
+                && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_))
+            {
+                eyre::bail!("node {i} ({:?}) is an MPC-lowering op but the graph is Stage::Plain", node.op);
             }
             for input in &node.inputs {
                 if input.index() >= i {
@@ -428,6 +635,14 @@ impl<F: PrimeField> Graph<F> {
                     changed = true;
                     remap[i] = Some(ValueId::new(new_nodes.len()));
                     new_nodes.push(new_node);
+                }
+                RewriteAction::EmitMany(group) => {
+                    changed = true;
+                    assert!(!group.is_empty(), "EmitMany must emit at least one node");
+                    for node in group {
+                        new_nodes.push(node);
+                    }
+                    remap[i] = Some(ValueId::new(new_nodes.len() - 1));
                 }
             }
         }

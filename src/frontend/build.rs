@@ -61,12 +61,15 @@ impl<F: PrimeField> TemplateOp<F> {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
             TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } => 1,
             // TemplateOp::Real is only ever built from Op::Input/Constant/Add/Sub/Mul here -
-            // Op::Precompute/PrecomputeResult are inlining-time-only ops, materialized by
-            // frontend/inline.rs, never by this per-template build pass.
+            // Op::Precompute/PrecomputeResult are inlining-time-only ops (materialized by
+            // frontend/inline.rs) and Op::MulLocal/Round/RoundResult are lowering-time-only ops
+            // (materialized by passes/mpc/), never by this per-template build pass.
             TemplateOp::Real(op) => match op.arity() {
                 Arity::Fixed(n) => n,
-                Arity::SiteInputs => {
-                    unreachable!("TemplateOp::Real never wraps a precomputation op before inlining")
+                Arity::SiteInputs | Arity::RoundLen => {
+                    unreachable!(
+                        "TemplateOp::Real never wraps a precomputation or MPC-lowering op before inlining"
+                    )
                 }
             },
         }
@@ -455,11 +458,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Input(_))
-            // Precompute/PrecomputeResult are inlining-time-only ops (see TemplateOp::arity
-            // above) and never appear here, but are included so this match stays exhaustive as
-            // Op grows.
+            // Precompute/PrecomputeResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
+            // only ops (see TemplateOp::arity above) and never appear here, but are included so
+            // this match stays exhaustive as Op grows.
             | TemplateOp::Real(Op::Precompute(_))
             | TemplateOp::Real(Op::PrecomputeResult(_))
+            | TemplateOp::Real(Op::MulLocal)
+            | TemplateOp::Real(Op::Round(_))
+            | TemplateOp::Real(Op::RoundResult(_))
             | TemplateOp::LocalSignal(_)
             | TemplateOp::LocalSignalWrite(_)
             | TemplateOp::SubCmpInput { .. }

@@ -2,30 +2,40 @@ use ark_bn254::Bn254;
 use circom_mpc_compiler::interpreter::Interpreter;
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
+use circom_mpc_compiler::OptLevel;
 
 mod common;
 mod misc;
 
 use common::{circuit_path, from_test_name, libs_path, TestInputs};
 
+/// Every opt level exercises `CoCircomCompiler::parse`'s unconditional MPC lowering (see
+/// `docs/ARCHITECTURE.md`, "MPC lowering") - there is no plaintext-only path any more, so this
+/// matrix is what makes every KAT below also a correctness test for the lowering, not just the
+/// frontend and the classical passes.
+const OPT_LEVELS: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
+
 macro_rules! witness_extension_test_plain {
     ($name: ident) => {
         #[test]
         fn $name() {
             let inp: TestInputs = from_test_name(stringify!($name));
-            for i in 0..inp.inputs.len() {
-                let mut config = CompilerConfig::default();
-                config.simplification = circom_mpc_compiler::SimplificationLevel::O2(usize::MAX);
-                config.link_library.push(libs_path());
-                let ast = CoCircomCompiler::<Bn254>::parse(circuit_path(stringify!($name)), config)
-                    .unwrap();
+            for opt_level in OPT_LEVELS {
+                for i in 0..inp.inputs.len() {
+                    let mut config = CompilerConfig::default();
+                    config.simplification = circom_mpc_compiler::SimplificationLevel::O2(usize::MAX);
+                    config.link_library.push(libs_path());
+                    config.opt_level = opt_level;
+                    let ast = CoCircomCompiler::<Bn254>::parse(circuit_path(stringify!($name)), config)
+                        .unwrap();
 
-                assert_eq!(ast.num_inputs, inp.inputs[i].len());
+                    assert_eq!(ast.num_inputs, inp.inputs[i].len());
 
-                let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
-                let witness = interpreter.run();
+                    let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
+                    let witness = interpreter.run();
 
-                assert_eq!(witness, inp.witnesses[i].values);
+                    assert_eq!(witness, inp.witnesses[i].values, "opt_level {opt_level:?}, input {i}");
+                }
             }
         }
     };

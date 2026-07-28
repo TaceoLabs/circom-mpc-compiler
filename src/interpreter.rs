@@ -1,5 +1,10 @@
 //! Plaintext reference evaluator over [`ir::Graph`], used for debugging and as the oracle for the
 //! plain-path KAT tests until the bytecode VM (a later step) takes over that role.
+//!
+//! `CoCircomCompiler::parse` always returns an MPC-lowered graph (see `docs/ARCHITECTURE.md`, "MPC
+//! lowering") - there is no plaintext-only end state - so this also simulates the lowered ops
+//! (`Op::MulLocal`/`Op::Round`/`Op::RoundResult`) in the clear. That makes every KAT that runs
+//! through this interpreter a correctness test for the lowering, not just for the frontend.
 
 use ark_ff::PrimeField;
 
@@ -85,6 +90,21 @@ impl<F: PrimeField> Interpreter<F> {
                     let rhs = self.values[node.inputs[1].index()];
                     tracing::trace!("{lhs}*{rhs} = {}", lhs * rhs);
                     lhs * rhs
+                }
+                Op::MulLocal => {
+                    self.values[node.inputs[0].index()] * self.values[node.inputs[1].index()]
+                }
+                // A Round's own value is never read (only RoundResult nodes reference it, and
+                // they index its inputs directly) - park a placeholder, same as Precompute below.
+                // There is no reshare to simulate in the clear: a Round's k-th input *is* its
+                // k-th result, since a rep3 replicated share's local `a` component already sums
+                // to the right value across three additive shares (see docs/ARCHITECTURE.md, "MPC
+                // lowering") - nothing distinguishes "local" from "shared" in a single-party
+                // plaintext evaluator.
+                Op::Round(_) => F::zero(),
+                Op::RoundResult(slot) => {
+                    let round_node = &self.graph.nodes()[node.inputs[0].index()];
+                    self.values[round_node.inputs[*slot as usize].index()]
                 }
                 // The Precompute node's own value is never read (only PrecomputeResult nodes
                 // reference it, and they index site_results directly) - park a placeholder.

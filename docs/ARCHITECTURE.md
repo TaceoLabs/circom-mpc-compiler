@@ -20,14 +20,19 @@ circom source
      (unless TACEO_PRECOMPUTATION_*-wrapped - see "Precomputation"), unrolling
      loops eagerly, folding removed operators at compile time                      (frontend/unroll.rs, frontend/fold.rs)
   -> recursive inlining: flatten the TemplateGraph tree into one ir::Graph          (frontend/inline.rs)
-  -> ir::Graph::verify(), then PassManager::for_opt_level(config.opt_level).run()   (ir.rs, passes/, called from lib.rs)
-  -> interpreter (debug/reference, the only execution path in this crate)          (interpreter.rs)
+  -> ir::Graph::verify(), then PassManager::for_opt_level(config.opt_level).run():
+       classical passes to a fixpoint, then MPC lowering, unconditionally          (ir.rs, passes/, called from lib.rs)
+  -> interpreter (debug/reference, the only execution path in this crate) -        (interpreter.rs)
+     simulates the lowered ops in the clear, so it's also the oracle for lowering
 ```
 
 `CoCircomCompiler::<P>::parse(file, config)` in `lib.rs` runs everything up to and including the
-`PassManager`, and returns the `ir::Graph`. The plain `Interpreter` is the only consumer in this
-crate - MPC execution (rep3, the plaintext stand-in `PlainExecutor`, the `mpc_ir` share-kind
-translation pass) was deleted; see "Non-goals" below for why and where to find it again.
+`PassManager`, and returns the `ir::Graph` - **always MPC-lowered** (see "MPC lowering" below); there
+is no plaintext-only end state. The plain `Interpreter` is the only consumer in this crate, and
+simulates the lowered ops too. An earlier version of this crate had a real MPC execution path (rep3,
+a plaintext stand-in `PlainExecutor`, an `mpc_ir` share-kind-specialized mirror IR) that was deleted
+before the lowering described below existed - see "Deliberate non-goals" for why that shape was wrong
+and where to find it again if the reasoning ever needs re-deriving.
 
 ## The IR (`src/ir.rs`)
 
@@ -181,24 +186,34 @@ subcomponent's inputs were necessarily already resolved earlier in the same loop
 ## Pass infrastructure (`src/passes/`)
 
 A `Pass` trait (`fn run(&mut self, graph: &mut Graph<F>, ctx: &mut PassContext) -> Result<Changed>`)
-plus a `PassManager` that runs a fixed pass list to a fixpoint (bounded by `max_iterations`),
-re-verifying the graph after every pass in debug builds. `OptLevel` (`CompilerConfig::opt_level`)
-selects the pass list - `O0` is dead code elimination only, `O1` (default) adds constant folding,
-`O2` is reserved for CSE/GVN and the rep3-specific passes from the roadmap below. This is
-deliberately a separate knob from `SimplificationLevel`, which configures upstream circom
-constraint simplification, not this crate's own IR passes.
+plus a `PassManager` with **two stages**: `optimize` (a fixed classical-pass list run to a fixpoint,
+bounded by `max_iterations`) then `lower` (the MPC pipeline, `passes/mpc/`, run once, unconditionally
+- see "MPC lowering" below for why this is a separate stage rather than more fixpoint passes).
+Re-verifies the graph after every pass in debug builds. `OptLevel` (`CompilerConfig::opt_level`)
+selects the *classical* pass list only - `O0` is dead code elimination, `O1` (default) adds constant
+folding, `O2` adds CSE/GVN, commutative-operand canonicalization, and affine normalization. This is
+deliberately a separate knob from `SimplificationLevel`, which configures upstream circom constraint
+simplification, not this crate's own IR passes, and independent of MPC lowering, which runs at every
+opt level.
 
 The piece that makes a `Pass` cheap to write correctly is `Graph::rewrite` (`src/ir.rs`): it walks
 the old node list in original order, handing each pass's callback the node with its inputs already
 remapped to new-space `ValueId`s, plus every node already emitted so far (so a pass can inspect an
-input's *producer* - e.g. "is this a constant?" - by indexing into it). The callback returns
-`Keep`, `ReplaceWith(other_value)` (alias, no node emitted), or `Emit(different_node)`; `rewrite`
-owns the old-to-new remap and fixes up `outputs`, so a pass can never accidentally produce a forward
-reference - the exact bug class that would otherwise be easy to introduce in this IR, since a
-node's `ValueId` doubles as its position and deleting or replacing any node shifts every later
-reference. `Graph::gc` (dead code elimination) predates `rewrite` and keeps its own hand-written
-reverse-liveness sweep instead - it's a liveness walk, not a node-for-node rewrite, so the same
-abstraction doesn't fit it - but its remap type is shared.
+input's *producer* - e.g. "is this a constant?" - by indexing into it). The callback returns `Keep`,
+`ReplaceWith(other_value)` (alias, no node emitted), `Emit(different_node)`, or
+`EmitMany(Vec<Node<F>>)` (one original node expands into several - `passes::mpc::mul_split` is the
+first consumer, splitting a secret `Mul` into its local part, a singleton round, and that round's
+result); `rewrite` owns the old-to-new remap and fixes up `outputs`, so a pass can never accidentally
+produce a forward reference - the exact bug class that would otherwise be easy to introduce in this
+IR, since a node's `ValueId` doubles as its position and deleting or replacing any node shifts every
+later reference. `Graph::gc` (dead code elimination) predates `rewrite` and keeps its own
+hand-written reverse-liveness sweep instead - it's a liveness walk, not a node-for-node rewrite, so
+the same abstraction doesn't fit it - but its remap type is shared. Two later passes hit the same
+"doesn't fit `rewrite`" wall for a different reason (merging several existing nodes into one, or
+eliding a node whose need isn't known until later, both change *which* original ids get a new
+counterpart at all, not just what each one looks like) and follow `gc`'s precedent instead of
+`rewrite`'s: see `passes::mpc::round_schedule` and `passes::normalize`. `Graph::rebuild_nodes`
+generalizes `gc`'s "replace the whole node list, remap outputs" shape for these.
 
 `passes/dead_code.rs` is a thin `Pass` wrapper over `Graph::gc`. `passes/const_fold.rs` is the first
 real `Graph::rewrite` consumer: it folds `Add`/`Sub`/`Mul` when both operands are already
@@ -210,10 +225,167 @@ array/signal/component *address* position. Both predate the pass infrastructure 
 the reasons documented under "Where compile-time folding lives" above; `const_fold` is the first
 pass that folds `Add`/`Sub`/`Mul` themselves, anywhere in the graph.
 
-`Op::is_pure` (`false` only for `Op::Precompute`/`Op::PrecomputeResult`) is added alongside the
-precomputation ops it protects, not consulted by anything yet - it's the signal a future CSE/GVN
-pass needs to avoid merging two precomputation sites, since that would change how many traces the
-runtime has to supply.
+Three more classical passes round out `O2`, all in the family of "what a flat, control-flow-free
+dataflow DAG over a field actually admits" - LICM, SROA, CFG passes, and vectorization don't apply
+here at all (loops are unrolled in the frontend, there's no memory, no branches, and round batching
+already subsumes vectorization's win - see "Deliberate non-goals"):
+
+- **`passes/cse.rs`** - GVN by hash-consing every `Op::is_pure` node (`(op, inputs)` as the key,
+  commutative inputs sorted first). This is `is_pure`'s first real consumer: it was added alongside
+  the precomputation ops it protects, before anything checked it, specifically so a future pass
+  wouldn't have to remember to add the guard - `cse` (and now the MPC round ops, `is_pure() == false`
+  for the same "merging changes what the runtime must supply" reason) is that pass.
+- **`passes/algebraic.rs`** - canonical operand order for commutative `Add`/`Mul` (constant right,
+  else by `ValueId`), purely so `cse` sees `a+b` and `b+a` as the same key. Everything else one might
+  expect here (`x-x -> 0`, `Add(x,x) -> Mul(2,x)`, cross-chain cancellation) turned out to already
+  fall out of `normalize`'s affine algebra for free - see below - so this pass stays narrowly scoped
+  to the one identity that doesn't.
+- **`passes/normalize.rs`** (with `passes/poly.rs`, the affine engine it's built on) - collapses each
+  maximal `Add`/`Sub`/mul-by-constant tree into one canonical `Affine` (`constant + Σ cᵢ·atomᵢ`) and
+  rebuilds only what's actually needed. Subsumes cross-chain constant folding, cancellation
+  (`(a+b)-a -> b`, left behind by circom's own simplifier), and reassociation of arbitrarily-nested
+  chains, since all three are the same operation (combine into one `Affine`) applied transitively.
+  Not a `Graph::rewrite` consumer - see the note above; a node whose need is only established by a
+  *later* node (a real product's non-constant operand, or an output) can't be decided at its own,
+  earlier turn, which `rewrite`'s per-node auto-remap requires. Deliberately capped at degree 1
+  (affine, not quadratic): a degree-2 extension would fuse multiple products behind one reshare slot,
+  which only helps MPC bandwidth (tier 2 of the cost model in "MPC lowering" below), never round
+  count (tier 1, `round_schedule`'s job) - and its payoff is bounded by the same "materialized nodes
+  can't be un-materialized" constraint documented there, currently unmeasurable since no circuit
+  large enough to matter compiles yet. Rejected rather than spec'd out further; revisit once a real
+  circuit's `mpc_summary` shows the bandwidth to save.
+
+## MPC lowering (`src/passes/mpc/`)
+
+`CoCircomCompiler::parse` always returns an MPC-lowered graph - this is not gated by any config
+knob, and there is no plaintext-only end state. This section is the design record for why the
+lowering looks the way it does; see "Non-goals" (below) for why an earlier, deleted version of MPC
+support in this crate had the wrong shape, and why this one doesn't repeat that mistake.
+
+### The domain lattice
+
+A rep3 replicated share `(a_i, b_i)` of `x` satisfies `Σ_i a_i = x`, so its `a` component alone is
+already a valid *additive*-3 sharing of `x`. That gives a third value domain below "replicated
+share", not just "public" and "secret":
+
+| Domain | Meaning | Free ops | Needs |
+|---|---|---|---|
+| `Public` | every party holds the cleartext | everything | - |
+| `Shared` | valid replicated share; any op may consume it | add/sub, mul-by-public | - |
+| `Local` | additive-3 sharing only (post-local-product, pre-reshare) | add/sub, mul-by-public | a reshare before any non-linear use |
+
+`Public < Shared < Local`: `Shared -> Local` is free (take the `a` component), `Local -> Shared`
+costs one reshare message. **Every linear op is free in all three domains** - this is the whole
+reason round batching works: every independent product at the same multiplicative depth can share
+one message, because nothing about combining `Local` values linearly needs a round first. One
+security nuance worth stating explicitly: the fresh mask a local product carries comes from
+`local_mul`, so a round's slot count must equal its product count - a round with zero slots would
+have nothing to reshare, which is why `Graph::verify` rejects one (see below).
+
+### The cost model
+
+Lexicographic, and it settles every design choice below:
+
+1. **rounds** - a network round-trip, latency-bound. Minimize first, always.
+2. **reshare elements** - bandwidth. One field element per slot per round.
+3. **local muls** - cheap field work, but not free.
+4. **nodes** - VM memory/slot pressure (roadmap step 4, not yet built).
+
+This is why `round_schedule` (batches by depth, tier 1) exists and a degree-2 fusion pass (tier 2
+only) doesn't yet - see `passes/normalize.rs`'s doc above.
+
+### Three new `Op` variants, following the `Precompute`/`PrecomputeResult` precedent
+
+A batched round is inherently multi-output, which this IR forbids (single result per node - see
+"Invariants" above). `Op::Precompute`/`Op::PrecomputeResult` already solved exactly this; rounds
+reuse the shape rather than inventing a new one:
+
+- `Op::MulLocal` (arity 2) - the free local half of a secret x secret product: `a*b + mask`,
+  rep3's `local_mul_vec`. Domain `Local`.
+- `Op::Round(RoundId)` (arity = the referenced `RoundDesc::len`, `Arity::RoundLen` alongside the
+  existing `Arity::SiteInputs` for the same "only `Graph::verify` can check this" reason) - one
+  network round; its inputs are the `MulLocal` values reshared together in one message. Its own
+  value is never read directly, only through the `RoundResult`s that reference it - same convention
+  as `Precompute`.
+- `Op::RoundResult(slot)` (arity 1, the `Round` node) - domain `Shared`.
+
+`Graph::rounds: Vec<RoundDesc>` is the side table `RoundId` indexes into (`kind: RoundKind` -
+currently always `Reshare`; `len`; `depth`, diagnostic), mirroring `Graph::precompute_sites`.
+`Graph::stage: Stage { Plain, MpcLowered }` is `pub(crate)`, not a config surface - it exists only so
+`Graph::verify` knows which invariants apply mid-pipeline, and so pass unit tests can build a `Plain`
+graph by hand without running the whole lowering pipeline first. `PassManager::run` sets it once,
+right before running the lowering passes (not after - the first of them already introduces MPC ops,
+so `verify`'s Stage::Plain check would otherwise misfire on the graph mid-lowering).
+
+Deliberately absent: share-kind-specialized op variants (`MulSecretPublic`, `AddSecretSecret`, ...).
+Which one applies falls out of the domain analysis below; baking it into `ir::Op` is exactly the
+mirror-enum trap the deleted 37-variant `mpc_ir::Op` fell into (see "Non-goals").
+
+### The pipeline (`src/passes/mpc/`)
+
+Unlike the classical passes, this is a lowering *sequence*, not a fixpoint - `PassManager` runs it
+once, after the classical passes converge, unconditionally at every `OptLevel`:
+
+1. **`domain.rs`** - not a registered `Pass` (see below), a small library `mul_split` calls
+   incrementally: `signal_domain` classifies an `Op::Input` as `Public` iff its signal falls in a
+   `public_inputs`-named range of `input_list` (both already on `Graph`), else `Shared`; everything
+   else is a simple lattice join over an op's inputs. Not cached in `PassContext`, and not its own
+   `Pass`, because the domain of a *new-space* value is what `mul_split` needs while it rewrites, and
+   `Graph::rewrite` remaps every node's inputs to new-space ids before the callback ever sees them -
+   an old-space array computed by a separate prior pass can't be indexed by the ids the callback
+   actually receives once an earlier `EmitMany` has shifted everything after it. Recomputing
+   alongside the rewrite's own `new_nodes` keeps the two in lockstep for free instead.
+2. **`mul_split.rs`** - every `Mul` with two `Shared` operands becomes `MulLocal` + a **singleton**
+   `Round` + `RoundResult(0)`, via `EmitMany`. A `Mul` with any `Public` operand is untouched (already
+   free). Emitting a singleton round (rather than a bare `MulLocal`) keeps every intermediate graph
+   state valid and is exactly `rep3::arithmetic::mul` called once per product - so this pass alone,
+   before `round_schedule` runs, is already a correct (if naive) lowering, independently testable.
+3. **`round_schedule.rs`** - the headline transform. Computes MPC depth per value (`0` for
+   `Public`/`Input`/`Constant`/precomputation ops, `max` of inputs for linear ops and `MulLocal`,
+   `depth(Round) + 1` for `RoundResult`), then merges every singleton round at the same depth into
+   one. ASAP scheduling, so the round count equals the circuit's multiplicative depth - the minimum -
+   and **message count drops from one-per-secret-mul to one-per-depth-level**. Not a
+   `Graph::rewrite` consumer (see the note under "Pass infrastructure"): a product's final round is
+   only fully known once every *other* product at its depth has been seen, which can be later in the
+   original node order - a forward reference a single forward pass can't express. Instead: a direct
+   two-phase reconstruction (compute depths, then rebuild depth-bucket by depth-bucket, ordinary
+   nodes first then that depth's merged round) that produces a valid topological order by
+   construction - each bucket's ordinary nodes preserve their original relative order (still
+   topological, since depth is non-decreasing along every edge), and a depth's round is only emitted
+   once every node at that depth has been. `Graph::rebuild_nodes` installs the result.
+4. **`Graph::mpc_summary`** - not a pass; a diagnostic method reporting rounds, total reshare
+   elements, min/max slots per round, local muls, free public muls, and precomputation sites. Exists
+   so every claim above is falsifiable rather than asserted - see `tests/mpc_lowering.rs`, which
+   checks it against three synthetic circuits with known multiplicative-depth shape
+   (`circuits/bench_{chain,tree,widesum}.circom`): a chain of 3 dependent products needs 3 rounds of
+   width 1, a balanced tree of 8 inputs needs 3 rounds of width 4/2/1, and 4 independent products
+   needs exactly 1 round of width 4. These are synthetic because the circuits that currently compile
+   at all are small (see "Known gaps") - there is no large real circuit yet to measure batching
+   against, and that limit is worth stating rather than hiding.
+
+**Deliberately deferred, reason recorded instead of stubbed:** open sinking and `B2A(A2B(x))`
+cancellation/conversion minimization need `Div`, comparisons, or bitwise ops to exist - none do (see
+"Known gaps"). A conversion-minimization pass with nothing to convert is dead infrastructure.
+`RoundKind::Open` and a future `Binary` domain are the extension points, added with a doc comment
+rather than a stub variant, since `RoundKind` isn't public API and there's nothing to keep
+source-compatible by pre-declaring it.
+
+**One assumption worth being explicit about:** `PrecomputeResult` is depth 0 (round-free) in
+`round_schedule`'s formula, because the runtime computes every `TACEO_PRECOMPUTATION_*` trace up
+front, in one batched pass, before witness extension starts (see "Precomputation" below). A site
+whose inputs depended on witness-extension results would violate that - a circuit-side property this
+compiler can't fix, but shouldn't silently mismodel either.
+
+### Executing a lowered graph
+
+`interpreter.rs` simulates the three new ops in the clear: `MulLocal` is a plain product (there's
+nothing to mask or reshare in a single-party evaluator), `Round`'s own value is never read (same
+convention as `Precompute`), and `RoundResult(k)` reads input `k` of its `Round` node directly - a
+round's k-th input *is* its k-th result, since nothing distinguishes "local" from "shared" once
+there's only one party. Since `CoCircomCompiler::parse` always lowers, this makes every existing
+golden-witness KAT (`tests/circom_ir.rs`) a correctness test for the lowering, not just the frontend
+and classical passes - at zero added dependency cost, since this crate still doesn't depend on
+`co-snarks`/rep3 at all.
 
 ## Precomputation (`TACEO_PRECOMPUTATION_*`)
 
@@ -427,15 +599,23 @@ plain `Vec`s — a direct index beats hashing, and a map isn't buying anything t
 - **The plain interpreter (`interpreter.rs`) is a debugging tool, not the product.** It exists to
   check the IR's semantics and to be the correctness oracle until a bytecode VM exists. Don't
   over-invest in it; extend it only as far as needed to validate a change.
-- **No MPC execution in this crate.** `MpcInterpreter`, `mpc_ir::Op` (a 37-variant share-specialized
-  mirror of `ir::Op`), `passes/mpc_ir_translation.rs` (the pass that monomorphized one into the
-  other), and the rep3/plain executor abstractions underneath (`mpc/`) were all deleted. They were a
-  node-traverser, not a step toward the bytecode VM this compiler is actually building toward (see
-  "Where this is headed" below) - keeping them meant every IR change had to be mirrored into a
-  37-variant enum and a 9-way share-kind match that the eventual VM will never use. Find them again
-  at commit `5cdc695` if the design needs re-deriving; the reasoning that shaped them (share kind as
-  an IR-external analysis property, not a set of specialized opcodes) still applies to the VM this
-  crate is headed toward, it just isn't implemented anywhere right now.
+- **Share kind is an external analysis, never a set of per-op variants - the lesson from the deleted
+  `mpc_ir::Op`, still honored by the ops added in "MPC lowering" above.** An earlier version of this
+  crate had `MpcInterpreter`, `mpc_ir::Op` (a 37-variant share-specialized *mirror* of `ir::Op` -
+  every binary op repeated once per combination of public/arithmetic-share/binary-share operands),
+  `passes/mpc_ir_translation.rs` (the pass that monomorphized one into the other), and the rep3/plain
+  executor abstractions underneath (`mpc/`); all deleted (find them again at commit `5cdc695` if the
+  design needs re-deriving). They were a node-traverser, not a step toward the bytecode VM this
+  compiler is building toward, and kept every IR change synchronized against a 37-variant enum and a
+  9-way share-kind match the eventual VM would never use. **This is not the same shape as
+  `Op::MulLocal`/`Op::Round`/`Op::RoundResult`** (see "MPC lowering" above): those three model round
+  *structure* - a batched network round is inherently multi-output, which this IR forbids regardless
+  of MPC, the same reason `Op::Precompute`/`Op::PrecomputeResult` exist - not share kind. Domain
+  (`Public`/`Shared`/`Local`) stays exactly what the deleted design got right and this one keeps: an
+  external analysis (`passes/mpc/domain.rs`) consulted by a lowering pass, never baked into which `Op`
+  variant a node uses. Reintroducing a `MulSecretPublic`/`AddSecretSecret`-style variant explosion
+  would be repeating the mistake; adding a new *structural* op for a genuinely new multi-output shape
+  (as `Precompute` already established the precedent for) is not.
 
 ## Where this is headed (not yet built)
 
@@ -460,24 +640,35 @@ this section goes stale):
    (`OptLevel`, `src/passes/mod.rs`) distinct from the existing `SimplificationLevel` (which
    configures upstream circom constraint simplification, a different knob). See "Pass
    infrastructure" below.
-3. Design constraint for the future MPC/VM work (not a refactor of code that exists anymore - the
-   code this step used to describe collapsing was deleted, see "Non-goals"): share-kind
-   specialization belongs in a share-kind analysis pass over this one IR plus a generic
-   `insert_conversions` pass, consulted only at bytecode codegen time - never as extra `ir::Op`
-   variants. Whatever MPC crate eventually does this owes it to itself to re-derive the
-   `amount_public_inputs`/wire-bank sizing bugs the old `mpc_interpreter.rs` had (hardcoded
+3. **(done)** Share-kind specialization as an external analysis over this one IR
+   (`passes/mpc/domain.rs`'s `Domain` lattice), consulted by lowering passes rather than baked into
+   extra `ir::Op` variants - see "MPC lowering" above, and "Non-goals" for why the three ops that
+   *were* added (`MulLocal`/`Round`/`RoundResult`) aren't a reversal of this. A generic
+   `insert_conversions` pass (for `B2A`/`A2B`) is still future work - see "MPC lowering", "Rep3-
+   specific passes" below - since there's no `Binary` domain or conversion op yet to insert.
+   Whatever eventually needs bytecode-codegen-time share-kind dispatch owes it to itself to re-derive
+   the `amount_public_inputs`/wire-bank sizing bugs the old `mpc_interpreter.rs` had (hardcoded
    `amount_public_inputs = 0`, three full-length wire banks) rather than reintroduce them.
 4. Bytecode + the flat-slot-machine VM described above, with linear-scan slot allocation over
    liveness so VM memory tracks live width, not total node count.
-5. General optimization passes: constant folding **(done - `passes/const_fold.rs`)**, CSE/GVN (the
-   value-graph model makes this a single hash-cons pass), algebraic simplification. The narrow,
-   address-position-only fold that predates this (`frontend/fold.rs`, `GraphCompiler::
-   eval_constant_node` - see "Where compile-time folding lives" above) still exists alongside it;
-   see "Pass infrastructure" below for why both stay.
-6. Rep3-specific passes, the actual point of all of the above: linear fusion (free ops never cost a
-   round), conversion minimization (cancel `B2A(A2B(x))`, sink conversions past free linear ops),
-   round scheduling (depth analysis, batch independent muls/opens into shared rounds), open
-   sinking.
+5. **(done)** General optimization passes: constant folding (`passes/const_fold.rs`), CSE/GVN
+   (`passes/cse.rs`, a single hash-cons pass as expected), algebraic simplification
+   (`passes/algebraic.rs`, `passes/normalize.rs` + `passes/poly.rs`) - see "Pass infrastructure"
+   above for what each one covers and why a degree-2 extension to `normalize` was rejected rather
+   than built. The narrow, address-position-only fold that predates this (`frontend/fold.rs`,
+   `GraphCompiler::eval_constant_node` - see "Where compile-time folding lives" above) still exists
+   alongside it; see "Pass infrastructure" for why both stay.
+6. Rep3-specific passes, the actual point of all of the above:
+   - **(done)** Round scheduling - `passes/mpc/round_schedule.rs`, batching independent secret
+     multiplications at the same depth into one round. See "MPC lowering" above.
+   - **(done, trivial)** Linear fusion (free ops never cost a round) - not a separate pass; it falls
+     directly out of the domain lattice (`Local`/`Shared` both support free linear ops), so nothing
+     beyond `mul_split`'s domain check was needed to get it.
+   - **Not yet built:** conversion minimization (cancel `B2A(A2B(x))`, sink conversions past free
+     linear ops) and open sinking. Both need `Div`, comparisons, or bitwise ops to exist first - none
+     do (see "Known gaps") - so there's nothing to convert or sink yet; `RoundKind::Open` and a
+     future `Binary` domain are the extension points, deliberately not stubbed out ahead of a real
+     producer. See "MPC lowering" above.
 7. Re-add the operator surface removed in this cut (`Div`, `IntDiv`, `Pow`, `ShiftL`/`ShiftR`,
    `BitOr`/`BitAnd`/`BitXor`) as real `ir::Op` variants, and implement `Instruction::Call`/`Branch`/
    `Return`. This is now only needed for gadgets used *unwrapped* - every
