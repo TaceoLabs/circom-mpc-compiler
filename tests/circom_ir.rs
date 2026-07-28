@@ -1,92 +1,50 @@
-use ark_bn254::Bn254;
-use circom_mpc_compiler::interpreter::Interpreter;
+use ark_bn254::{Bn254, Fr};
+use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
-use core::panic;
-use misc::Witness;
-use std::{
-    fs::{self, File},
-    str::FromStr,
-};
+use circom_mpc_compiler::OptLevel;
 
-mod misc;
+mod common;
 
-#[derive(Debug)]
-pub struct TestInputs {
-    inputs: Vec<Vec<ark_bn254::Fr>>,
-    witnesses: Vec<Witness<ark_bn254::Fr>>,
-}
+use common::{circuit_path, inputs_from_test_name, libs_path};
 
-fn read_field_element(s: &str) -> ark_bn254::Fr {
-    if let Some(striped) = s.strip_prefix('-') {
-        -ark_bn254::Fr::from_str(striped).unwrap()
-    } else {
-        ark_bn254::Fr::from_str(s).unwrap()
-    }
-}
+/// Every opt level exercises `CoCircomCompiler::compile`'s unconditional MPC lowering and codegen
+/// (see `docs/ARCHITECTURE.md`, "MPC lowering", "Bytecode and the slot machine") - there is no
+/// plaintext-only path any more, so this matrix is what makes every test below also a correctness
+/// test for lowering and codegen, not just the frontend and the classical passes. The oracle is
+/// agreement across opt levels; `tests/proving.rs`'s prove+verify tests are the value oracle.
+const OPT_LEVELS: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
 
 macro_rules! witness_extension_test_plain {
     ($name: ident) => {
         #[test]
         fn $name() {
-            let inp: TestInputs = from_test_name(stringify!($name));
-            for i in 0..inp.inputs.len() {
-                let mut config = CompilerConfig::default();
-                config.simplification = circom_mpc_compiler::SimplificationLevel::O2(usize::MAX);
-                config.link_library.push("./circuits/libs/".into());
-                let ast = CoCircomCompiler::<Bn254>::parse(
-                    format!("./circuits/{}.circom", stringify!($name)),
-                    config,
-                )
-                .unwrap();
+            let inputs = inputs_from_test_name(stringify!($name));
+            for input in &inputs {
+                let mut prev: Option<Vec<Fr>> = None;
+                for opt_level in OPT_LEVELS {
+                    let mut config = CompilerConfig::default();
+                    config.link_library.push(libs_path());
+                    config.opt_level = opt_level;
+                    let program =
+                        CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
+                            .unwrap();
 
-                assert_eq!(ast.num_inputs, inp.inputs[i].len());
+                    assert_eq!(program.num_inputs, input.len());
 
-                let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
-                let witness = interpreter.run();
+                    let classified = program.classify_inputs(input, |v| v);
+                    let mut driver = PlainDriver;
+                    let witness = Machine::run(&program, &mut driver, &classified).unwrap();
 
-                assert_eq!(witness, inp.witnesses[i].values);
+                    if let Some(prev) = &prev {
+                        assert_eq!(&witness, prev, "opt_level {opt_level:?} disagrees with O0");
+                    }
+                    prev = Some(witness);
+                }
             }
         }
     };
-
-    ($name: ident, $file: expr, $input: expr, $should:expr) => {
-        witness_extension_test_plain!($name, $file, $input, $should, "witness");
-    };
-
-    ($name: ident, $file: expr, $input: expr) => {
-        witness_extension_test_plain!($name, $file, $input, $file);
-    };
-}
-
-pub fn from_test_name(fn_name: &str) -> TestInputs {
-    let mut witnesses: Vec<Witness<ark_bn254::Fr>> = Vec::new();
-    let mut inputs: Vec<Vec<ark_bn254::Fr>> = Vec::new();
-    let mut i = 0;
-    loop {
-        if fs::metadata(format!("./kats/{}/witness{}.wtns", fn_name, i)).is_err() {
-            break;
-        }
-        let witness = File::open(format!("./kats/{}/witness{}.wtns", fn_name, i)).unwrap();
-        let should_witness = Witness::<ark_bn254::Fr>::from_reader(witness).unwrap();
-        witnesses.push(should_witness);
-        let input_file = File::open(format!("./kats/{}/input{}.json", fn_name, i)).unwrap();
-        let json_str: serde_json::Value = serde_json::from_reader(input_file).unwrap();
-        let input = json_str
-            .get("in")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| read_field_element(s.as_str().unwrap()))
-            .collect::<Vec<_>>();
-        inputs.push(input);
-        i += 1
-    }
-    if i == 0 {
-        panic!("no test for {fn_name}");
-    }
-    TestInputs { inputs, witnesses }
 }
 
 witness_extension_test_plain!(multiplier2);
@@ -95,66 +53,63 @@ witness_extension_test_plain!(multiplier16);
 witness_extension_test_plain!(loop_unrolling);
 witness_extension_test_plain!(dead_code);
 witness_extension_test_plain!(multiplier2_public);
-//witness_extension_test_plain!(aliascheck_test);
-//witness_extension_test_plain!(babyadd_tester);
-//witness_extension_test_plain!(babycheck_test);
-//witness_extension_test_plain!(babypbk_test);
-//witness_extension_test_plain!(binsub_test);
-//witness_extension_test_plain!(binsum_test);
-//witness_extension_test_plain!(constants_test);
-//witness_extension_test_plain!(control_flow);
-//witness_extension_test_plain!(eddsa_test);
-//witness_extension_test_plain!(eddsa_verify);
-//witness_extension_test_plain!(eddsamimc_test);
-//witness_extension_test_plain!(eddsaposeidon_test);
-//witness_extension_test_plain!(edwards2montgomery);
-//witness_extension_test_plain!(escalarmul_test);
-//witness_extension_test_plain!(escalarmul_test_min);
-//witness_extension_test_plain!(escalarmulany_test);
-//witness_extension_test_plain!(escalarmulfix_test);
-//witness_extension_test_plain!(escalarmulw4table);
-//witness_extension_test_plain!(escalarmulw4table_test);
-//witness_extension_test_plain!(escalarmulw4table_test3);
-//witness_extension_test_plain!(functions);
-//witness_extension_test_plain!(greatereqthan);
-//witness_extension_test_plain!(greaterthan);
-//witness_extension_test_plain!(isequal);
-//witness_extension_test_plain!(iszero);
-//witness_extension_test_plain!(lesseqthan);
-//witness_extension_test_plain!(lessthan);
-//witness_extension_test_plain!(mimc_hasher);
-//witness_extension_test_plain!(mimc_sponge_hash_test);
-//witness_extension_test_plain!(mimc_sponge_test);
-//witness_extension_test_plain!(mimc_test);
-//witness_extension_test_plain!(montgomery2edwards);
-//witness_extension_test_plain!(montgomeryadd);
-//witness_extension_test_plain!(montgomerydouble);
-//witness_extension_test_plain!(multiplier16);
-//witness_extension_test_plain!(multiplier2);
-//witness_extension_test_plain!(mux1_1);
-//witness_extension_test_plain!(mux2_1);
-//witness_extension_test_plain!(mux3_1);
-//witness_extension_test_plain!(mux4_1);
-//witness_extension_test_plain!(pedersen2_test);
-//witness_extension_test_plain!(pedersen_hasher);
-//witness_extension_test_plain!(pedersen_test);
-//witness_extension_test_plain!(pointbits_loopback);
-//witness_extension_test_plain!(poseidon3_test);
-//witness_extension_test_plain!(poseidon6_test);
-//witness_extension_test_plain!(poseidon_hasher1);
-//witness_extension_test_plain!(poseidon_hasher16);
-//witness_extension_test_plain!(poseidon_hasher2);
-//witness_extension_test_plain!(poseidonex_test);
-//witness_extension_test_plain!(sha256_2_test);
-//witness_extension_test_plain!(sha256_test448);
-//witness_extension_test_plain!(sha256_test512);
-//witness_extension_test_plain!(shared_control_flow);
-//witness_extension_test_plain!(shared_control_flow_arrays);
-//witness_extension_test_plain!(sign_test);
-//witness_extension_test_plain!(sqrt_test);
-//witness_extension_test_plain!(smtprocessor10_test);
-//witness_extension_test_plain!(smtverifier10_test);
-//witness_extension_test_plain!(sum_test);
-//witness_extension_test_plain!(winner);
-//witness_extension_test_plain!(bitonic_sort);
-//witness_extension_test_plain!(num2bits_accelerator);
+witness_extension_test_plain!(constants_test);
+witness_extension_test_plain!(babycheck_test);
+// Exercises constant-condition `if`/`else` (`frontend/build.rs::handle_branch_bucket`).
+witness_extension_test_plain!(control_flow);
+
+#[test]
+fn repeated_dynamic_operands_are_safe_at_o2() {
+    let values = inputs_from_test_name("repeated_operands_o2").remove(0);
+    let mut config = CompilerConfig::default();
+    config.link_library.push(libs_path());
+    config.opt_level = OptLevel::O2;
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("repeated_operands_o2"), config)
+        .unwrap();
+    let inputs = program.classify_inputs(&values, |v| v);
+    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    assert_eq!(witness[1], Fr::from(436u64));
+}
+
+fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
+    let mut config = CompilerConfig::default();
+    config.link_library.push(libs_path());
+    config.opt_level = OptLevel::O2;
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path(circuit), config).unwrap();
+    assert_eq!(program.num_inputs, 0);
+    let mut driver = PlainDriver;
+    Machine::run(&program, &mut driver, &[]).unwrap()
+}
+
+#[test]
+fn static_comparisons_use_circoms_signed_field_order_at_o2() {
+    let witness = run_o2_without_inputs("static_signed_condition");
+    assert_eq!(
+        &witness[1..4],
+        &[Fr::from(7u64), Fr::from(7u64), Fr::from(9u64)]
+    );
+}
+
+#[test]
+fn static_arithmetic_branch_roots_fold_at_o2() {
+    let witness = run_o2_without_inputs("static_arithmetic_condition");
+    assert_eq!(
+        &witness[1..4],
+        &[Fr::from(7u64), Fr::from(8u64), Fr::from(9u64)]
+    );
+}
+
+#[test]
+fn nested_component_at_absolute_offset_zero_is_not_the_root_at_o2() {
+    // The main wrapper declares no signals, so Leaf's absolute signal offset is zero. Compiling and
+    // running must still resolve Leaf's input from its caller rather than treating it as a main
+    // input (which used to produce an out-of-bounds VM input index).
+    run_o2_without_inputs("zero_offset_subcomponent");
+}
+
+// Only the circuits this compiler can actually run are wired up. `circuits/` and `kats/` still
+// hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
+// calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The
+// inventory of what's missing lives in `docs/ARCHITECTURE.md`, "Known gaps", not in this file's
+// failure list. The precomputation gadgets aren't wired up here - `tests/proving.rs`'s
+// prove+verify tests cover them instead.

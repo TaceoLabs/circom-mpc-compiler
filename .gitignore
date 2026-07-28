@@ -20,3 +20,22 @@ target/
 # Added by cargo
 
 /target
+
+# Generated reference artifacts for the merces end-to-end test
+# (scripts/gen-merces-artifacts.sh) - large, and reproducible from that script.
+/artifacts
+
+# The merces ceremony proving keys (13-178 MB each) - real protocol inputs live in
+# inputs/*.json (committed), but these are too large to commit and aren't reproducible by any
+# script here; tests/merces.rs's proving tests skip with a message when this is absent.
+/inputs/zkey
+
+# Generated proving artifacts (scripts/gen-proving-artifacts.sh)
+/kats/proving/*.zkey
+/kats/proving/*.r1cs
+/kats/proving/*-r1cs-info.txt
+
+# merces-net party configs and TLS key/cert material - produced outside this repo
+# (scripts/run-merces-net.sh)
+/configs
+/data

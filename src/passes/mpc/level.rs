@@ -1,0 +1,295 @@
+//! Per-value **network level**: how many communicating events must complete before a value exists.
+//! An event is either a reshare round ([`Op::Round`]) or a shared precomputation batch service
+//! ([`Op::Precompute`]); public services execute locally at their inputs' level while retaining
+//! ordinary instruction order. See
+//! `docs/ARCHITECTURE.md`, "MPC lowering" and "Precomputation".
+//!
+//! A shared site's *results* ([`Op::PrecomputeResult`]) sit one level above its inputs because its
+//! MPC batch must communicate. Public gadget results stay at their inputs' level: they are ordinary
+//! deterministic local work, and charging a network level would split otherwise batchable shared
+//! work. Source order still keeps each public result after its producer.
+//!
+//! **One axis, not two.** Rounds and shared batch services use a single counter rather than getting a
+//! `(depth, stage)` pair. Two consequences make this the right trade:
+//!
+//! - Two shared sites at the same level are mutually independent because a dependency forces `+1`.
+//!   Public sites at one level may depend on each other, so the batch planner additionally enforces
+//!   each batch's anchor/deadline window. The level distinction cannot be recovered from
+//!   multiplicative depth alone: `circuits/merces/merces/
+//!   server.circom` chains `Num2Bits(254)` -> `AliasCheck` -> `IsZero` with **zero multiplications
+//!   between them**, so all three sit at identical multiplicative depth despite being sequentially
+//!   dependent.
+//! - A shared result at `+1` cannot be read at its producer's level. Public results may be read at
+//!   the same level, but source order and the planner's placement window retain that local order.
+//!
+//! The cost, accepted deliberately for a shared site `S`: an unrelated product at `S`'s input level
+//! cannot merge with a product reading `S`'s result. A 2D scheme could sometimes save that reshare,
+//! but would split expensive shared gadget batches more aggressively. Public sites do not pay this
+//! cost because their results stay at the same level.
+//!
+//! Not a registered [`Pass`](super::super::Pass): it mutates nothing. Round scheduling consumes
+//! levels directly; precompute planning consumes site stages and is shared by codegen and
+//! diagnostics. Like [`super::domain`], this is a small library of pure functions rather than a
+//! `PassContext` cache.
+
+use ark_ff::PrimeField;
+
+use crate::ir::{Graph, Op};
+
+#[cfg(test)]
+use super::domain::compute_domains;
+use super::domain::Domain;
+
+/// The network level of every value in `graph`, indexed by [`crate::ir::ValueId`].
+///
+/// Relies only on the topological-order invariant ([`Graph::verify`]): every node's inputs have
+/// smaller indices, so one forward pass suffices. Every rule is `max(inputs)` or `max(inputs) + 1`,
+/// so the result is non-decreasing along every edge. `round_schedule` preserves source order within
+/// a level, keeping same-level public gadget dependencies topological.
+#[cfg(test)]
+pub(crate) fn network_levels<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
+    let domains = compute_domains(graph);
+    network_levels_with_domains(graph, &domains)
+}
+
+/// Computes network levels when the caller already has the graph's domain analysis.
+pub(crate) fn network_levels_with_domains<F: PrimeField>(
+    graph: &Graph<F>,
+    domains: &[Domain],
+) -> Vec<usize> {
+    let nodes = graph.nodes();
+    debug_assert_eq!(nodes.len(), domains.len());
+    let mut level = vec![0usize; nodes.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        let max_input = || {
+            node.inputs
+                .iter()
+                .map(|v| level[v.index()])
+                .max()
+                .unwrap_or(0)
+        };
+        level[i] = match &node.op {
+            // Available before any network event.
+            Op::Input(_) | Op::Constant(_) => 0,
+            // Free local work in every domain - no event of its own.
+            Op::Add | Op::Sub | Op::Mul | Op::MulLocal => max_input(),
+            // The event itself sits at the level of the values it consumes; crossing it is what
+            // costs a level, which is what the two `*Result` arms below charge for.
+            Op::Round(_) | Op::Precompute(_) => max_input(),
+            Op::RoundResult(_) => level[node.inputs[0].index()] + 1,
+            // A public gadget is ordinary deterministic local work. Its result must remain after
+            // its producer in graph order, but it must not advance the communication axis or split
+            // otherwise batchable shared work. Shared gadgets remain real network events.
+            //
+            // Keyed on the *producing* `Op::Precompute` node's own domain (`domains[precompute_idx]`),
+            // not the result's own (`domains[i]`). For every kind but `Reveal` the two coincide -
+            // `passes::mpc::domain::compute_domains` copies a site's domain straight onto its
+            // results - so this is unobservable there. `Reveal` is the one kind whose *result*
+            // domain is unconditionally `Public` (that is its entire purpose) while its *site* can
+            // still genuinely be `Shared` - and a genuine open is a real network event that must
+            // still charge a level, exactly as if the result stayed `Shared`.
+            Op::PrecomputeResult(_) => {
+                let precompute_idx = node.inputs[0].index();
+                match domains[precompute_idx] {
+                    Domain::Public => level[precompute_idx],
+                    Domain::Shared => level[precompute_idx] + 1,
+                    // Invalid lowered graphs are rejected later with a proper codegen error. Keep
+                    // analysis total so diagnostics never turn that rejection into a panic.
+                    Domain::Local => level[precompute_idx] + 1,
+                }
+            }
+        };
+    }
+    level
+}
+
+/// The **stage** of every precomputation site, indexed by [`crate::ir::PrecomputeId`] - the level of
+/// its [`Op::Precompute`] node, i.e. how many network events must complete before the site can be
+/// serviced.
+///
+/// Sites sharing a stage are mutually independent (see the module doc), so
+/// `(kind, stage, domain)` is a sound batch key: everything in one batch can be serviced together.
+///
+/// Panics if a site has no `Op::Precompute` node, which [`Graph::verify`] rules out.
+#[cfg(test)]
+pub(crate) fn site_stages<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
+    let domains = compute_domains(graph);
+    site_stages_with_domains(graph, &domains)
+}
+
+/// Computes site stages when the caller already has the graph's domain analysis.
+pub(crate) fn site_stages_with_domains<F: PrimeField>(
+    graph: &Graph<F>,
+    domains: &[Domain],
+) -> Vec<usize> {
+    let level = network_levels_with_domains(graph, domains);
+    let mut stages = vec![None; graph.precompute_sites().len()];
+    for (i, node) in graph.nodes().iter().enumerate() {
+        if let Op::Precompute(site) = &node.op {
+            stages[site.index()] = Some(level[i]);
+        }
+    }
+    stages
+        .into_iter()
+        .enumerate()
+        .map(|(site, stage)| {
+            stage.unwrap_or_else(|| {
+                panic!("precompute site {site} has no Op::Precompute node - Graph::verify should have rejected this")
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_bn254::Fr;
+
+    use super::*;
+    use crate::ir::{Node, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
+
+    fn site(kind: PrecomputeKind, num_inputs: usize, num_outputs: usize) -> PrecomputeSite {
+        PrecomputeSite {
+            kind,
+            header: "Gadget_0".to_owned(),
+            num_inputs,
+            num_outputs,
+            num_intermediates: 0,
+        }
+    }
+
+    fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId, sites: Vec<PrecomputeSite>) -> Graph<Fr> {
+        let mut graph = Graph::from_parts(
+            nodes,
+            vec![(SignalIdx::new(0), output)],
+            sites,
+            vec![],
+            vec![],
+            vec![],
+            3,
+            1,
+            4,
+        );
+        graph.mark_lowered();
+        graph
+    }
+
+    /// A site's results sit one level above its inputs, never the same level.
+    #[test]
+    fn site_results_are_one_level_above_their_inputs() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+        ];
+        let graph = graph_of(nodes, ValueId::new(2), vec![site(PrecomputeKind::IsZero, 1, 1)]);
+        assert_eq!(network_levels(&graph), vec![0, 0, 1]);
+        assert_eq!(site_stages(&graph), vec![0]);
+    }
+
+    /// The `server.circom` shape: `Num2Bits` -> `AliasCheck` -> `IsZero`, chained with **no
+    /// multiplication between them**. Any scheme keyed on multiplicative depth would put all three
+    /// at depth 0 and batch dependent sites together; levels must separate them.
+    #[test]
+    fn chained_sites_with_no_multiplication_get_distinct_stages() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(4)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+        ];
+        let graph = graph_of(
+            nodes,
+            ValueId::new(6),
+            vec![
+                site(PrecomputeKind::Num2Bits { n: 1 }, 1, 1),
+                site(PrecomputeKind::AliasCheck, 1, 1),
+                site(PrecomputeKind::IsZero, 1, 1),
+            ],
+        );
+        assert_eq!(network_levels(&graph), vec![0, 0, 1, 1, 2, 2, 3]);
+        assert_eq!(site_stages(&graph), vec![0, 1, 2]);
+    }
+
+    /// Two sites reading the same input share a stage, so they can share one driver call.
+    #[test]
+    fn independent_sites_share_a_stage() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(0)]), // 3
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(4)]), // 5
+        ];
+        let graph = graph_of(
+            nodes,
+            ValueId::new(5),
+            vec![
+                site(PrecomputeKind::IsZero, 1, 1),
+                site(PrecomputeKind::IsZero, 1, 1),
+            ],
+        );
+        assert_eq!(site_stages(&graph), vec![0, 0]);
+    }
+
+    #[test]
+    fn public_gadget_does_not_split_shared_batches() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1: public
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 3: shared
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4: shared A
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(2)]), // 6
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(6)]), // 7: shared B
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(7)]), // 8
+            Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(8)]), // 9
+        ];
+        let graph = graph_of(
+            nodes,
+            ValueId::new(9),
+            vec![
+                site(PrecomputeKind::IsZero, 1, 1),
+                site(PrecomputeKind::IsZero, 1, 1),
+                site(PrecomputeKind::IsZero, 1, 1),
+            ],
+        );
+
+        assert_eq!(network_levels(&graph), vec![0, 0, 0, 0, 0, 1, 0, 0, 1, 1]);
+        assert_eq!(site_stages(&graph), vec![0, 0, 0]);
+
+        let domains = super::super::domain::compute_domains(&graph);
+        let plans = super::super::precompute_schedule::plan_precompute_batches(&graph, &domains);
+        assert_eq!(plans.len(), 2, "one public service and one shared service");
+        assert!(plans
+            .iter()
+            .any(|plan| plan.domain == Domain::Shared && plan.sites.len() == 2));
+    }
+
+    /// A round costs a level exactly as a batch service does, and linear ops cost nothing.
+    #[test]
+    fn rounds_and_linear_ops_charge_as_expected() {
+        use crate::ir::{RoundDesc, RoundId, RoundKind};
+
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]), // 2
+            Node::new(Op::Round(RoundId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::RoundResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(0)]), // 5
+        ];
+        let mut graph = graph_of(nodes, ValueId::new(5), vec![]);
+        graph.set_rounds(vec![RoundDesc {
+            kind: RoundKind::Reshare,
+            len: 1,
+            level: 0,
+        }]);
+        // MulLocal is free; crossing the round costs one; the trailing Add is free.
+        assert_eq!(network_levels(&graph), vec![0, 0, 0, 0, 1, 1]);
+    }
+}
