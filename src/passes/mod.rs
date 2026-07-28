@@ -7,7 +7,11 @@ mod algebraic;
 mod const_fold;
 mod cse;
 mod dead_code;
-mod mpc;
+// pub(crate), not private: `vm::codegen` reuses `mpc::domain::{Domain, signal_domain}` - the same
+// per-value classification `mul_split` computes while lowering - to pick opcodes and slot banks,
+// rather than re-deriving domain from scratch. See `docs/ARCHITECTURE.md`, "Bytecode and the slot
+// machine".
+pub(crate) mod mpc;
 mod normalize;
 mod poly;
 

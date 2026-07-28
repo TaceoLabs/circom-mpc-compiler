@@ -5,6 +5,7 @@
 //! plaintext-only end state. See `docs/ARCHITECTURE.md`, "MPC lowering".
 
 pub(crate) mod domain;
+pub(crate) mod level;
 mod mul_split;
 mod round_schedule;
 

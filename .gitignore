@@ -20,3 +20,7 @@ target/
 # Added by cargo
 
 /target
+
+# Generated reference artifacts for the merces end-to-end test
+# (scripts/gen-merces-artifacts.sh) - large, and reproducible from that script.
+/artifacts

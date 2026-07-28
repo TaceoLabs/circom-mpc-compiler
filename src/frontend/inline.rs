@@ -29,7 +29,7 @@ use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
 use super::build::{SubGraphInstance, TemplateGraph, TemplateOp};
-use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
+use crate::ir::{self, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
 
 /// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
 /// signal space) into `nodes`/`outputs`. `input_mapping` carries the values the *caller* stored
@@ -172,6 +172,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
             sub_cmp_inputs,
         ),
         SubGraphInstance::Precomputed {
+            kind,
             name,
             header,
             signal_offset,
@@ -182,6 +183,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
             nodes,
             outputs,
             precompute_sites,
+            kind,
             name,
             header,
             signal_offset,
@@ -195,8 +197,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
 
 /// Turns one `TACEO_PRECOMPUTATION_*`-wrapped component instance into an `Op::Precompute` node
 /// plus one `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body.
-/// Implements the exact contract documented in `docs/ARCHITECTURE.md`, "Precomputation" (kept
-/// byte-compatible with the co-snarks VM's `ComponentAcceleratorOutput`): result slots
+/// Implements the layout documented in `docs/ARCHITECTURE.md`, "Precomputation": result slots
 /// `0..num_outputs` are the wrapped component's own outputs (signals `signal_offset ..`), slots
 /// `num_outputs..` are its subtree's intermediate signals in flat order (signals
 /// `signal_offset + num_outputs + num_inputs ..`).
@@ -205,6 +206,7 @@ fn inline_precomputed<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
+    kind: PrecomputeKind,
     name: String,
     header: String,
     signal_offset: usize,
@@ -213,8 +215,23 @@ fn inline_precomputed<F: PrimeField>(
     num_intermediates: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
+    // Cross-checks the circuit's actual signal layout against what the gadget's VM
+    // implementation is prepared to produce, for every kind whose result count has a closed form
+    // (Poseidon2's doesn't - see `PrecomputeKind::expected_results`, checked instead at
+    // gadget-call time). A mismatch (a widened AliasCheck, a Num2Bits site with intermediates) is
+    // a compile-time panic naming the discrepancy, not a silently truncated or garbage witness.
+    let actual_results = num_outputs + num_intermediates;
+    if let Some(expected) = kind.expected_results() {
+        assert_eq!(
+            actual_results, expected,
+            "precomputed component `{header}` has {actual_results} result slots (signal layout), \
+             but {kind:?} expects {expected}",
+        );
+    }
+
     let site_id = PrecomputeId::new(precompute_sites.len());
     precompute_sites.push(PrecomputeSite {
+        kind,
         name,
         header,
         num_inputs,

@@ -1,0 +1,149 @@
+//! Every test here needs a real rep3 driver, so the whole file is gated on the feature that provides
+//! one - otherwise `cargo test --no-default-features` (the fast, plain-only build the architecture
+//! doc describes) fails to compile this file rather than skipping it.
+#![cfg(feature = "rep3")]
+
+//! Proves `Rep3Driver` against real 3-party rep3 execution: secret-share each KAT input, run the
+//! same `Program` on three threads over `mpc_net::local::LocalNetwork`, reconstruct the witness,
+//! and compare against the same golden `.wtns` fixture the plain KATs use
+//! (`tests/circom_ir.rs`) - this is what proves the rep3 driver agrees with the plain one on
+//! genuinely secret-shared data, not just in the clear. See `docs/ARCHITECTURE.md`, "Bytecode and
+//! the slot machine".
+//!
+//! `multiplier2`/`multiplier16` (a single secret product, and a 15-deep multiplicative chain) are
+//! plain arithmetic only - no `TACEO_PRECOMPUTATION_*` site - covering linear ops, `mul_local`, and
+//! `reshare`. The `precomputation_*_test` circuits below cover the precomputation gadgets instead,
+//! at `SimplificationLevel::O0` - see `tests/circom_ir.rs`'s `witness_extension_test_precompute!`
+//! for why that level specifically.
+
+use ark_bn254::{Bn254, Fr};
+use mpc_core::protocols::rep3::conversion::A2BType;
+use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element};
+use mpc_net::local::LocalNetwork;
+use rand::thread_rng;
+
+use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
+use circom_mpc_compiler::vm::program::Bank;
+use circom_mpc_compiler::vm::Machine;
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+
+mod common;
+
+use common::{circuit_path, from_test_name, libs_path, TestInputs};
+
+fn config() -> CompilerConfig {
+    let mut config = CompilerConfig::default();
+    config.simplification = SimplificationLevel::O2(usize::MAX);
+    config.link_library.push(libs_path());
+    config
+}
+
+fn config_precompute() -> CompilerConfig {
+    let mut config = CompilerConfig::default();
+    config.simplification = SimplificationLevel::O0;
+    config.link_library.push(libs_path());
+    config
+}
+
+/// Runs one KAT input through 3-party rep3 and returns the reconstructed witness.
+fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Vec<Fr> {
+    // One [share0, share1, share2] triple per Shared-domain input, in the same order
+    // `Program::classify_inputs` visits them - each party gets its own entry below.
+    let mut rng = thread_rng();
+    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
+        .input_domains
+        .iter()
+        .zip(values)
+        .filter(|(bank, _)| matches!(bank, Bank::Shared))
+        .map(|(_, &v)| share_field_element(v, &mut rng))
+        .collect();
+
+    let networks = LocalNetwork::new(3);
+    let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let secret_shares = &secret_shares;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(values, |_v| {
+                        let s = secret_shares[next][party];
+                        next += 1;
+                        s
+                    });
+                    Machine::run(program, &mut driver, &inputs).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+
+    let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
+    combine_field_elements(&w0, &w1, &w2)
+}
+
+macro_rules! rep3_witness_extension_test {
+    ($name: ident, $config: expr) => {
+        #[test]
+        fn $name() {
+            let inp: TestInputs = from_test_name(stringify!($name));
+            let program =
+                CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), $config).unwrap();
+            for i in 0..inp.inputs.len() {
+                let witness = run_rep3(&program, &inp.inputs[i]);
+                assert_eq!(witness, inp.witnesses[i].values, "input {i}");
+            }
+        }
+    };
+}
+
+rep3_witness_extension_test!(multiplier2, config());
+rep3_witness_extension_test!(multiplier16, config());
+
+rep3_witness_extension_test!(precomputation_num2bits_test, config_precompute());
+rep3_witness_extension_test!(precomputation_iszero_test, config_precompute());
+rep3_witness_extension_test!(precomputation_aliascheck_test, config_precompute());
+rep3_witness_extension_test!(precomputation_poseidon2_test, config_precompute());
+
+/// Staged precomputation under a *real* network. There is no golden `.wtns` for this circuit (one
+/// would need the external pinned circom fork - see `docs/ARCHITECTURE.md`, "Generating and
+/// cross-checking the golden KATs"), so this compares 3-party rep3 against the plain driver instead,
+/// which is the substitute the gadget unit tests already use.
+///
+/// **This is the test that proves interleaving actually works.** `PlainDriver` cannot detect a
+/// mis-ordered batch - its `reshare` is the identity and every slot starts zeroed, so reading a
+/// not-yet-written slot silently yields a plausible number. Against three real parties the same bug
+/// either deadlocks or consumes uninitialized shares, and the reconstruction diverges.
+#[test]
+fn staged_precomputation_matches_the_plain_driver_under_rep3() {
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_staged_test"),
+        config_precompute(),
+    )
+    .unwrap();
+    assert_eq!(
+        program.precompute_batches.len(),
+        2,
+        "the fixture must actually be staged for this test to mean anything"
+    );
+
+    for values in [
+        [Fr::from(0u64), Fr::from(7u64)],
+        [Fr::from(3u64), Fr::from(5u64)],
+        [Fr::from(11u64), Fr::from(0u64)],
+    ] {
+        let plain = {
+            let inputs = program.classify_inputs(&values, |v| v);
+            let mut driver = PlainDriver;
+            Machine::run(&program, &mut driver, &inputs).unwrap()
+        };
+        assert_eq!(run_rep3(&program, &values), plain, "inputs {values:?}");
+    }
+}

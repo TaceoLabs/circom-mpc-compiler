@@ -28,21 +28,13 @@ impl<F: PrimeField> Pass<F> for RoundSchedule {
             return Ok(false);
         }
 
-        // MPC depth per (old-space) value: 0 for anything before the first round boundary, a round
-        // crossing bumps depth by one. See docs/ARCHITECTURE.md, "MPC lowering", for the formula.
-        let mut depth = vec![0usize; nodes.len()];
-        for (i, node) in nodes.iter().enumerate() {
-            depth[i] = match &node.op {
-                Op::Input(_) | Op::Constant(_) | Op::Precompute(_) | Op::PrecomputeResult(_) => 0,
-                Op::Add | Op::Sub | Op::Mul | Op::MulLocal => {
-                    node.inputs.iter().map(|v| depth[v.index()]).max().unwrap_or(0)
-                }
-                // Same depth as the local product(s) that feed it - "this round crosses a
-                // boundary at this depth".
-                Op::Round(_) => node.inputs.iter().map(|v| depth[v.index()]).max().unwrap_or(0),
-                Op::RoundResult(_) => depth[node.inputs[0].index()] + 1,
-            };
-        }
+        // Network level per (old-space) value - see `super::level`, which owns the formula because
+        // `vm::codegen` and `Graph::mpc_summary` need the identical numbers. Crucially this charges a
+        // level for crossing a *precomputation site* as well as a round: a site's results are not
+        // available at the same instant as its inputs (every rep3 `VmDriver::*_traces` gadget
+        // communicates), and pretending otherwise made the depth-bucketed rebuild below emit a
+        // forward reference whenever a site's inputs were computed rather than bare `Op::Input`s.
+        let depth = super::level::network_levels(graph);
 
         // Every singleton round mul_split created, grouped by depth, in original creation order -
         // that order is also each round's slot order in the merged round. mul_split always emits
@@ -91,7 +83,7 @@ impl<F: PrimeField> Pass<F> for RoundSchedule {
                 new_rounds.push(RoundDesc {
                     kind: RoundKind::Reshare,
                     len: slots.len(),
-                    depth: d,
+                    level: d,
                 });
                 let round_inputs = slots
                     .iter()
@@ -119,15 +111,23 @@ impl<F: PrimeField> Pass<F> for RoundSchedule {
 mod tests {
     use ark_bn254::Fr;
 
-    use crate::ir::{Node, Op, SignalIdx, ValueId};
+    use crate::ir::{Node, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
 
     use super::*;
 
     fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId) -> Graph<Fr> {
+        graph_with_sites(nodes, output, vec![])
+    }
+
+    fn graph_with_sites(
+        nodes: Vec<Node<Fr>>,
+        output: ValueId,
+        sites: Vec<PrecomputeSite>,
+    ) -> Graph<Fr> {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],
-            vec![],
+            sites,
             vec![],
             vec![],
             vec![],
@@ -177,5 +177,49 @@ mod tests {
         assert!(changed);
         assert_eq!(graph.rounds().len(), 1);
         assert_eq!(graph.rounds()[0].len, 2);
+    }
+
+    /// Regression for a genuine panic (`round_schedule: input not yet placed`, an `expect` so it
+    /// fired in release too). A precomputation site whose inputs are *computed* rather than bare
+    /// `Op::Input`s used to be pinned to level 0 while its inputs sat deeper, so the rebuild below
+    /// visited the site before the values it reads. This is the shape
+    /// `circuits/merces/merces/dependencies/merkle_root_4.circom` has - `Arity4CMux` multiplies
+    /// secret selector bits, feeds a Poseidon2 site, and that site's result feeds the next level -
+    /// so it blocked every merces circuit before `level::network_levels` charged for a site.
+    #[test]
+    fn site_between_two_products_does_not_panic() {
+        use super::super::mul_split::MulSplit;
+
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: a
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b
+            Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]), // 2: a*b (round 0)
+            // The site consumes a value that only exists after round 0.
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]),              // 4
+            // ... and its result feeds a further product, which therefore needs its own round.
+            Node::new(Op::Mul, vec![ValueId::new(4), ValueId::new(0)]), // 5
+        ];
+        let mut graph = graph_with_sites(
+            nodes,
+            ValueId::new(5),
+            vec![PrecomputeSite {
+                kind: PrecomputeKind::IsZero,
+                name: "IsZero".to_owned(),
+                header: "IsZero_0".to_owned(),
+                num_inputs: 1,
+                num_outputs: 1,
+                num_intermediates: 1,
+            }],
+        );
+        Pass::run(&mut MulSplit, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        assert!(changed);
+        // Two products separated by a site service: they can never share a round.
+        assert_eq!(graph.rounds().len(), 2);
+        assert!(graph.rounds().iter().all(|r| r.len == 1));
+        // The site sits between them on the same axis, so the second round is two levels later.
+        assert_eq!(graph.rounds()[0].level, 0);
+        assert_eq!(graph.rounds()[1].level, 2);
     }
 }

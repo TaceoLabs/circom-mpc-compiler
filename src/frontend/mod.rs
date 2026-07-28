@@ -29,7 +29,7 @@ use rustc_hash::FxHashMap;
 use crate::ir;
 use crate::{CompilerConfig, SimplificationLevel};
 
-use build::GraphCompiler;
+use build::{GraphCompiler, PrecomputeOptions};
 
 /// A list of circuit inputs: (name, witness offset, size).
 pub(crate) type InputList = ir::InputList;
@@ -196,12 +196,40 @@ pub(crate) fn build_graph<P: Pairing>(
 
     let main_inputs = circuit.c_producer.number_of_main_inputs;
     let main_outputs = circuit.c_producer.number_of_main_outputs;
+    // circom reports each input's `start` in *witness* numbering: position 0 is the reserved constant
+    // `1`, then main's outputs, then its inputs - so the first input starts at `1 + main_outputs`.
+    // Rebase to 0-based over the inputs alone, which is the numbering every consumer in this crate
+    // actually uses (`passes::mpc::domain::signal_domain` derives its index as `signal - num_outputs`,
+    // and `fixtures::flatten` indexes a `num_inputs`-long vector).
+    //
+    // Rebasing here rather than at each consumer is what keeps them consistent. Before this the two
+    // numberings were silently compared, so `signal_domain`'s range check could never match and every
+    // declared-public input was conservatively classified `Shared`. That direction is safe (see its
+    // own doc comment), which is why no golden-witness KAT caught it - but with more than one main
+    // output the offset instead lands inside an unrelated input's range and misclassifies a genuinely
+    // secret input as public, which `Machine::run` then rejects outright.
+    let input_base = 1 + main_outputs;
     let input_list = circuit
         .c_producer
         .main_input_list
         .into_iter()
-        .map(|x| (x.name, x.start, x.size))
+        .map(|x| {
+            let start = x.start.checked_sub(input_base).unwrap_or_else(|| {
+                panic!(
+                    "circom reported input `{}` at witness offset {}, before the first input slot \
+                     ({input_base} = 1 reserved constant + {main_outputs} main outputs) - the \
+                     witness layout assumption in frontend/mod.rs no longer holds",
+                    x.name, x.start
+                )
+            });
+            (x.name, start, x.size)
+        })
         .collect::<InputList>();
+    debug_assert_eq!(
+        input_list.iter().map(|(_, _, size)| size).sum::<usize>(),
+        main_inputs,
+        "input_list sizes must cover exactly the declared inputs"
+    );
 
     let mut compiled_graphs = FxHashMap::default();
     let main_graph_compiler = GraphCompiler::<P>::new(
@@ -209,7 +237,7 @@ pub(crate) fn build_graph<P: Pairing>(
         &mut templates,
         &mut compiled_graphs,
         &constant_table,
-        config.precomputation,
+        PrecomputeOptions::from(&config),
         &signal_spans,
     );
     let main_template_graph = main_graph_compiler.parse()?;

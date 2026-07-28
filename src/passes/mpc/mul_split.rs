@@ -52,7 +52,7 @@ impl<F: PrimeField> Pass<F> for MulSplit {
                 rounds.push(RoundDesc {
                     kind: RoundKind::Reshare,
                     len: 1,
-                    depth: 0, // recomputed structurally by round_schedule; unused until then
+                    level: 0, // recomputed structurally by round_schedule; unused until then
                 });
                 domain.push(Domain::Local); // MulLocal
                 domain.push(Domain::Public); // Round's own value is never read directly

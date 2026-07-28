@@ -1,0 +1,949 @@
+//! `Graph<F>` -> `Program<F>`: not a `Pass` (it changes representation, not the IR), called by
+//! `CoCircomCompiler::compile` once `PassManager` has finished lowering. A single forward walk
+//! over `graph.nodes()` (already topologically ordered - `Graph::verify`) doing three things at
+//! once: classifying each value's `Domain` (reusing `passes::mpc::domain`, the same analysis
+//! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
+//! emission. See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+
+use ark_ff::PrimeField;
+
+use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
+use crate::passes::mpc::domain::{signal_domain, Domain};
+use crate::passes::mpc::level;
+
+use super::program::{
+    Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
+    SlotCounts, StoreEntry,
+};
+
+/// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a
+/// new one, `free` returns a slot to the pool. This is the whole allocator - liveness (computed
+/// once, up front) drives when `free` is called, not anything in here.
+struct BankAlloc {
+    free: Vec<u32>,
+    next: u32,
+}
+
+impl BankAlloc {
+    fn starting_at(next: u32) -> Self {
+        Self {
+            free: Vec::new(),
+            next,
+        }
+    }
+
+    fn alloc(&mut self) -> u32 {
+        self.free.pop().unwrap_or_else(|| {
+            let slot = self.next;
+            self.next += 1;
+            slot
+        })
+    }
+
+    /// No-op for a slot in a reserved (non-recycled) region - callers only free slots they
+    /// allocated from `self` in the first place, but a reserved-region slot never went through
+    /// `alloc`, so this only guards against a caller accidentally passing one in.
+    fn free(&mut self, slot: u32, reserved_below: u32) {
+        if slot >= reserved_below {
+            self.free.push(slot);
+        }
+    }
+}
+
+/// Where one node's value currently lives.
+#[derive(Clone, Copy)]
+struct Slot {
+    bank: Bank,
+    index: u32,
+}
+
+/// Domain of every node, in the graph's own order - the same per-node classification `mul_split`
+/// computes while rewriting (see its module doc for why it can't be precomputed there), but
+/// codegen only *reads* the graph, so a single old-space pass suffices here.
+fn compute_domains<F: PrimeField>(graph: &Graph<F>) -> Vec<Domain> {
+    let nodes = graph.nodes();
+    let mut domain: Vec<Domain> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let d = match &node.op {
+            Op::Input(sig) => signal_domain(
+                graph.num_outputs,
+                &graph.input_list,
+                &graph.public_inputs,
+                *sig,
+            ),
+            Op::Constant(_) => Domain::Public,
+            Op::Add | Op::Sub | Op::Mul => {
+                domain[node.inputs[0].index()].join(domain[node.inputs[1].index()])
+            }
+            Op::MulLocal => Domain::Local,
+            // Never read directly (see their own docs) - the domain recorded here is never
+            // consulted by anything.
+            Op::Round(_) | Op::Precompute(_) => Domain::Public,
+            Op::RoundResult(_) | Op::PrecomputeResult(_) => Domain::Shared,
+        };
+        domain.push(d);
+    }
+    domain
+}
+
+/// Last node index (in graph order) that reads each value - a value with no reader at all keeps
+/// its own index (dead by construction only if `gc` missed it, which it shouldn't - see
+/// `Graph::gc`). A value referenced by `graph.outputs()` gets `nodes.len()` (never freed): its
+/// slot must still hold the right value after the instruction stream finishes, when `stores`
+/// reads it - freeing it mid-stream for reuse would let a later instruction clobber it.
+fn compute_last_use<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
+    let nodes = graph.nodes();
+    let mut last_use: Vec<usize> = (0..nodes.len()).collect();
+    for (i, node) in nodes.iter().enumerate() {
+        for input in &node.inputs {
+            last_use[input.index()] = i;
+        }
+    }
+    for &(_, value) in graph.outputs() {
+        last_use[value.index()] = nodes.len();
+    }
+    last_use
+}
+
+/// Picks the opcode, result bank, and whether to swap `(a, b)` so they match the opcode's fixed
+/// operand order - `Add`/`Mul` are commutative (codegen reorders rather than doubling the opcode
+/// count), `Sub` is not (hence both `SubSP` and `SubPS`). `Local` never reaches here: `mul_split`
+/// only ever produces a bare `MulLocal` immediately wrapped by a `Round`, so an `Add`/`Sub`/`Mul`
+/// operand is always `Public` or `Shared` in a well-formed lowered graph - a `Local` operand means
+/// an earlier pass broke that invariant, which is exactly the case
+/// `Unsupported`-style errors elsewhere in this compiler exist to catch instead of silently
+/// mis-encoding.
+fn select_opcode(op: &Op<impl PrimeField>, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank, bool)> {
+    if da == Domain::Local || db == Domain::Local {
+        eyre::bail!(
+            "codegen: a Local-domain value reached {op:?} directly - it must only ever feed a \
+             Round (rep3's reshare); this is a lowering invariant violation, not a supported circuit \
+             shape"
+        );
+    }
+    use Domain::{Public, Shared};
+    Ok(match (op, da, db) {
+        (Op::Add, Public, Public) => (Opcode::AddPP, Bank::Public, false),
+        (Op::Add, Shared, Shared) => (Opcode::AddSS, Bank::Shared, false),
+        (Op::Add, Shared, Public) => (Opcode::AddSP, Bank::Shared, false),
+        (Op::Add, Public, Shared) => (Opcode::AddSP, Bank::Shared, true),
+        (Op::Sub, Public, Public) => (Opcode::SubPP, Bank::Public, false),
+        (Op::Sub, Shared, Shared) => (Opcode::SubSS, Bank::Shared, false),
+        (Op::Sub, Shared, Public) => (Opcode::SubSP, Bank::Shared, false),
+        (Op::Sub, Public, Shared) => (Opcode::SubPS, Bank::Shared, false),
+        (Op::Mul, Public, Public) => (Opcode::MulPP, Bank::Public, false),
+        (Op::Mul, Shared, Public) => (Opcode::MulSP, Bank::Shared, false),
+        (Op::Mul, Public, Shared) => (Opcode::MulSP, Bank::Shared, true),
+        (Op::Mul, Shared, Shared) => eyre::bail!(
+            "codegen: a secret x secret Mul survived MPC lowering - mul_split should have split \
+             every one of these into MulLocal + Round before codegen ever runs"
+        ),
+        _ => unreachable!("select_opcode only ever called for Op::Add/Sub/Mul"),
+    })
+}
+
+/// One planned [`PrecomputeBatch`]: which sites it services, and where in the instruction stream its
+/// [`Opcode::Precompute`] goes.
+struct BatchPlan {
+    kind: PrecomputeKind,
+    /// `(PrecomputeId, that site's `Op::Precompute` node index)`, in site order - which is also the
+    /// order the batch's flat input/result slot lists are laid out in.
+    sites: Vec<(usize, usize)>,
+    /// The last node index defining any of this batch's sites. Every input of every site in the
+    /// batch precedes its own `Op::Precompute` node, so all of them are resolved by here.
+    anchor: usize,
+}
+
+/// Groups a circuit's precomputation sites into batches keyed by `(kind, stage)` and decides where
+/// each batch is serviced.
+///
+/// Placement is **anchor/deadline**, not "flush once the level advances past the stage". The latter
+/// would assume graph order is level-sorted; `round_schedule` does produce such an order, but it
+/// early-returns without reordering anything when the circuit has no secret multiplications at all -
+/// which is exactly the `Num2Bits` -> `AliasCheck` -> `IsZero` shape in
+/// `circuits/merces/merces/server.circom` (three stages, zero rounds). An anchor is correct on any
+/// topological order.
+///
+/// Levels only *propose* the grouping; the `anchor < deadline` check disposes of a bad one with a
+/// real error. Same posture as the `Local`-escape assertion elsewhere in this module: analysis
+/// proposes, check disposes.
+fn plan_precompute_batches<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Vec<BatchPlan>> {
+    let nodes = graph.nodes();
+    let sites = graph.precompute_sites();
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    let levels = level::network_levels(graph);
+
+    // Graph::verify guarantees exactly one Op::Precompute node per site.
+    let mut site_node = vec![usize::MAX; sites.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        if let Op::Precompute(site_id) = &node.op {
+            site_node[site_id.index()] = i;
+        }
+    }
+
+    // The earliest node that *reads* any of a site's results. `Op::PrecomputeResult` nodes are the
+    // results themselves, not readers, so this looks one edge further out.
+    let mut first_reader = vec![nodes.len(); sites.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        for input in &node.inputs {
+            if !matches!(nodes[input.index()].op, Op::PrecomputeResult(_)) {
+                continue;
+            }
+            let producer = &nodes[nodes[input.index()].inputs[0].index()];
+            if let Op::Precompute(site_id) = &producer.op {
+                let slot = &mut first_reader[site_id.index()];
+                *slot = (*slot).min(i);
+            }
+        }
+    }
+
+    let mut plans: Vec<BatchPlan> = Vec::new();
+    let mut stages: Vec<usize> = Vec::new();
+    for (site_id, site) in sites.iter().enumerate() {
+        let stage = levels[site_node[site_id]];
+        match plans
+            .iter_mut()
+            .zip(&stages)
+            .find(|(plan, s)| plan.kind == site.kind && **s == stage)
+        {
+            Some((plan, _)) => {
+                plan.sites.push((site_id, site_node[site_id]));
+                plan.anchor = plan.anchor.max(site_node[site_id]);
+            }
+            None => {
+                plans.push(BatchPlan {
+                    kind: site.kind,
+                    sites: vec![(site_id, site_node[site_id])],
+                    anchor: site_node[site_id],
+                });
+                stages.push(stage);
+            }
+        }
+    }
+
+    // Deterministic order: by stage, then by the batch's first site.
+    let mut ordered: Vec<(usize, BatchPlan)> = stages.into_iter().zip(plans).collect();
+    ordered.sort_by_key(|(stage, plan)| (*stage, plan.sites[0].0));
+
+    for (stage, plan) in &ordered {
+        let deadline = plan
+            .sites
+            .iter()
+            .map(|&(site_id, _)| first_reader[site_id])
+            .min()
+            .expect("a batch always has at least one site");
+        eyre::ensure!(
+            plan.anchor < deadline,
+            "codegen: precomputation batch ({:?}, stage {stage}) cannot be serviced as a single \
+             driver call - one of its sites' inputs is only defined after another's results are \
+             already read. Two sites in one batch must be mutually independent (see \
+             passes::mpc::level).",
+            plan.kind,
+        );
+    }
+
+    Ok(ordered.into_iter().map(|(_, plan)| plan).collect())
+}
+
+/// Compiles a fully lowered graph (`PassManager::run` has already run - see
+/// `CoCircomCompiler::compile`) into a `Program`.
+pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
+    let nodes = graph.nodes();
+    let domain = compute_domains(graph);
+    let mut last_use = compute_last_use(graph);
+    let plans = plan_precompute_batches(graph)?;
+
+    // A site's inputs must still hold their values when its *batch* runs, which is later than the
+    // `Op::Precompute` node that reads them - so extend their lifetimes to the batch's anchor.
+    //
+    // Currently masked on frontend-produced graphs: `inline_precomputed` pushes every site input
+    // into `graph.outputs()`, and `compute_last_use` pins outputs to `nodes.len()`. Done anyway,
+    // because hand-built codegen test graphs don't bind site inputs to outputs, and any future
+    // witness-compaction pass that stops binding intermediate signals would silently reintroduce a
+    // clobbered-input bug that no golden KAT would localize.
+    for plan in &plans {
+        for &(_, site_node) in &plan.sites {
+            for input in &nodes[site_node].inputs {
+                last_use[input.index()] = last_use[input.index()].max(plan.anchor);
+            }
+        }
+    }
+    // Batch indices anchored at each node, emitted right after that node is processed.
+    let mut batches_at: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for (batch_idx, plan) in plans.iter().enumerate() {
+        batches_at[plan.anchor].push(batch_idx);
+    }
+
+    // --- Phase A: reserved (non-recycled) regions ---
+    // Public bank: constants, in encounter order, then every Public-domain kept Op::Input.
+    // Shared bank: every precompute site's result span (site order), then every Shared-domain
+    // kept Op::Input. See docs/ARCHITECTURE.md, "Bytecode and the slot machine".
+    let mut slot: Vec<Option<Slot>> = vec![None; nodes.len()];
+    let mut constants: Vec<F> = Vec::new();
+    let mut p_next: u32 = 0;
+    let mut s_next: u32 = 0;
+
+    for (i, node) in nodes.iter().enumerate() {
+        if let Op::Constant(c) = &node.op {
+            slot[i] = Some(Slot {
+                bank: Bank::Public,
+                index: p_next,
+            });
+            constants.push(*c);
+            p_next += 1;
+        }
+    }
+
+    let mut site_result_base: Vec<u32> = Vec::with_capacity(graph.precompute_sites().len());
+    for site in graph.precompute_sites() {
+        site_result_base.push(s_next);
+        let results = u32::try_from(site.num_outputs + site.num_intermediates)
+            .expect("precompute site has more results than fit into u32");
+        s_next += results;
+    }
+
+    let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs);
+    let mut input_bindings: Vec<InputBinding> = Vec::new();
+    for input_index in 0..graph.num_inputs {
+        let sig = crate::ir::SignalIdx::new(graph.num_outputs + input_index);
+        let d = signal_domain(graph.num_outputs, &graph.input_list, &graph.public_inputs, sig);
+        input_domains.push(match d {
+            Domain::Public => Bank::Public,
+            Domain::Shared => Bank::Shared,
+            Domain::Local => unreachable!("signal_domain never returns Local"),
+        });
+    }
+    for (i, node) in nodes.iter().enumerate() {
+        if let Op::Input(sig) = &node.op {
+            let input_index = sig.index() - graph.num_outputs;
+            let bank = input_domains[input_index];
+            let s = match bank {
+                Bank::Public => {
+                    let idx = p_next;
+                    p_next += 1;
+                    Slot {
+                        bank: Bank::Public,
+                        index: idx,
+                    }
+                }
+                Bank::Shared => {
+                    let idx = s_next;
+                    s_next += 1;
+                    Slot {
+                        bank: Bank::Shared,
+                        index: idx,
+                    }
+                }
+                Bank::Local => unreachable!("an input's domain is never Local"),
+            };
+            slot[i] = Some(s);
+            input_bindings.push(InputBinding {
+                bank,
+                slot: s.index,
+                input_index: u32::try_from(input_index).expect("input index does not fit into u32"),
+            });
+        }
+    }
+
+    let p_reserved_end = p_next;
+    let s_reserved_end = s_next;
+
+    // --- Phase B: the recyclable arena + instruction emission ---
+    let mut p_alloc = BankAlloc::starting_at(p_reserved_end);
+    let mut s_alloc = BankAlloc::starting_at(s_reserved_end);
+    let mut l_alloc = BankAlloc::starting_at(0);
+
+    let mut instructions: Vec<Instruction> = Vec::new();
+    let mut rounds: Vec<RoundEntry> = vec![
+        RoundEntry {
+            operand_start: 0,
+            len: 0,
+            result_start: 0
+        };
+        graph.rounds().len()
+    ];
+    let mut round_operands: Vec<u32> = Vec::new();
+    let mut round_results: Vec<u32> = Vec::new();
+
+    // One entry per PrecomputeId, filled as each Op::Precompute node is walked.
+    let mut site_inputs: Vec<Vec<SiteInput>> = vec![Vec::new(); graph.precompute_sites().len()];
+
+    let mut i = 0usize;
+    while i < nodes.len() {
+        let node = &nodes[i];
+        match &node.op {
+            Op::Constant(_) | Op::Input(_) => {
+                // Slot already assigned in Phase A.
+            }
+            Op::Add | Op::Sub | Op::Mul => {
+                let da = domain[node.inputs[0].index()];
+                let db = domain[node.inputs[1].index()];
+                let (opcode, dst_bank, swap) = select_opcode(&node.op, da, db)?;
+                let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
+                let sb = slot[node.inputs[1].index()].expect("operand not yet resolved");
+                let (a, b) = if swap { (sb.index, sa.index) } else { (sa.index, sb.index) };
+                let dst = match dst_bank {
+                    Bank::Public => p_alloc.alloc(),
+                    Bank::Shared => s_alloc.alloc(),
+                    Bank::Local => unreachable!("Add/Sub/Mul never produce a Local result"),
+                };
+                instructions.push(Instruction { op: opcode, dst, a, b });
+                slot[i] = Some(Slot {
+                    bank: dst_bank,
+                    index: dst,
+                });
+                free_if_dead(node.inputs[0], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[1], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+            }
+            Op::MulLocal => {
+                let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
+                let sb = slot[node.inputs[1].index()].expect("operand not yet resolved");
+                if domain[node.inputs[0].index()] != Domain::Shared
+                    || domain[node.inputs[1].index()] != Domain::Shared
+                {
+                    eyre::bail!(
+                        "codegen: MulLocal's operands must both be Shared (rep3's local_mul_vec \
+                         needs two genuine shares) - got {:?}/{:?}",
+                        domain[node.inputs[0].index()],
+                        domain[node.inputs[1].index()]
+                    );
+                }
+                let dst = l_alloc.alloc();
+                instructions.push(Instruction {
+                    op: Opcode::MulLocal,
+                    dst,
+                    a: sa.index,
+                    b: sb.index,
+                });
+                slot[i] = Some(Slot {
+                    bank: Bank::Local,
+                    index: dst,
+                });
+                free_if_dead(node.inputs[0], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[1], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+            }
+            Op::Round(round_id) => {
+                let operand_start = u32::try_from(round_operands.len()).expect("too many round operands");
+                for &input in &node.inputs {
+                    let s = slot[input.index()].expect("round operand not yet resolved");
+                    if s.bank != Bank::Local {
+                        eyre::bail!(
+                            "codegen: a Round's operand must be a Local (MulLocal) value, got {:?}",
+                            s.bank
+                        );
+                    }
+                    round_operands.push(s.index);
+                    l_alloc.free(s.index, 0);
+                }
+                let len = u32::try_from(node.inputs.len()).expect("round has more slots than fit into u32");
+
+                // round_schedule guarantees a Round node is immediately followed by exactly `len`
+                // RoundResult(0..len) nodes, in slot order - see its own module doc, and
+                // docs/ARCHITECTURE.md, "MPC lowering". Codegen relies on the same guarantee its
+                // own producer already asserts, rather than re-deriving the mapping some other way.
+                let result_start = u32::try_from(round_results.len()).expect("too many round results");
+                for k in 0..node.inputs.len() {
+                    let result_idx = i + 1 + k;
+                    let expected_k = u32::try_from(k).unwrap();
+                    match nodes.get(result_idx).map(|n| &n.op) {
+                        Some(Op::RoundResult(slot_k)) if *slot_k == expected_k => {}
+                        other => eyre::bail!(
+                            "codegen: Round {} expected RoundResult({expected_k}) at node {result_idx}, \
+                             found {other:?} - round_schedule's adjacency invariant was violated",
+                            round_id.index()
+                        ),
+                    }
+                    let dst = s_alloc.alloc();
+                    round_results.push(dst);
+                    slot[result_idx] = Some(Slot {
+                        bank: Bank::Shared,
+                        index: dst,
+                    });
+                }
+                rounds[round_id.index()] = RoundEntry {
+                    operand_start,
+                    len,
+                    result_start,
+                };
+                instructions.push(Instruction {
+                    op: Opcode::Reshare,
+                    dst: 0,
+                    a: u32::try_from(round_id.index()).expect("round id does not fit into u32"),
+                    b: 0,
+                });
+                // Free every RoundResult(k) input that died the instant it was produced (rare -
+                // an unread result would already have been dropped by an earlier gc in practice,
+                // but the allocator handles it correctly regardless).
+                for k in 0..node.inputs.len() {
+                    let result_idx = i + 1 + k;
+                    free_if_dead(
+                        ValueId::new(result_idx),
+                        result_idx,
+                        &last_use,
+                        &slot,
+                        &mut p_alloc,
+                        &mut s_alloc,
+                        p_reserved_end,
+                        s_reserved_end,
+                    );
+                }
+                i += node.inputs.len(); // skip the RoundResult nodes just handled
+            }
+            Op::RoundResult(_) => {
+                unreachable!(
+                    "every RoundResult is consumed by its Round's own arm above - codegen never \
+                     visits one on its own"
+                );
+            }
+            Op::Precompute(site_id) => {
+                // A site's inputs are ordinary operands, resolved like any other. They are *not*
+                // required to be bare `Op::Input`/`Op::Constant`: batches are serviced at their own
+                // point in the instruction stream (see `Opcode::Precompute`), so a site whose inputs
+                // are computed is fine - which is what the merces circuits need, since their
+                // Poseidon2 sites chain through secret multiplications.
+                let mut inputs = Vec::with_capacity(node.inputs.len());
+                for &input in &node.inputs {
+                    let s = slot[input.index()].expect("precompute input not yet resolved");
+                    if s.bank == Bank::Local {
+                        eyre::bail!(
+                            "codegen: precomputation site {} reads a Local (un-reshared MulLocal) \
+                             value - it must be reshared first; this is a lowering invariant \
+                             violation",
+                            site_id.index()
+                        );
+                    }
+                    inputs.push(SiteInput {
+                        bank: s.bank,
+                        slot: s.index,
+                    });
+                }
+                site_inputs[site_id.index()] = inputs;
+                // The Precompute node's own value is never read directly (only via
+                // PrecomputeResult) - it needs no slot.
+            }
+            Op::PrecomputeResult(result_slot) => {
+                let Op::Precompute(site_id) = &nodes[node.inputs[0].index()].op else {
+                    unreachable!("Graph::verify guarantees PrecomputeResult's input is Precompute");
+                };
+                let dst = site_result_base[site_id.index()] + result_slot;
+                slot[i] = Some(Slot {
+                    bank: Bank::Shared,
+                    index: dst,
+                });
+            }
+        }
+        // Every batch anchored here is serviced now: all of its sites' inputs are resolved, and
+        // `plan_precompute_batches` has checked that nothing reads its results before this point.
+        for &batch_idx in &batches_at[i] {
+            instructions.push(Instruction {
+                op: Opcode::Precompute,
+                dst: 0,
+                a: u32::try_from(batch_idx).expect("more precompute batches than fit into u32"),
+                b: 0,
+            });
+            // Site inputs were pinned to this anchor by the liveness extension above, so this is
+            // where they become recyclable.
+            for &(_, site_node) in &plans[batch_idx].sites {
+                for &input in &nodes[site_node].inputs {
+                    free_if_dead(
+                        input,
+                        i,
+                        &last_use,
+                        &slot,
+                        &mut p_alloc,
+                        &mut s_alloc,
+                        p_reserved_end,
+                        s_reserved_end,
+                    );
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // --- Assemble the planned batches; slot lists follow each plan's own site order ---
+    let batches: Vec<PrecomputeBatch> = plans
+        .iter()
+        .map(|plan| {
+            let mut input_slots = Vec::new();
+            let mut result_slots = Vec::new();
+            for &(site_id, _) in &plan.sites {
+                let site = &graph.precompute_sites()[site_id];
+                input_slots.extend_from_slice(&site_inputs[site_id]);
+                let results = site.num_outputs + site.num_intermediates;
+                result_slots.extend(
+                    (0..results).map(|k| site_result_base[site_id] + u32::try_from(k).unwrap()),
+                );
+            }
+            PrecomputeBatch {
+                kind: plan.kind,
+                sites: plan.sites.len(),
+                input_slots,
+                result_slots,
+            }
+        })
+        .collect();
+
+    // --- Stores: every circuit output/signal, read back once the stream (and precompute phase)
+    // have both run.
+    let mut stores = Vec::with_capacity(graph.outputs().len());
+    for &(signal, value) in graph.outputs() {
+        let s = slot[value.index()].expect("output value not yet resolved");
+        if s.bank == Bank::Local {
+            eyre::bail!(
+                "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
+                 reshared (Op::Round) first; this is a lowering invariant violation"
+            );
+        }
+        stores.push(StoreEntry {
+            bank: s.bank,
+            slot: s.index,
+            signal: signal.index() as u32,
+        });
+    }
+
+    Ok(Program {
+        instructions,
+        constants,
+        input_domains,
+        inputs: input_bindings,
+        rounds,
+        round_operands,
+        round_results,
+        precompute_batches: batches,
+        stores,
+        signal_to_witness: graph.signal_to_witness.clone(),
+        num_inputs: graph.num_inputs,
+        num_outputs: graph.num_outputs,
+        num_signals: graph.num_signals,
+        slots: SlotCounts {
+            public: p_alloc.next,
+            shared: s_alloc.next,
+            local: l_alloc.next,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn free_if_dead(
+    value: ValueId,
+    current: usize,
+    last_use: &[usize],
+    slot: &[Option<Slot>],
+    p_alloc: &mut BankAlloc,
+    s_alloc: &mut BankAlloc,
+    p_reserved_end: u32,
+    s_reserved_end: u32,
+) {
+    if last_use[value.index()] != current {
+        return;
+    }
+    let Some(s) = slot[value.index()] else {
+        return;
+    };
+    match s.bank {
+        Bank::Public => p_alloc.free(s.index, p_reserved_end),
+        Bank::Shared => s_alloc.free(s.index, s_reserved_end),
+        Bank::Local => {} // freed directly at the Round arm, not through this helper
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_bn254::Fr;
+
+    use super::*;
+    use crate::ir::{Node, PrecomputeId, PrecomputeSite, SignalIdx};
+
+    #[test]
+    fn slot_reuse_keeps_peak_width_below_node_count() {
+        // A chain of 4 public additions where only the final sum is a circuit output - v2/v4/v6
+        // are genuine SSA temporaries with no name of their own (matching how a single nested
+        // circom expression like `out <== (((a+b)+c)+d)+e;` lowers: no intermediate
+        // `LocalSignalWrite`, so none of them is a `graph.outputs()` entry - see
+        // `frontend/inline.rs`). Each one's slot must free the instant the next addition consumes
+        // it, so the 5 constants (permanently reserved) plus a couple of reused dynamic slots
+        // should land well under one slot per node.
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(1u64)), vec![]), // 0
+            Node::new(Op::Constant(Fr::from(2u64)), vec![]), // 1
+            Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 2
+            Node::new(Op::Constant(Fr::from(3u64)), vec![]), // 3
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(3)]), // 4
+            Node::new(Op::Constant(Fr::from(4u64)), vec![]), // 5
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(5)]), // 6
+            Node::new(Op::Constant(Fr::from(5u64)), vec![]), // 7
+            Node::new(Op::Add, vec![ValueId::new(6), ValueId::new(7)]), // 8 (output)
+        ];
+        let graph: Graph<Fr> = Graph::from_parts(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(8))],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            0,
+            1,
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(
+            (program.slots.public as usize) < graph.len(),
+            "peak public-bank width ({}) should be well below the node count ({})",
+            program.slots.public,
+            graph.len()
+        );
+    }
+
+    #[test]
+    fn local_value_reaching_anything_but_reshare_is_rejected() {
+        // x0, x1 = secret inputs; x2 = MulLocal(x0, x1), never reshared; x3 = Add(x2, x0) - a
+        // Local value reaching a plain Add directly. mul_split/round_schedule never produce this
+        // shape (MulLocal is always immediately wrapped by a Round), but codegen must still
+        // reject it rather than silently mis-encode a Local slot as if it were Shared.
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]),
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]),
+            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]),
+        ];
+        let mut graph: Graph<Fr> = Graph::from_parts(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(3))],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+            1,
+            4,
+        );
+        graph.mark_lowered();
+        let err = compile(&graph).unwrap_err();
+        assert!(err.to_string().contains("Local"), "{err}");
+    }
+
+    // --- Staged precomputation ---
+
+    fn iszero_site() -> PrecomputeSite {
+        PrecomputeSite {
+            kind: PrecomputeKind::IsZero,
+            name: "IsZero".to_owned(),
+            header: "IsZero_0".to_owned(),
+            num_inputs: 1,
+            num_outputs: 1,
+            num_intermediates: 1,
+        }
+    }
+
+    fn lowered_graph(
+        nodes: Vec<Node<Fr>>,
+        outputs: Vec<(SignalIdx, ValueId)>,
+        sites: Vec<PrecomputeSite>,
+        num_inputs: usize,
+    ) -> Graph<Fr> {
+        let mut graph = Graph::from_parts(
+            nodes,
+            outputs,
+            sites,
+            vec![],
+            vec![],
+            vec![],
+            num_inputs,
+            1,
+            num_inputs + 4,
+        );
+        graph.mark_lowered();
+        graph
+    }
+
+    /// The batching contract: N independent same-kind sites are **one** driver call, not N.
+    #[test]
+    fn same_kind_sites_at_one_stage_share_one_batch() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(1)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(5)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(6))],
+            vec![iszero_site(), iszero_site()],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert_eq!(program.precompute_batches.len(), 1);
+        assert_eq!(program.precompute_batches[0].sites, 2);
+        assert_eq!(
+            program
+                .instructions
+                .iter()
+                .filter(|instr| instr.op == Opcode::Precompute)
+                .count(),
+            1
+        );
+    }
+
+    /// Dependent sites can't share a driver call, and each batch's instruction must precede anything
+    /// that reads its results. The positional assertion is what actually tests interleaving - an
+    /// up-front phase would place both batches before instruction 0 and still pass a count check.
+    #[test]
+    fn chained_same_kind_sites_become_two_batches_in_stage_order() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            // Reading site 0's result forces site 1 into a later stage.
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]), // 3
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(0)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(6))],
+            vec![iszero_site(), iszero_site()],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program.precompute_batches.iter().all(|b| b.sites == 1));
+
+        let batch_pos: Vec<usize> = (0..2)
+            .map(|batch_idx| {
+                program
+                    .instructions
+                    .iter()
+                    .position(|instr| {
+                        instr.op == Opcode::Precompute && instr.a as usize == batch_idx
+                    })
+                    .expect("every batch has an instruction")
+            })
+            .collect();
+        assert!(
+            batch_pos[0] < batch_pos[1],
+            "batches must be serviced in stage order: {batch_pos:?}"
+        );
+
+        // Batch 0's result slot must be written before any instruction reads it.
+        let result_slot = program.precompute_batches[0].result_slots[0];
+        let first_reader = program
+            .instructions
+            .iter()
+            .position(|instr| {
+                matches!(instr.op, Opcode::AddSS | Opcode::AddSP)
+                    && (instr.a == result_slot || instr.b == result_slot)
+            })
+            .expect("something reads batch 0's result");
+        assert!(
+            batch_pos[0] < first_reader,
+            "batch 0 is serviced at {} but read at {first_reader}",
+            batch_pos[0]
+        );
+    }
+
+    /// A site input's slot must still hold its value when the *batch* runs, which is later than the
+    /// `Op::Precompute` node that reads it. Without the liveness extension the allocator could
+    /// recycle it in between and a later instruction would clobber the gadget's input.
+    ///
+    /// Note this graph deliberately does **not** bind the site input to `graph.outputs()`, which is
+    /// what masks the hazard on frontend-produced graphs (`inline_precomputed` binds every one).
+    #[test]
+    fn site_input_slot_survives_until_its_batch_runs() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            // A computed value whose only graph reader is site 0's Precompute node.
+            Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 2
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            // Site 1 is defined later, so the shared batch is anchored past node 3 - the window in
+            // which node 2's slot must not be recycled.
+            Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(0)]), // 5
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(5)]), // 6
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(7)]), // 8
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(8))],
+            vec![iszero_site(), iszero_site()],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert_eq!(program.precompute_batches.len(), 1, "both sites are stage 0");
+        let batch = &program.precompute_batches[0];
+        let batch_pos = program
+            .instructions
+            .iter()
+            .position(|instr| instr.op == Opcode::Precompute)
+            .expect("the batch has an instruction");
+
+        // No instruction before the batch may write to any of its input slots (other than the
+        // instruction that legitimately produced that input in the first place).
+        for input in &batch.input_slots {
+            assert_eq!(input.bank, Bank::Shared);
+            let clobbers = program.instructions[..batch_pos]
+                .iter()
+                .filter(|instr| {
+                    !matches!(instr.op, Opcode::Precompute | Opcode::Reshare)
+                        && instr.dst == input.slot
+                })
+                .count();
+            assert!(
+                clobbers <= 1,
+                "slot {} is written {clobbers} times before its batch runs at {batch_pos}",
+                input.slot
+            );
+        }
+    }
+
+    /// A literal passed to a gadget resolves to a `Public`-bank slot. This is the shape
+    /// `circuits/merces/oblivious_vector/hash.circom` uses
+    /// (`TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()])`); rejecting it, as codegen
+    /// once did, blocks that circuit outright.
+    #[test]
+    fn public_constant_site_input_is_recorded_as_a_public_bank_slot() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(7u64)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(2))],
+            vec![iszero_site()],
+            0,
+        );
+        let program = compile(&graph).unwrap();
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.input_slots.len(), 1);
+        assert_eq!(batch.input_slots[0].bank, Bank::Public);
+    }
+
+    /// A `Local` value feeding a site is a lowering-invariant violation, not a circuit shape.
+    #[test]
+    fn local_value_feeding_a_site_is_rejected() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]), // 2
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(4))],
+            vec![iszero_site()],
+            2,
+        );
+        let err = compile(&graph).unwrap_err().to_string();
+        assert!(err.contains("Local"), "unexpected error: {err}");
+    }
+}

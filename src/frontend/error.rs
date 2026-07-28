@@ -42,4 +42,12 @@ pub enum Unsupported {
         "unsupported mapped location rule in template `{template}` at line {line} - bus/anonymous component access is not supported"
     )]
     MappedLocation { template: String, line: usize },
+    #[error(
+        "unrecognized TACEO_PRECOMPUTATION_* gadget `{gadget}` in template `{template}` at line {line} - only Poseidon2, Num2Bits, IsZero, and AliasCheck are supported"
+    )]
+    PrecomputeGadget {
+        gadget: String,
+        template: String,
+        line: usize,
+    },
 }

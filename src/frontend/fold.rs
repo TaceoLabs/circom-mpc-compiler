@@ -63,3 +63,40 @@ pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Op
         _ => None,
     }
 }
+
+/// Evaluates a *comparison or boolean* `op(lhs, rhs)` at compile time, for use as an `if`/`else`
+/// condition (`build.rs`'s `Instruction::Branch` arm).
+///
+/// Deliberately separate from [`fold_binary`], which returns a field element for the removed
+/// *arithmetic* operators. These return a `bool`, are never lowered to a node, and have no runtime
+/// counterpart at all - a comparison on a genuine circuit value stays an `Unsupported` error
+/// regardless of this function (there is no select/mux `Op` to arithmetize it into). This mirrors
+/// how `unroll.rs::get_induction_iter` already evaluates a *loop* condition's comparison at compile
+/// time; a branch condition is the same problem, so it gets the same treatment rather than a new one.
+///
+/// Ordering uses circom's own semantics for these operators: the canonical unsigned integer
+/// representative, not the field element as such - the same convention [`to_bigint`] exists for.
+pub(super) fn fold_condition<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Option<bool> {
+    match op {
+        // `Eq(n)`'s payload is an array length: `n == 1` is the scalar comparison circom emits for
+        // `a == b` on single signals/vars. A wider compare is a genuine element-wise array
+        // comparison, which this returns `None` for rather than silently checking only element 0.
+        OperatorType::Eq(1) => Some(lhs == rhs),
+        OperatorType::NotEq => Some(lhs != rhs),
+        OperatorType::Lesser => Some(to_bigint(lhs) < to_bigint(rhs)),
+        OperatorType::Greater => Some(to_bigint(lhs) > to_bigint(rhs)),
+        OperatorType::LesserEq => Some(to_bigint(lhs) <= to_bigint(rhs)),
+        OperatorType::GreaterEq => Some(to_bigint(lhs) >= to_bigint(rhs)),
+        OperatorType::BoolAnd => Some(!lhs.is_zero() && !rhs.is_zero()),
+        OperatorType::BoolOr => Some(!lhs.is_zero() || !rhs.is_zero()),
+        _ => None,
+    }
+}
+
+/// The unary counterpart of [`fold_condition`], for `if (!x)`.
+pub(super) fn fold_unary_condition<F: PrimeField>(op: OperatorType, operand: F) -> Option<bool> {
+    match op {
+        OperatorType::BoolNot => Some(operand.is_zero()),
+        _ => None,
+    }
+}

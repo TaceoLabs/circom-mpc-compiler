@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ark-bn254 = "0.4.0"
-ark-ec = { version = "0.4.2", default-features = false }
-ark-ff = "0.4.2"
-ark-serialize = { version = "0.4", features = ["derive", "std"] }
+ark-bn254 = "0.5"
+ark-ec = { version = "0.5", default-features = false }
+ark-ff = "0.5"
+ark-serialize = { version = "0.5", features = ["derive", "std"] }
 byteorder = "1.5.0"
 circom-type_analysis = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "type_analysis", rev = "1cc17fb" }
 circom-constraint_generation = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "constraint_generation", rev = "1cc17fb" }
@@ -24,3 +24,45 @@ thiserror = "1.0.59"
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 rustc-hash = "2"
+mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0", optional = true }
+mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.5.0", features = ["local"], optional = true }
+co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.6.0", optional = true }
+
+[features]
+default = ["rep3"]
+rep3 = ["dep:mpc-core", "dep:mpc-net"]
+# Converting this VM's native witness into co-snarks' `SharedWitness`, so a co-groth16 proof can be
+# produced from it. Off by default: `co-circom-types` is only needed by callers that actually prove,
+# and keeping it optional preserves the fast plain-only `--no-default-features` build.
+proving = ["rep3", "dep:co-circom-types"]
+
+[dev-dependencies]
+rand = "0.8.5"
+# The golden-KAT `.wtns` parser (plus `R1CS`/`groth16::Zkey`, used by the merces end-to-end test).
+# Aliased the same way co-snarks itself aliases it, so the type paths match its docs.
+circom-types = { package = "taceo-circom-types", version = "0.2" }
+# The proving side of the merces end-to-end test and the proving bench. Dev-only: the library's own
+# `proving` feature needs just `co-circom-types` for the witness conversion.
+# `verifier` is non-default there, and verifying is the whole point of the test.
+co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0", features = ["verifier"] }
+criterion = "0.5"
+
+# Benches need the merces link libraries and the `fixtures` input builder; both come from the crate
+# itself, so no extra features beyond the default `rep3` (which `Rep3Driver` needs).
+[[bench]]
+name = "witness_extension"
+harness = false
+required-features = ["rep3"]
+
+[[bench]]
+name = "compile"
+harness = false
+
+# Runs the circuits across three real rep3 parties.
+[[example]]
+name = "merces"
+required-features = ["rep3"]
+
+# Pure input generation - no driver, so it works in the plain-only build too.
+[[example]]
+name = "gen-merces-input"

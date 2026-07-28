@@ -5,12 +5,17 @@
 //! its own (empty) integration test binary — only files directly under `tests/` get that
 //! treatment.
 
+// Each integration test binary compiles this module separately, so any binary using only part of
+// it (e.g. `frontend_errors.rs`, which needs the path helpers but not the KAT loader) would
+// otherwise warn on the rest.
+#![allow(dead_code)]
+
 use std::{
     fs::{self, File},
     str::FromStr,
 };
 
-use crate::misc::Witness;
+use circom_types::Witness;
 
 pub fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")

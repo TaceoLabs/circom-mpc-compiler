@@ -12,22 +12,42 @@
 use std::collections::HashMap;
 
 use ark_ec::pairing::Pairing;
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, Zero};
 use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, AssertBucket, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket,
-    LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
+    AddressType, AssertBucket, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
+    LoadBucket, LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
 };
 use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{Arity, Op, ValueId};
-use crate::PrecomputationMode;
+use crate::ir::{Arity, Op, PrecomputeKind, ValueId};
+use crate::{BareGadgetDetection, CompilerConfig, PrecomputationMode, UnknownPrecomputeGadget};
 
 use super::error::Unsupported;
-use super::fold::fold_binary;
+use super::fold::{fold_binary, fold_condition, fold_unary_condition};
 use super::PRECOMPUTATION_PREFIX;
+
+/// The three `CompilerConfig` knobs that govern `TACEO_PRECOMPUTATION_*` handling, bundled so the
+/// recursive `GraphCompiler` constructor stays readable (it already takes five other arguments) and
+/// so adding a fourth knob doesn't touch every call site.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PrecomputeOptions {
+    pub(crate) mode: PrecomputationMode,
+    pub(crate) unknown_gadget: UnknownPrecomputeGadget,
+    pub(crate) bare_detection: BareGadgetDetection,
+}
+
+impl From<&CompilerConfig> for PrecomputeOptions {
+    fn from(config: &CompilerConfig) -> Self {
+        Self {
+            mode: config.precomputation,
+            unknown_gadget: config.unknown_precompute_gadget,
+            bare_detection: config.bare_gadget_detection,
+        }
+    }
+}
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -96,6 +116,10 @@ pub(crate) enum SubGraphInstance<F: PrimeField> {
     /// an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
     /// "Precomputation".
     Precomputed {
+        /// Which gadget this site runs - resolved from `name`/`num_inputs`/`num_outputs` in
+        /// `handle_create_cmp_bucket`, once, rather than re-derived every time this instance is
+        /// inlined.
+        kind: PrecomputeKind,
         /// The wrapped template's plain name, e.g. `"Poseidon2"` (`TemplateCodeInfo::name`).
         name: String,
         /// The wrapped template's specialized header, e.g. `"Poseidon2_12"`
@@ -125,7 +149,7 @@ pub(crate) struct GraphCompiler<'a, P: Pairing> {
     pub(crate) templates: &'a mut HashMap<String, TemplateCode>,
     pub(crate) compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
     pub(crate) constant_table: &'a [P::ScalarField],
-    pub(crate) precomputation: PrecomputationMode,
+    pub(crate) precompute: PrecomputeOptions,
     /// Every template header's total flat signal count (own signals + everything transitively
     /// instantiated), keyed the same way `templates` is - see
     /// `frontend/mod.rs::compute_signal_spans`. Only consulted for `TACEO_PRECOMPUTATION_*`
@@ -140,7 +164,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
         constant_table: &'a [P::ScalarField],
-        precomputation: PrecomputationMode,
+        precompute: PrecomputeOptions,
         precompute_spans: &'a FxHashMap<String, usize>,
     ) -> Self {
         Self {
@@ -150,7 +174,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             templates,
             compiled_graphs,
             constant_table,
-            precomputation,
+            precompute,
             precompute_spans,
             var_to_value: FxHashMap::default(),
         }
@@ -361,42 +385,105 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             return Ok(());
         }
 
-        // Note: the prefix marks the *wrapper* (e.g. `TACEO_PRECOMPUTATION_Poseidon2`), which is
-        // the template currently being compiled (`self.code`) - not the component this bucket
-        // instantiates (e.g. plain `Poseidon2`), which never carries the prefix itself. Every
-        // wrapper's body is exactly one line (`out <== Gadget(...)(in);`), so it creates exactly
-        // one subcomponent; that's the one this intercepts.
-        if self.precomputation == PrecomputationMode::Extract
-            && self.code.name.starts_with(PRECOMPUTATION_PREFIX)
-        {
-            // Peek, never remove: the wrapped component's body is never compiled at all (see
-            // SubGraphInstance::Precomputed), so its entry in `templates` must stay put for every
-            // repeated instantiation of the same wrapper to find it too.
+        // Two independent triggers put this bucket's component on the precomputation path, both
+        // resolving the kind from the *instantiated* template (never the enclosing one):
+        //
+        //  1. A `TACEO_PRECOMPUTATION_*` wrapper. The prefix marks the *wrapper* - the template
+        //     currently being compiled (`self.code`) - not the component this bucket instantiates
+        //     (e.g. plain `Poseidon2`), which never carries the prefix. Every wrapper's body is
+        //     exactly one line (`out <== Gadget(...)(in);`), so it creates exactly one subcomponent;
+        //     that's the one this intercepts.
+        //  2. `BareGadgetDetection::On` plus a recognized gadget instantiated with no wrapper at all.
+        //
+        // Checked in this order so a wrapped gadget never takes the second arm too, which would
+        // create the site twice.
+        let wrapped = self.code.name.starts_with(PRECOMPUTATION_PREFIX);
+        if self.precompute.mode == PrecomputationMode::Extract {
+            // Peek, never remove: on the precomputation path the wrapped component's body is never
+            // compiled at all (see SubGraphInstance::Precomputed), so its entry in `templates` must
+            // stay put for every repeated instantiation to find it too. The fall-through below
+            // deliberately leaves it in place as well, so the normal remove-on-first-compile path
+            // further down still finds it.
             let template_code = self.templates.get(&symbol).expect("must be here");
             let name = template_code.name.clone();
             let header = template_code.header.clone();
             let num_inputs = template_code.number_of_inputs;
             let num_outputs = template_code.number_of_outputs;
-            let span = *self
-                .precompute_spans
-                .get(&header)
-                .unwrap_or_else(|| panic!("no signal-span entry for precomputed template `{header}`"));
-            let num_intermediates = span - num_inputs - num_outputs;
 
-            let mut offset = create_cmp_bucket.signal_offset;
-            let offset_jump = create_cmp_bucket.signal_offset_jump;
-            for _ in 0..create_cmp_bucket.number_of_cmp {
-                self.sub_graphs.push(SubGraphInstance::Precomputed {
-                    name: name.clone(),
-                    header: header.clone(),
-                    signal_offset: offset,
-                    num_inputs,
-                    num_outputs,
-                    num_intermediates,
+            let kind = match name.as_str() {
+                "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
+                "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
+                "IsZero" => Some(PrecomputeKind::IsZero),
+                "AliasCheck" => Some(PrecomputeKind::AliasCheck),
+                "IsEqual" => Some(PrecomputeKind::IsEqual),
+                _ => None,
+            };
+
+            let extract = match (wrapped, kind) {
+                // A wrapper naming a gadget this compiler can service.
+                (true, Some(kind)) => Some(kind),
+                // A wrapper naming one it can't. A wrapper marks an *opportunity* to accelerate, so
+                // the lenient path compiles the body instead and only loses speed - see
+                // `UnknownPrecomputeGadget`.
+                (true, None) => match self.precompute.unknown_gadget {
+                    UnknownPrecomputeGadget::Error => {
+                        return Err(Unsupported::PrecomputeGadget {
+                            gadget: name,
+                            template: self.code.header.clone(),
+                            line: create_cmp_bucket.line,
+                        }
+                        .into())
+                    }
+                    UnknownPrecomputeGadget::Warn => {
+                        tracing::warn!(
+                            "`{}` (line {}) wraps `{name}`, which this compiler has no \
+                             precomputation gadget for - compiling its body instead of accelerating \
+                             it. The circuit stays correct, but loses whatever speedup the wrapper \
+                             was added for. Set CompilerConfig::unknown_precompute_gadget = Error to \
+                             make this fatal.",
+                            self.code.header,
+                            create_cmp_bucket.line,
+                        );
+                        None
+                    }
+                },
+                // An unwrapped gadget, cut into a site only when explicitly asked - see
+                // `BareGadgetDetection`.
+                (false, Some(kind)) if self.precompute.bare_detection == BareGadgetDetection::On => {
+                    tracing::debug!(
+                        "`{}` (line {}) instantiates `{name}` without a {PRECOMPUTATION_PREFIX}* \
+                         wrapper; cutting it into a precomputation site anyway \
+                         (BareGadgetDetection::On)",
+                        self.code.header,
+                        create_cmp_bucket.line,
+                    );
+                    Some(kind)
+                }
+                _ => None,
+            };
+
+            if let Some(kind) = extract {
+                let span = *self.precompute_spans.get(&header).unwrap_or_else(|| {
+                    panic!("no signal-span entry for precomputed template `{header}`")
                 });
-                offset += offset_jump;
+                let num_intermediates = span - num_inputs - num_outputs;
+
+                let mut offset = create_cmp_bucket.signal_offset;
+                let offset_jump = create_cmp_bucket.signal_offset_jump;
+                for _ in 0..create_cmp_bucket.number_of_cmp {
+                    self.sub_graphs.push(SubGraphInstance::Precomputed {
+                        kind,
+                        name: name.clone(),
+                        header: header.clone(),
+                        signal_offset: offset,
+                        num_inputs,
+                        num_outputs,
+                        num_intermediates,
+                    });
+                    offset += offset_jump;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
 
         // First instantiation of a regular (non-precomputed) template: compile it now and cache
@@ -408,7 +495,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             self.templates,
             self.compiled_graphs,
             self.constant_table,
-            self.precomputation,
+            self.precompute,
             self.precompute_spans,
         );
         let sub_cmp = sub_cmp_compiler.parse()?;
@@ -685,6 +772,78 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         .into()
     }
 
+    /// `if`/`else` on a **compile-time-constant** condition: evaluate the condition, then lower only
+    /// the taken arm's instructions inline. The untaken arm is never visited, so anything unsupported
+    /// inside it is irrelevant - which is the point, since circom emits a real `Branch` for
+    /// `if (i == 0)` inside an unrolled loop, where `i` is a fresh `Op::Constant` every iteration
+    /// (`unroll.rs::add_induction_variable_node`).
+    ///
+    /// A *non*-constant condition stays an `Unsupported` error, and structurally has to: `ir::Op` is
+    /// only `Add`/`Sub`/`Mul`, so there is no select/mux op to arithmetize a secret-dependent branch
+    /// into (see `docs/ARCHITECTURE.md`, "`Op<F>` is deliberately narrow"). Supporting it means
+    /// re-adding the operator surface, not extending this function.
+    fn handle_branch_bucket(&mut self, branch_bucket: &BranchBucket) -> Result<()> {
+        let Some(taken) = self.fold_branch_condition(branch_bucket.cond.as_ref()) else {
+            return Err(self.err_instruction(
+                "branch (if/else on a non-constant condition)",
+                branch_bucket.line,
+            ));
+        };
+        let body = if taken {
+            &branch_bucket.if_branch
+        } else {
+            &branch_bucket.else_branch
+        };
+        for inst in body {
+            self.handle_inst(inst)?;
+        }
+        Ok(())
+    }
+
+    /// `Some(bool)` iff this condition is decidable at compile time. Three shapes occur in practice:
+    /// a comparison/boolean binary op, a `!` on a constant, and a bare value used for its truthiness.
+    fn fold_branch_condition(&mut self, cond: &Instruction) -> Option<bool> {
+        if let Instruction::Compute(compute_bucket) = cond {
+            match compute_bucket.stack.len() {
+                2 => {
+                    let lhs = self.eval_constant_operand(&compute_bucket.stack[0])?;
+                    let rhs = self.eval_constant_operand(&compute_bucket.stack[1])?;
+                    if let Some(folded) = fold_condition(compute_bucket.op, lhs, rhs) {
+                        return Some(folded);
+                    }
+                    // Not a comparison - an *arithmetic* expression used for its truthiness
+                    // (`if (a - b)`). Fold the arithmetic, then test against zero.
+                    let value = fold_binary(compute_bucket.op, lhs, rhs)?;
+                    return Some(!value.is_zero());
+                }
+                1 => {
+                    let operand = self.eval_constant_operand(&compute_bucket.stack[0])?;
+                    return fold_unary_condition(compute_bucket.op, operand);
+                }
+                _ => return None,
+            }
+        }
+        // A plain value or variable read: truthy iff non-zero, matching circom's own `if (x)`.
+        self.eval_constant_operand(cond).map(|v| !v.is_zero())
+    }
+
+    /// Like [`Self::get_constant_operand`], but folds `Add`/`Sub`/`Mul` chains of constants rather
+    /// than requiring the operand to *already* be a single `Op::Constant` node.
+    ///
+    /// Needed because this build pass deliberately doesn't fold arithmetic (that's `passes::
+    /// const_fold`'s job, which runs much later), so a `var` computed from constants is a real
+    /// `Op::Sub`/`Add`/`Mul` node here even though its value is fixed. Real circom does this
+    /// constantly: `circuits/libs/taceo/compression.circom`'s `Poseidon2SpongeWithDs` guards
+    /// `if (remaining > T - 1)` where `remaining = N - absorbed`, all compile-time.
+    ///
+    /// Shares [`Self::eval_constant_node`] with address computation, which needs the identical
+    /// capability for `arr[N-1-i]`-style indexing - see "Where compile-time folding lives" in
+    /// `docs/ARCHITECTURE.md`.
+    fn eval_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
+        let value_id = self.expect_value(inst).ok()?;
+        self.eval_constant_node(value_id)
+    }
+
     pub(crate) fn handle_inst(&mut self, inst: &Instruction) -> Result<Option<ValueId>> {
         tracing::trace!("{}", inst.to_string());
         match inst {
@@ -702,7 +861,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 call_bucket.line,
             )),
             Instruction::Branch(branch_bucket) => {
-                Err(self.err_instruction("branch (if/else on a non-constant condition)", branch_bucket.line))
+                self.handle_branch_bucket(branch_bucket)?;
+                Ok(None)
             }
             Instruction::Return(return_bucket) => {
                 Err(self.err_instruction("return", return_bucket.line))

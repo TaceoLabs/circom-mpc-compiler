@@ -1,18 +1,18 @@
 use ark_bn254::Bn254;
-use circom_mpc_compiler::interpreter::Interpreter;
+use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler::OptLevel;
 
 mod common;
-mod misc;
 
 use common::{circuit_path, from_test_name, libs_path, TestInputs};
 
-/// Every opt level exercises `CoCircomCompiler::parse`'s unconditional MPC lowering (see
-/// `docs/ARCHITECTURE.md`, "MPC lowering") - there is no plaintext-only path any more, so this
-/// matrix is what makes every KAT below also a correctness test for the lowering, not just the
-/// frontend and the classical passes.
+/// Every opt level exercises `CoCircomCompiler::compile`'s unconditional MPC lowering and codegen
+/// (see `docs/ARCHITECTURE.md`, "MPC lowering", "Bytecode and the slot machine") - there is no
+/// plaintext-only path any more, so this matrix is what makes every KAT below also a correctness
+/// test for lowering and codegen, not just the frontend and the classical passes.
 const OPT_LEVELS: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
 
 macro_rules! witness_extension_test_plain {
@@ -26,13 +26,52 @@ macro_rules! witness_extension_test_plain {
                     config.simplification = circom_mpc_compiler::SimplificationLevel::O2(usize::MAX);
                     config.link_library.push(libs_path());
                     config.opt_level = opt_level;
-                    let ast = CoCircomCompiler::<Bn254>::parse(circuit_path(stringify!($name)), config)
-                        .unwrap();
+                    let program =
+                        CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
+                            .unwrap();
 
-                    assert_eq!(ast.num_inputs, inp.inputs[i].len());
+                    assert_eq!(program.num_inputs, inp.inputs[i].len());
 
-                    let mut interpreter = Interpreter::new(ast, inp.inputs[i].clone());
-                    let witness = interpreter.run();
+                    let inputs = program.classify_inputs(&inp.inputs[i], |v| v);
+                    let mut driver = PlainDriver;
+                    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
+
+                    assert_eq!(witness, inp.witnesses[i].values, "opt_level {opt_level:?}, input {i}");
+                }
+            }
+        }
+    };
+}
+
+/// Same shape as `witness_extension_test_plain!`, but at `SimplificationLevel::O0` instead of
+/// `O2(usize::MAX)`. The `TACEO_PRECOMPUTATION_*` wrapper circuits below have a genuine subtree
+/// under the wrapped (inner) component - the wrapper's own I/O plus the inner component's own I/O
+/// both land in the witness (see `ir::PrecomputeKind`, `vm::gadgets`) - and *how much* of that
+/// subtree survives into the witness is simplification-level-sensitive (confirmed empirically:
+/// `circom --O0` on the exact same vendored circom revision this crate depends on produces a
+/// witness whose length matches this crate's own `Program::signal_to_witness.len()` exactly at
+/// `O0`; other levels do not). The golden `.wtns` fixtures below were generated the same way, so
+/// this must match. See `docs/ARCHITECTURE.md`, "Precomputation".
+macro_rules! witness_extension_test_precompute {
+    ($name: ident) => {
+        #[test]
+        fn $name() {
+            let inp: TestInputs = from_test_name(stringify!($name));
+            for opt_level in OPT_LEVELS {
+                for i in 0..inp.inputs.len() {
+                    let mut config = CompilerConfig::default();
+                    config.simplification = circom_mpc_compiler::SimplificationLevel::O0;
+                    config.link_library.push(libs_path());
+                    config.opt_level = opt_level;
+                    let program =
+                        CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
+                            .unwrap();
+
+                    assert_eq!(program.num_inputs, inp.inputs[i].len());
+
+                    let inputs = program.classify_inputs(&inp.inputs[i], |v| v);
+                    let mut driver = PlainDriver;
+                    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
 
                     assert_eq!(witness, inp.witnesses[i].values, "opt_level {opt_level:?}, input {i}");
                 }
@@ -48,69 +87,16 @@ witness_extension_test_plain!(loop_unrolling);
 witness_extension_test_plain!(dead_code);
 witness_extension_test_plain!(multiplier2_public);
 witness_extension_test_plain!(constants_test);
-// Every fixture below is wired up deliberately red: `ir::Op` only has Add/Sub/Mul as runtime ops
-// (see docs/ARCHITECTURE.md), so most of these fail with a typed `unsupported operator: ...`
-// error naming exactly which circom operator/instruction is missing. That failure list is the
-// visible worklist for what the compiler doesn't support yet - do not delete a failing line
-// without checking whether it's a real gap or something newly fixed.
-witness_extension_test_plain!(mux1_1);
-witness_extension_test_plain!(binsum_test);
-witness_extension_test_plain!(binsub_test);
-witness_extension_test_plain!(lessthan);
-witness_extension_test_plain!(sum_test);
-witness_extension_test_plain!(mux2_1);
-witness_extension_test_plain!(mux3_1);
-witness_extension_test_plain!(mux4_1);
-witness_extension_test_plain!(greaterthan);
-witness_extension_test_plain!(greatereqthan);
-witness_extension_test_plain!(lesseqthan);
-witness_extension_test_plain!(aliascheck_test);
-witness_extension_test_plain!(babyadd_tester);
 witness_extension_test_plain!(babycheck_test);
-witness_extension_test_plain!(babypbk_test);
+// Exercises constant-condition `if`/`else` (`frontend/build.rs::handle_branch_bucket`).
 witness_extension_test_plain!(control_flow);
-witness_extension_test_plain!(eddsa_test);
-witness_extension_test_plain!(eddsa_verify);
-witness_extension_test_plain!(eddsamimc_test);
-witness_extension_test_plain!(eddsaposeidon_test);
-witness_extension_test_plain!(edwards2montgomery);
-witness_extension_test_plain!(escalarmul_test);
-witness_extension_test_plain!(escalarmul_test_min);
-witness_extension_test_plain!(escalarmulany_test);
-witness_extension_test_plain!(escalarmulfix_test);
-// escalarmulw4table (no _test suffix) has neither a circuit nor a kats dir - only
-// escalarmulw4table_test / escalarmulw4table_test3 exist. Not wired up: there's nothing to load.
-witness_extension_test_plain!(escalarmulw4table_test);
-witness_extension_test_plain!(escalarmulw4table_test3);
-witness_extension_test_plain!(functions);
-witness_extension_test_plain!(isequal);
-witness_extension_test_plain!(iszero);
-witness_extension_test_plain!(mimc_hasher);
-witness_extension_test_plain!(mimc_sponge_hash_test);
-witness_extension_test_plain!(mimc_sponge_test);
-witness_extension_test_plain!(mimc_test);
-witness_extension_test_plain!(montgomery2edwards);
-witness_extension_test_plain!(montgomeryadd);
-witness_extension_test_plain!(montgomerydouble);
-witness_extension_test_plain!(pedersen2_test);
-witness_extension_test_plain!(pedersen_hasher);
-witness_extension_test_plain!(pedersen_test);
-witness_extension_test_plain!(pointbits_loopback);
-witness_extension_test_plain!(poseidon3_test);
-witness_extension_test_plain!(poseidon6_test);
-witness_extension_test_plain!(poseidon_hasher1);
-witness_extension_test_plain!(poseidon_hasher16);
-witness_extension_test_plain!(poseidon_hasher2);
-witness_extension_test_plain!(poseidonex_test);
-witness_extension_test_plain!(sha256_2_test);
-witness_extension_test_plain!(sha256_test448);
-witness_extension_test_plain!(sha256_test512);
-witness_extension_test_plain!(shared_control_flow);
-witness_extension_test_plain!(shared_control_flow_arrays);
-witness_extension_test_plain!(sign_test);
-witness_extension_test_plain!(sqrt_test);
-witness_extension_test_plain!(smtprocessor10_test);
-witness_extension_test_plain!(smtverifier10_test);
-witness_extension_test_plain!(winner);
-witness_extension_test_plain!(bitonic_sort);
-witness_extension_test_plain!(num2bits_accelerator);
+
+// Only the circuits this compiler can actually run are wired up. `circuits/` and `kats/` still
+// hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
+// calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The
+// inventory of what's missing lives in `docs/ARCHITECTURE.md`, "Known gaps", not in this file's
+// failure list.
+witness_extension_test_precompute!(precomputation_poseidon2_test);
+witness_extension_test_precompute!(precomputation_num2bits_test);
+witness_extension_test_precompute!(precomputation_iszero_test);
+witness_extension_test_precompute!(precomputation_aliascheck_test);

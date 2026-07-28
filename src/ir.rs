@@ -82,8 +82,6 @@ pub(crate) enum RoundKind {
 
 /// One batched MPC network round: every [`Op::MulLocal`] value that feeds this round's
 /// [`Op::Round`] node reshares in the same message (`len` slots, one [`Op::RoundResult`] each).
-/// `depth` is the round's position in the circuit's multiplicative-depth order - diagnostic only
-/// (used by `Graph::mpc_summary`), not consulted structurally.
 #[derive(Debug, Clone)]
 pub(crate) struct RoundDesc {
     // Only ever `Reshare` today (see `RoundKind`) and only read back by pass unit tests so far -
@@ -91,10 +89,13 @@ pub(crate) struct RoundDesc {
     #[allow(dead_code)]
     pub(crate) kind: RoundKind,
     pub(crate) len: usize,
-    // Diagnostic - not consulted by anything but pass unit tests today; `mpc_summary` reports
-    // rounds in creation order, which already *is* depth order, so it doesn't need this field too.
+    /// This round's position in the circuit's **network-event** order - reshare rounds and
+    /// precomputation batch services interleaved on one axis (see `passes::mpc::level`). Not the
+    /// same as multiplicative depth, which ignores batch services entirely and would put dependent
+    /// precomputation sites at the same position. Diagnostic only (`Graph::mpc_summary`), not
+    /// consulted structurally.
     #[allow(dead_code)]
-    pub(crate) depth: usize,
+    pub(crate) level: usize,
 }
 
 /// Which lowering stage a [`Graph`] is in. Internal bookkeeping, not a config surface - every public
@@ -119,13 +120,127 @@ pub struct MpcSummary {
     pub local_muls: usize,
     pub public_muls: usize,
     pub precompute_sites: usize,
+    /// How many driver calls those sites actually cost - one per `(kind, stage)` group, *not* one
+    /// per site (see `passes::mpc::level`). `precompute_batches < precompute_sites` is what makes
+    /// the batching claim falsifiable rather than asserted; equality means every site sits in a
+    /// group of its own, which happens only when they are all genuinely sequentially dependent or
+    /// all of different kinds.
+    pub precompute_batches: usize,
+}
+
+/// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the wrapped template's
+/// name at inlining time (`frontend/inline.rs`) - an unrecognized `TACEO_PRECOMPUTATION_*` name is
+/// a typed `Unsupported::PrecomputeGadget` error there, not an opaque site nothing can service.
+/// See `docs/ARCHITECTURE.md`, "Precomputation", for what each variant computes and why this
+/// replaces the co-snarks `ComponentAcceleratorOutput` byte-compatibility contract this crate used
+/// to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrecomputeKind {
+    /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 16}`).
+    Poseidon2 { t: usize },
+    /// Bit decomposition of one field element into `n` bits.
+    Num2Bits { n: usize },
+    /// `1` iff the input is zero, plus the field-inversion helper trace.
+    IsZero,
+    /// `1` iff the two inputs are equal. Reduces to [`Self::IsZero`] on their difference, which is
+    /// exactly what circomlib's `IsEqual` does (`in[1] - in[0] ==> isz.in`), so the gadget is a thin
+    /// wrapper over the `IsZero` one rather than a separate implementation.
+    IsEqual,
+    /// Proves a 254-bit decomposition is a canonical (non-aliased) representative.
+    AliasCheck,
+}
+
+impl PrecomputeKind {
+    /// How many result slots (`num_outputs + num_intermediates`) this gadget produces, where that
+    /// count has a closed form independent of the gadget's own implementation - `Graph::verify`
+    /// and `frontend/inline.rs` cross-check it against the circom-derived count from
+    /// `frontend/mod.rs::compute_signal_spans`, so a trace-layout mistake is a compile-time error
+    /// instead of a silently wrong witness.
+    ///
+    /// Every kind has a closed form. [`PrecomputeKind::Poseidon2`]'s used to be `None`, on the
+    /// grounds that its intermediate count was an implementation detail of whichever hasher produced
+    /// the trace; once the trace is derived from `circuits/libs/taceo/poseidon2.circom`'s own signal
+    /// layout instead (see `vm::gadgets::poseidon2`), it is a function of `t` like everything else -
+    /// and having it here means `frontend/inline.rs`'s cross-check turns a mis-derived width into a
+    /// compile-time panic naming both numbers rather than a silently wrong witness.
+    pub fn expected_results(self) -> Option<usize> {
+        match self {
+            // Mirrors the template structure of `circuits/libs/taceo/poseidon2.circom`:
+            //   Poseidon2(t) = [out[t]][in[t]][state[(9+pr)][t]]
+            //                  + ExternalMatMulT(t) + 8 x FullRound(t) + pr x PartialRound(t)
+            // and result slots are every signal except the site's own `t` inputs. Kept here rather
+            // than in `vm::gadgets` so the dependency direction stays `vm -> ir`; that module's
+            // `result_slots` is unit-tested against this for every supported width.
+            PrecomputeKind::Poseidon2 { t } => {
+                // `amount_partial_rounds` in poseidon2_constants.circom.
+                let pr = if t <= 4 { 56 } else { 57 };
+                // Acc(n) = [out][in[n]][sums[n]]
+                let acc = |n: usize| 2 * n + 1;
+                // ExternalMatMul2/3/4 - the fixed-width leaves.
+                let emm_leaf = |t: usize| match t {
+                    2 => 5,
+                    3 => 7,
+                    _ => 18,
+                };
+                // ExternalMatMulT(t) = [out[t]][in[t]] + subtree. For t >= 8 the subtree is
+                // (t/4) x ExternalMatMul4 followed by 4 x Acc(t/4).
+                let emmt = |t: usize| match t {
+                    2 | 3 | 4 => 2 * t + emm_leaf(t),
+                    _ => {
+                        let m = t / 4;
+                        2 * t + m * 18 + 4 * acc(m)
+                    }
+                };
+                // InternalMatMulT(t) = [out[t]][in[t]] + a nested InternalMatMul2/3 for those
+                // widths, else the own `acc` intermediate plus an Acc(t) subtree.
+                let immt = |t: usize| match t {
+                    2 => 2 * t + 5,
+                    3 => 2 * t + 7,
+                    _ => (2 * t + 1) + acc(t),
+                };
+                // FullRound  = [out][in][RC][linear_layer][sbox] (5t) + ExternalMatMulT + Sbox(t),
+                //              where Sbox(t) = [out[t]][in[t]] + t x Sbox_e(4) = 6t.
+                let full = 5 * t + emmt(t) + 6 * t;
+                // PartialRound = [out[t]][in[t]][RC][linear_layer][sbox] (2t+3)
+                //                + Sbox_e(4) + InternalMatMulT.
+                let partial = (2 * t + 3) + 4 + immt(t);
+                let total = 2 * t + (9 + pr) * t + emmt(t) + 8 * full + pr * partial;
+                Some(total - t)
+            }
+            // n output bits, no intermediates.
+            PrecomputeKind::Num2Bits { n } => Some(n),
+            // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
+            PrecomputeKind::IsZero => Some(2),
+            // circomlib's `IsEqual` is `[out][in[0], in[1]]` plus a whole `IsZero` subcomponent
+            // (`[out][in][inv]`). Result slots skip the site's own inputs, so that's 1 output + 3
+            // subtree signals: `[out, isz.out, isz.in, isz.inv]`. Cross-checked directly against
+            // `circuits/libs/comparators.circom`.
+            //
+            // `isz.in` is `in[1] - in[0]`, *not* `in[0] - in[1]` - `out` is the same either way, but
+            // `isz.in` is a real witness slot, so the sign is load-bearing.
+            PrecomputeKind::IsEqual => Some(4),
+            // No outputs. AliasCheck's whole subtree is its subcomponent CompConstant: its own
+            // 254 input signals (copies of AliasCheck's `in`, per circom's `==>` semantics) + 1
+            // output signal (`out <== num2bits.out[127]`, still a genuine witness signal despite
+            // aliasing one of Num2Bits' own outputs) = 255, + 127 `parts` + 1 `sout`, then
+            // CompConstant's own child Num2Bits(135): its own 1 input signal (`num2bits.in`) + 135
+            // output bits = 136. Total 255 + 127 + 1 + 136 = 519, cross-checked directly against
+            // `circuits/libs/{aliascheck,compconstant}.circom`. One more than merces'
+            // `DEFAULT_ALIAS_TRACE` (518, ~/repos/merces/crates/merces-core/src/circom_proof/
+            // cosnark.rs) - that trace omits Num2Bits' own input signal, which this compiler's
+            // signal-span accounting (an independent cross-check against circom's own DAG, see
+            // `frontend/mod.rs::compute_signal_spans`) does not let it skip.
+            PrecomputeKind::AliasCheck => Some(255 + 127 + 1 + 136),
+        }
+    }
 }
 
 /// One `TACEO_PRECOMPUTATION_*`-wrapped component: the shape the runtime must supply a trace for.
-/// See `docs/ARCHITECTURE.md`, "Precomputation", for the exact result-slot -> signal contract
-/// (kept byte-compatible with the co-snarks VM's `ComponentAcceleratorOutput`).
+/// See `docs/ARCHITECTURE.md`, "Precomputation".
 #[derive(Debug, Clone)]
 pub struct PrecomputeSite {
+    /// Which gadget this site runs, and (for the parameterized ones) its width.
+    pub kind: PrecomputeKind,
     /// The wrapped (inner) template's name, e.g. `"Poseidon2"`, `"Num2Bits"`, `"IsZero"`.
     pub name: String,
     /// The wrapped template's concrete header (parameterized name), diagnostics only.
@@ -399,6 +514,17 @@ impl<F: PrimeField> Graph<F> {
             .iter()
             .filter(|n| matches!(n.op, Op::Mul))
             .count();
+        // Distinct (kind, stage) pairs - the same key `vm::codegen` groups batches by.
+        let mut batch_keys: Vec<(PrecomputeKind, usize)> = Vec::new();
+        if !self.precompute_sites.is_empty() {
+            let stages = crate::passes::mpc::level::site_stages(self);
+            for (site_id, site) in self.precompute_sites.iter().enumerate() {
+                let key = (site.kind, stages[site_id]);
+                if !batch_keys.contains(&key) {
+                    batch_keys.push(key);
+                }
+            }
+        }
         MpcSummary {
             rounds: self.rounds.len(),
             reshare_elements,
@@ -407,6 +533,7 @@ impl<F: PrimeField> Graph<F> {
             local_muls,
             public_muls,
             precompute_sites: self.precompute_sites.len(),
+            precompute_batches: batch_keys.len(),
         }
     }
 
@@ -471,7 +598,18 @@ impl<F: PrimeField> Graph<F> {
     /// Checks the graph's structural invariants:
     /// - every node's inputs reference strictly earlier nodes (topological order),
     /// - every node has exactly as many inputs as its op's arity,
+    /// - every `PrecomputeResult`/`RoundResult` references a real slot of a real producer,
+    /// - every precomputation site has exactly one [`Op::Precompute`] node,
+    /// - no [`Op::Precompute`] reads an un-reshared [`Op::MulLocal`] value,
+    /// - MPC-lowering ops appear only once the graph is [`Stage::MpcLowered`],
     /// - every output references a node that exists.
+    ///
+    /// Deliberately *not* checked here: that the sites sharing a batch are mutually independent.
+    /// Under `passes::mpc::level`'s formula that is a tautology of the formula (a dependency forces
+    /// a different stage), so asserting it here would test the formula against itself. The real
+    /// check belongs where the grouping *decision* is made, i.e. `vm::codegen`. If stages ever
+    /// become a recorded decision rather than a derivation (see `passes::mpc::level`'s module doc
+    /// on non-ASAP scheduling), promote it here.
     ///
     /// Called once after the frontend builds the graph and, in debug builds, between every pass.
     pub(crate) fn verify(&self) -> eyre::Result<()> {
@@ -545,6 +683,22 @@ impl<F: PrimeField> Graph<F> {
                     );
                 }
             }
+            // A precomputation gadget needs a genuine share. `Op::MulLocal` is the only producer of
+            // a `Local` (un-reshared additive-3) value, so this is a purely syntactic check - no
+            // domain analysis needed - and it is the structural counterpart of the same rejection
+            // `vm::codegen` makes when resolving a site's operand banks.
+            if let Op::Precompute(site_id) = &node.op {
+                for input in &node.inputs {
+                    if matches!(self.nodes[input.index()].op, Op::MulLocal) {
+                        eyre::bail!(
+                            "node {i} (Precompute({})) reads value {} which is an un-reshared \
+                             MulLocal - a precomputation gadget needs a genuine share",
+                            site_id.index(),
+                            input.index()
+                        );
+                    }
+                }
+            }
             if let Op::RoundResult(slot) = &node.op {
                 let referenced = &self.nodes[node.inputs[0].index()];
                 let Op::Round(round_id) = &referenced.op else {
@@ -572,6 +726,25 @@ impl<F: PrimeField> Graph<F> {
                         input.index()
                     );
                 }
+            }
+        }
+        // Exactly one `Op::Precompute` node per site. Several things already assume this without
+        // checking it: `vm::codegen` groups sites into batches and reserves one contiguous result
+        // range per site, and `gc` roots every `Precompute` node so a "dead" site can't shift a
+        // later same-kind site's slot range. Two nodes for one site would silently service it twice
+        // and desynchronize both.
+        let mut nodes_per_site = vec![0usize; self.precompute_sites.len()];
+        for node in &self.nodes {
+            if let Op::Precompute(site_id) = &node.op {
+                nodes_per_site[site_id.index()] += 1;
+            }
+        }
+        for (site, count) in nodes_per_site.iter().enumerate() {
+            if *count != 1 {
+                eyre::bail!(
+                    "precompute site {site} is referenced by {count} Op::Precompute nodes, \
+                     expected exactly 1"
+                );
             }
         }
         for (signal, value) in &self.outputs {
@@ -691,6 +864,101 @@ mod tests {
     #[test]
     fn verify_accepts_well_formed_graph() {
         assert!(sample_graph().verify().is_ok());
+    }
+
+    fn iszero_site() -> PrecomputeSite {
+        PrecomputeSite {
+            kind: PrecomputeKind::IsZero,
+            name: "IsZero".to_owned(),
+            header: "IsZero_0".to_owned(),
+            num_inputs: 1,
+            num_outputs: 1,
+            num_intermediates: 1,
+        }
+    }
+
+    /// Two `Op::Precompute` nodes for one site would service it twice and desynchronize every later
+    /// same-kind site's reserved result range in `vm::codegen`.
+    #[test]
+    fn verify_rejects_duplicate_precompute_nodes_for_one_site() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]),
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]),
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]),
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]),
+        ];
+        let outputs = vec![(SignalIdx::new(0), ValueId::new(3))];
+        let graph: Graph<Fr> = Graph::from_parts(
+            nodes,
+            outputs,
+            vec![iszero_site()],
+            vec![],
+            vec![],
+            vec![],
+            1,
+            1,
+            2,
+        );
+        let err = graph.verify().unwrap_err().to_string();
+        assert!(
+            err.contains("referenced by 2 Op::Precompute nodes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A site with no `Op::Precompute` node at all is equally broken - `level::site_stages` and
+    /// codegen's grouping both index by `PrecomputeId` and would have nothing to place.
+    #[test]
+    fn verify_rejects_a_site_with_no_precompute_node() {
+        let nodes = vec![Node::new(Op::Input(SignalIdx::new(1)), vec![])];
+        let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
+        let graph: Graph<Fr> = Graph::from_parts(
+            nodes,
+            outputs,
+            vec![iszero_site()],
+            vec![],
+            vec![],
+            vec![],
+            1,
+            1,
+            2,
+        );
+        let err = graph.verify().unwrap_err().to_string();
+        assert!(
+            err.contains("referenced by 0 Op::Precompute nodes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A gadget needs a genuine share, not an un-reshared local product.
+    #[test]
+    fn verify_rejects_a_precompute_reading_an_unreshared_mul_local() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]),
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]),
+            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(2)]),
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]),
+        ];
+        let outputs = vec![(SignalIdx::new(0), ValueId::new(4))];
+        let mut graph: Graph<Fr> = Graph::from_parts(
+            nodes,
+            outputs,
+            vec![iszero_site()],
+            vec![],
+            vec![],
+            vec![],
+            2,
+            1,
+            3,
+        );
+        // MulLocal is only legal once lowering has started.
+        graph.mark_lowered();
+        let err = graph.verify().unwrap_err().to_string();
+        assert!(
+            err.contains("un-reshared MulLocal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

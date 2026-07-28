@@ -1,0 +1,95 @@
+//! Frontend behaviours that a golden-witness KAT cannot express: the *typed* errors this compiler
+//! produces for circom constructs it deliberately doesn't support, and the input metadata it derives
+//! alongside the graph. The positive value cases live in `tests/circom_ir.rs`.
+//!
+//! See `docs/ARCHITECTURE.md`, "Known gaps", for why each gap is a gap.
+
+use ark_bn254::Bn254;
+use circom_mpc_compiler::vm::program::Bank;
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+
+mod common;
+
+use common::{circuit_path, libs_path};
+
+fn config() -> CompilerConfig {
+    let mut config = CompilerConfig::default();
+    config.simplification = SimplificationLevel::O2(usize::MAX);
+    config.link_library.push(libs_path());
+    config
+}
+
+fn expect_unsupported(circuit: &str) -> String {
+    match CoCircomCompiler::<Bn254>::parse(circuit_path(circuit), config()) {
+        Ok(_) => panic!(
+            "{circuit} compiled unexpectedly - if this is a genuine new capability, move it to a \
+             witness-comparison test in tests/circom_ir.rs instead of deleting this assertion"
+        ),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// `IsZero`'s `inv <-- in!=0 ? 1/in : 0` branches on a genuine circuit value. Constant-condition
+/// folding (`frontend/build.rs::handle_branch_bucket`, covered by `control_flow` in
+/// `tests/circom_ir.rs`) deliberately does *not* reach this: there is no select/mux `ir::Op` to
+/// arithmetize a secret-dependent branch into, so this must stay a clean error rather than become
+/// a silently-wrong witness.
+#[test]
+fn non_constant_branch_condition_is_a_typed_error() {
+    let msg = expect_unsupported("iszero");
+    assert!(
+        msg.contains("branch (if/else on a non-constant condition)"),
+        "expected the non-constant-branch error, got: {msg}"
+    );
+}
+
+/// Unconstrained function calls (`Instruction::Call`) remain unimplemented.
+#[test]
+fn function_call_is_a_typed_error() {
+    let msg = expect_unsupported("functions");
+    assert!(
+        msg.contains("call to function"),
+        "expected the function-call error, got: {msg}"
+    );
+}
+
+/// The removed operator surface: `Num2Bits`' `(in >> i) & 1` on a genuine circuit input.
+#[test]
+fn non_constant_bitwise_operator_is_a_typed_error() {
+    let msg = expect_unsupported("sum_test");
+    assert!(
+        msg.contains("only supported on compile-time constants"),
+        "expected the non-constant-operator error, got: {msg}"
+    );
+}
+
+/// `Graph::input_list` must be 0-based over the circuit's inputs, not in circom's witness numbering
+/// (where the first input sits at `1 + num_outputs`, after the reserved constant and main's outputs).
+///
+/// Regression test: those two numberings used to be compared directly, so
+/// `passes::mpc::domain::signal_domain`'s range check could never match and a declared-public input
+/// was always classified `Shared`. No golden-witness KAT caught it, because *that* direction only
+/// costs an optimization - but with more than one main output the same offset lands inside an
+/// unrelated input's range and misclassifies a secret input as public, which `Machine::run` rejects.
+#[test]
+fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
+    let graph = CoCircomCompiler::<Bn254>::parse(circuit_path("multiplier2_public"), config())
+        .expect("multiplier2_public compiles");
+    assert_eq!(graph.public_inputs, vec!["a".to_owned()]);
+    let mut offsets: Vec<(String, usize, usize)> = graph.input_list.clone();
+    offsets.sort_by_key(|(_, start, _)| *start);
+    assert_eq!(
+        offsets,
+        vec![("a".to_owned(), 0, 1), ("b".to_owned(), 1, 1)],
+        "input offsets must be 0-based over inputs"
+    );
+
+    // And the classification that depends on them.
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("multiplier2_public"), config())
+        .expect("multiplier2_public compiles");
+    assert_eq!(
+        program.input_domains,
+        vec![Bank::Public, Bank::Shared],
+        "`a` is declared public, `b` is not"
+    );
+}
