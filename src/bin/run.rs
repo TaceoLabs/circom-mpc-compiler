@@ -1,7 +1,5 @@
 use ark_bn254::Bn254;
-use circom_mpc_compiler::{
-    interpreter::Interpreter, CoCircomCompiler, CompilerConfig, SimplificationLevel,
-};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
@@ -21,27 +19,21 @@ fn install_tracing() {
 fn main() -> eyre::Result<()> {
     install_tracing();
     let root = std::env!("CARGO_MANIFEST_DIR");
+    // poseidon_hasher1.circom (the old default) calls a helper function, which this compiler
+    // doesn't support yet (see docs/ARCHITECTURE.md, "Known gaps") - default to something that
+    // actually compiles so `cargo run` demonstrates a working path out of the box.
+    let circuit = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| format!("{root}/circuits/multiplier2.circom"));
+
     let mut config = CompilerConfig::new();
     config.simplification = SimplificationLevel::O2(usize::MAX);
     config
         .link_library
         .push(format!("{root}/circuits/libs/").into());
-    //let ast =
-    //    CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier3.circom"), config)?;
-    //CoCircomCompiler::<Bn254>::parse(format!("{root}/circuits/multiplier2.circom"), config)?;
-    let ast = CoCircomCompiler::<Bn254>::parse(
-        format!("{root}/circuits/poseidon_hasher1.circom"),
-        config,
-    )?;
-    dbg!(ast);
 
-    //let vec = (2..6).map(|i| ark_bn254::Fr::from(i)).collect::<Vec<_>>();
-
-    //let mut interpreter = Interpreter::new(ast, vec);
-    //let signals = interpreter.run();
-    //for signal in signals {
-    //    println!("{signal}");
-    //}
+    let graph = CoCircomCompiler::<Bn254>::parse(circuit, config)?;
+    tracing::info!("graph:\n{graph:?}");
 
     Ok(())
 }

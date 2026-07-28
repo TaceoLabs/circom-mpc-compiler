@@ -1,5 +1,7 @@
-use core::panic;
-use std::usize;
+//! Loop unrolling: circom loops with a statically known trip count are fully unrolled during
+//! per-template lowering (not a separate pass — see `docs/ARCHITECTURE.md` for why loops are not
+//! modeled as graph nodes at all). Ported from `circom_ir/loop_unrolling.rs` with no semantic
+//! changes: same supported step/condition combinations, same panics for anything else.
 
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
@@ -7,20 +9,11 @@ use circom_compiler::intermediate_representation::ir_interface::{
     AddressType, Instruction, LocationRule, LoopBucket, OperatorType,
 };
 use eyre::Result;
-use serde::de::value;
 
-use super::{
-    translate::GraphCompiler,
-    types::{Node, WireInformation},
-};
-
-macro_rules! to_u64 {
-    ($x: expr) => {
-        u64::try_from($x).expect("fits into u64")
-    };
-}
+use super::build::{to_u64, GraphCompiler};
 
 #[derive(Debug)]
+#[allow(dead_code)] // Mul's payload isn't read yet: get_induction_iter's Mul arms are all todo!()
 enum StepType {
     Add(usize),
     Sub(usize),
@@ -31,8 +24,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     fn get_step_size(&self, inst: &Instruction) -> (usize, StepType) {
         // must be a top level store
         let (var_index, compute_inst) = if let Instruction::Store(store_bucket) = inst {
-            // we store a var here - we need to get the index and update it after every round
-            // trip for the unrolling
             if let LocationRule::Indexed {
                 location,
                 template_header: _,
@@ -42,7 +33,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     matches!(store_bucket.dest_address_type, AddressType::Variable),
                     "must be a variable store for step size"
                 );
-                let index = self.get_constant_value(&location);
+                let index = self.get_constant_value(location);
                 (index, store_bucket.src.as_ref())
             } else {
                 panic!("must be an indexed store for induction variable")
@@ -50,7 +41,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         } else {
             panic!("must be top level store bucket for step size");
         };
-        // we can either have compute bucket or value bucket
         match compute_inst {
             Instruction::Compute(compute_bucket) => {
                 assert_eq!(compute_bucket.stack.len(), 2, "must be binary op");
@@ -73,7 +63,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 (var_index, step_type)
             }
             inst @ Instruction::Value(_) => {
-                // we are a constant round trip
                 tracing::trace!("this is a constant round trip");
                 (var_index, StepType::Add(self.get_constant_value(inst)))
             }
@@ -125,14 +114,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         Ok(())
     }
 
-    pub fn add_induction_variable_node(&mut self, var_index: usize, induction_var: usize) {
-        let induction_var = <P::ScalarField as PrimeField>::BigInt::from(to_u64!(induction_var));
-        let next_wire = self.next_wire();
-        let wire_information = WireInformation::new(self.next_node());
+    pub(crate) fn add_induction_variable_node(&mut self, var_index: usize, induction_var: usize) {
+        let induction_var = <P::ScalarField as PrimeField>::BigInt::from(to_u64(induction_var));
         let constant = P::ScalarField::from(induction_var);
-        self.nodes.push(Node::constant(constant, next_wire));
-        self.var_to_wire.insert(to_u64!(var_index), next_wire);
-        self.wire_to_constant.insert(to_u64!(next_wire), constant);
+        let value = self.push_constant_value(constant);
+        self.var_to_value.insert(var_index, value);
     }
 }
 

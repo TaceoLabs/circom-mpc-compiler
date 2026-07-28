@@ -2,15 +2,11 @@ use std::{marker::PhantomData, path::PathBuf};
 
 use ark_ec::pairing::Pairing;
 
-use circom_ir::types::CircomAST;
 use serde::{Deserialize, Serialize};
 
-mod circom_ir;
+mod frontend;
 pub mod interpreter;
-pub mod mpc;
-pub mod mpc_interpreter;
-pub mod mpc_ir;
-pub mod passes;
+pub mod ir;
 
 /// The simplification level applied during constraint generation
 #[derive(
@@ -51,7 +47,7 @@ pub struct CompilerConfig {
 }
 
 fn default_version() -> String {
-    "2.2.0".to_owned()
+    "2.2.2".to_owned()
 }
 
 impl Default for CompilerConfig {
@@ -92,21 +88,19 @@ impl<P: Pairing> CoCircomCompiler<P> {
         }
     }
 
-    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<CircomAST<P::ScalarField>>
+    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph<P::ScalarField>>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,
     {
         tracing::debug!("compiler starts parsing..");
-        let circom_ir = circom_ir::translate::build_circom_ir::<P>(
-            PathBuf::from(file).display().to_string(),
-            config,
-        )?;
-        tracing::debug!("AST:\n{:?}", circom_ir);
+        let mut graph =
+            frontend::build_graph::<P>(PathBuf::from(file).display().to_string(), config)?;
+        graph.verify()?;
+        tracing::debug!("graph before gc:\n{:?}", graph);
+        graph.gc();
+        graph.verify()?;
         tracing::debug!("success!");
-        let circom_ir = passes::dead_code::dead_code_elimination(circom_ir)?;
-        let circom_ir = passes::load_elimination::load_elimination(circom_ir)?;
-        let circom_ir = passes::reduce_wire_indices::reduce_wire_indices(circom_ir)?;
-        Ok(circom_ir)
+        Ok(graph)
     }
 }

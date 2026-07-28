@@ -1,0 +1,130 @@
+//! Recursive sub-component inlining: flattens a [`TemplateGraph`] tree (main plus every
+//! subcomponent it instantiates, transitively) into one flat [`ir::Graph`].
+//!
+//! This replaces `CircomAST::inline_subgraph` from `circom_ir/types.rs`. The old version worked
+//! by shifting raw `Wire` numbers by a running `outer_offset` as subgraphs were spliced into a
+//! shared flat array — a placeholder `Op::Load` node stood in for every cross-template reference
+//! (a subcomponent's input port, a subcomponent's output port) until a later `load_elimination`
+//! pass chased through the placeholders and deleted them.
+//!
+//! The value-graph model has no placeholder op to spare (there is no `Op::Load` at all), so this
+//! version resolves every cross-template reference *at inlining time*: a handful of maps carry
+//! already-resolved `ValueId`s across the recursion, and nothing is ever pushed to the graph that
+//! isn't a genuine, permanent node. Two small maps are shared with the old code's structure:
+//! `sub_cmp_inputs` (which value was stored into a subcomponent's input port) and the returned
+//! `port_outputs` (which value a subcomponent's output port resolves to, handed back to whichever
+//! caller reads it via `SubCmpOutput`).
+//!
+//! One correctness note versus the old code: this version also resolves a template's *own*
+//! signal reads (`TemplateOp::LocalSignal`) against its own writes first (`local_writes`),
+//! regardless of nesting level. The old code only did this for nested subcomponents implicitly
+//! (by construction, a nested `Op::Input` always went through `input_mapping`); a template reading
+//! back its own already-computed output signal only worked for `main` because the old flat
+//! node list happened to interleave the write before the read at runtime. Resolving through
+//! `local_writes` directly is simpler and correct at every nesting level, including a case the old
+//! code could never handle at all: a nested subcomponent reading back its own output signal
+//! (`input_mapping` only ever contained *input*-port entries, so that lookup would panic).
+
+use ark_ff::PrimeField;
+use rustc_hash::FxHashMap;
+
+use super::build::{TemplateGraph, TemplateOp};
+use crate::ir::{self, Op, SignalIdx, ValueId};
+
+/// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
+/// signal space) into `nodes`/`outputs`. `input_mapping` carries the values the *caller* stored
+/// into this template's own input ports (empty for main, which has no caller).
+///
+/// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
+/// can resolve it once this call returns.
+pub(crate) fn inline_template<F: PrimeField>(
+    nodes: &mut Vec<ir::Node<F>>,
+    outputs: &mut Vec<(SignalIdx, ValueId)>,
+    template: TemplateGraph<F>,
+    signal_offset: usize,
+    input_mapping: &FxHashMap<usize, ValueId>,
+) -> FxHashMap<usize, ValueId> {
+    let mut port_outputs = FxHashMap::default();
+    // this template's own signal writes, keyed by local (pre-offset) signal index; lets a
+    // template read back a signal it just wrote without re-deriving anything.
+    let mut local_writes: FxHashMap<usize, ValueId> = FxHashMap::default();
+    // resolved output-port maps of local subcomponent instances, filled in lazily on first use
+    let mut already_inlined: FxHashMap<usize, FxHashMap<usize, ValueId>> = FxHashMap::default();
+    // values stored into local subcomponent instances' input ports, by (instance, port)
+    let mut sub_cmp_inputs: Vec<FxHashMap<usize, ValueId>> =
+        vec![FxHashMap::default(); template.sub_graphs.len()];
+    let mut sub_graphs: Vec<Option<_>> = template.sub_graphs.into_iter().map(Some).collect();
+
+    // local_remap[i] is the resolved outer ValueId for this template's local node i. Only
+    // populated for nodes that produce a usable value (Real ops, LocalSignal reads, SubCmpOutput
+    // reads) — LocalSignalWrite/SubCmpInput are sinks, never referenced by index.
+    let mut local_remap: Vec<Option<ValueId>> = vec![None; template.nodes.len()];
+
+    for (local_idx, node) in template.nodes.into_iter().enumerate() {
+        match node.op {
+            TemplateOp::Real(op) => {
+                let inputs = node
+                    .inputs
+                    .iter()
+                    .map(|&v| local_remap[v.index()].expect("value used before it was resolved"))
+                    .collect();
+                let new_id = ValueId::new(nodes.len());
+                nodes.push(ir::Node::new(op, inputs));
+                local_remap[local_idx] = Some(new_id);
+            }
+            TemplateOp::LocalSignal(signal) => {
+                let resolved = if let Some(&v) = local_writes.get(&signal) {
+                    v
+                } else if signal_offset != 0 {
+                    *input_mapping.get(&signal).unwrap_or_else(|| {
+                        panic!("subcomponent input signal {signal} read before it was provided")
+                    })
+                } else {
+                    // a genuine external circuit input, read at runtime
+                    let new_id = ValueId::new(nodes.len());
+                    nodes.push(ir::Node::new(Op::Input(SignalIdx::new(signal)), vec![]));
+                    new_id
+                };
+                if signal_offset != 0 {
+                    // this subcomponent's own input signal is still part of the circuit's flat
+                    // signal space and must be addressable by signal_to_witness
+                    outputs.push((SignalIdx::new(signal + signal_offset), resolved));
+                }
+                local_remap[local_idx] = Some(resolved);
+            }
+            TemplateOp::LocalSignalWrite(signal) => {
+                let value =
+                    local_remap[node.inputs[0].index()].expect("value used before it was resolved");
+                local_writes.insert(signal, value);
+                if signal_offset != 0 {
+                    port_outputs.insert(signal, value);
+                }
+                outputs.push((SignalIdx::new(signal + signal_offset), value));
+            }
+            TemplateOp::SubCmpInput { sub_cmp, port } => {
+                let value =
+                    local_remap[node.inputs[0].index()].expect("value used before it was resolved");
+                sub_cmp_inputs[sub_cmp].insert(port, value);
+            }
+            TemplateOp::SubCmpOutput { sub_cmp, port } => {
+                let map = already_inlined.entry(sub_cmp).or_insert_with(|| {
+                    let instance = sub_graphs[sub_cmp]
+                        .take()
+                        .expect("subcomponent instance consumed twice");
+                    inline_template(
+                        nodes,
+                        outputs,
+                        instance.template,
+                        instance.signal_offset,
+                        &sub_cmp_inputs[sub_cmp],
+                    )
+                });
+                let resolved = *map.get(&port).unwrap_or_else(|| {
+                    panic!("subcomponent output port {port} read before it was produced")
+                });
+                local_remap[local_idx] = Some(resolved);
+            }
+        }
+    }
+    port_outputs
+}
