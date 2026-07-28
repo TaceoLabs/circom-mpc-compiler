@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 mod frontend;
 pub mod interpreter;
 pub mod ir;
+pub mod passes;
+
+pub use passes::OptLevel;
 
 /// The simplification level applied during constraint generation
 #[derive(
@@ -21,6 +24,24 @@ pub enum SimplificationLevel {
     O1,
     /// Full constraint simplification (applied for n rounds)
     O2(usize),
+}
+
+/// How `TACEO_PRECOMPUTATION_*`-wrapped components are handled. See `docs/ARCHITECTURE.md`,
+/// "Precomputation".
+#[derive(
+    Debug, Default, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord, Hash,
+)]
+pub enum PrecomputationMode {
+    /// Extract each wrapped component into an `ir::Op::Precompute` site instead of compiling its
+    /// body - the wrapper's own inputs/outputs are wired up as usual, but the runtime must supply
+    /// a trace for every site (see [`crate::interpreter::PrecomputeProvider`]).
+    #[default]
+    Extract,
+    /// Compile the wrapped component's body like any other template. Useful for plaintext
+    /// comparison against a circuit with no precomputation accelerator; expected to fail with the
+    /// same typed `Unsupported` errors the wrapped gadgets would hit unwrapped (field inversion,
+    /// bit extraction, ...).
+    Inline,
 }
 
 /// The mpc-compiler configuration
@@ -44,6 +65,14 @@ pub struct CompilerConfig {
     /// Does an additional check over the constraints produced
     #[serde(default)]
     pub inspect: bool,
+    /// Which IR passes `CoCircomCompiler::parse` runs after the frontend builds the graph.
+    /// Distinct from `simplification`, which configures upstream circom constraint
+    /// simplification, not this crate's own passes (see `src/passes/`).
+    #[serde(default)]
+    pub opt_level: OptLevel,
+    /// How `TACEO_PRECOMPUTATION_*`-wrapped components are handled.
+    #[serde(default)]
+    pub precomputation: PrecomputationMode,
 }
 
 fn default_version() -> String {
@@ -59,6 +88,8 @@ impl Default for CompilerConfig {
             simplification: SimplificationLevel::default(),
             verbose: false,
             inspect: false,
+            opt_level: OptLevel::default(),
+            precomputation: PrecomputationMode::default(),
         }
     }
 }
@@ -94,12 +125,12 @@ impl<P: Pairing> CoCircomCompiler<P> {
         Pth: std::fmt::Debug,
     {
         tracing::debug!("compiler starts parsing..");
+        let opt_level = config.opt_level;
         let mut graph =
             frontend::build_graph::<P>(PathBuf::from(file).display().to_string(), config)?;
         graph.verify()?;
-        tracing::debug!("graph before gc:\n{:?}", graph);
-        graph.gc();
-        graph.verify()?;
+        tracing::debug!("graph before passes:\n{:?}", graph);
+        passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
         tracing::debug!("success!");
         Ok(graph)
     }

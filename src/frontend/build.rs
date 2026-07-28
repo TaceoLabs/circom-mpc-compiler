@@ -22,10 +22,12 @@ use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{Op, ValueId};
+use crate::ir::{Arity, Op, ValueId};
+use crate::PrecomputationMode;
 
 use super::error::Unsupported;
 use super::fold::fold_binary;
+use super::PRECOMPUTATION_PREFIX;
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -58,7 +60,15 @@ impl<F: PrimeField> TemplateOp<F> {
         match self {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
             TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } => 1,
-            TemplateOp::Real(op) => op.arity(),
+            // TemplateOp::Real is only ever built from Op::Input/Constant/Add/Sub/Mul here -
+            // Op::Precompute/PrecomputeResult are inlining-time-only ops, materialized by
+            // frontend/inline.rs, never by this per-template build pass.
+            TemplateOp::Real(op) => match op.arity() {
+                Arity::Fixed(n) => n,
+                Arity::SiteInputs => {
+                    unreachable!("TemplateOp::Real never wraps a precomputation op before inlining")
+                }
+            },
         }
     }
 }
@@ -72,9 +82,27 @@ pub(crate) struct TemplateNode<F: PrimeField> {
 /// One instantiation of a subcomponent inside a template: which template it is, and at what
 /// signal offset in the enclosing circuit's flat signal space it lives.
 #[derive(Clone)]
-pub(crate) struct SubGraphInstance<F: PrimeField> {
-    pub(crate) template: TemplateGraph<F>,
-    pub(crate) signal_offset: usize,
+pub(crate) enum SubGraphInstance<F: PrimeField> {
+    /// A regular subcomponent, to be recursively inlined by `frontend/inline.rs`.
+    Compiled {
+        template: TemplateGraph<F>,
+        signal_offset: usize,
+    },
+    /// A `TACEO_PRECOMPUTATION_*`-wrapped component (`PrecomputationMode::Extract`): the wrapped
+    /// (inner) component's body is never compiled at all - `frontend/inline.rs` turns this into
+    /// an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
+    /// "Precomputation".
+    Precomputed {
+        /// The wrapped template's plain name, e.g. `"Poseidon2"` (`TemplateCodeInfo::name`).
+        name: String,
+        /// The wrapped template's specialized header, e.g. `"Poseidon2_12"`
+        /// (`TemplateCodeInfo::header`) - the key `precompute_spans` is looked up by.
+        header: String,
+        signal_offset: usize,
+        num_inputs: usize,
+        num_outputs: usize,
+        num_intermediates: usize,
+    },
 }
 
 /// The not-yet-inlined value graph of a single template. `sub_graphs[i]` is the i-th
@@ -94,14 +122,23 @@ pub(crate) struct GraphCompiler<'a, P: Pairing> {
     pub(crate) templates: &'a mut HashMap<String, TemplateCode>,
     pub(crate) compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
     pub(crate) constant_table: &'a [P::ScalarField],
+    pub(crate) precomputation: PrecomputationMode,
+    /// Every template header's total flat signal count (own signals + everything transitively
+    /// instantiated), keyed the same way `templates` is - see
+    /// `frontend/mod.rs::compute_signal_spans`. Only consulted for `TACEO_PRECOMPUTATION_*`
+    /// wrappers, to size their site's `num_intermediates`.
+    pub(crate) precompute_spans: &'a FxHashMap<String, usize>,
 }
 
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         code: TemplateCode,
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
         constant_table: &'a [P::ScalarField],
+        precomputation: PrecomputationMode,
+        precompute_spans: &'a FxHashMap<String, usize>,
     ) -> Self {
         Self {
             sub_graphs: Vec::with_capacity(code.number_of_components),
@@ -110,6 +147,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             templates,
             compiled_graphs,
             constant_table,
+            precomputation,
+            precompute_spans,
             var_to_value: FxHashMap::default(),
         }
     }
@@ -298,26 +337,84 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             create_cmp_bucket.number_of_cmp
         );
         let symbol = create_cmp_bucket.symbol.clone();
-        let sub_cmp = if let Some(sub_cmp) = self.compiled_graphs.get(&symbol) {
-            sub_cmp.clone()
-        } else {
-            let template_code = self.templates.remove(&symbol).expect("must be here");
-            tracing::debug!("start compilation of {}", symbol);
-            let sub_cmp_compiler = GraphCompiler::<P>::new(
-                template_code,
-                self.templates,
-                self.compiled_graphs,
-                self.constant_table,
-            );
-            let sub_cmp = sub_cmp_compiler.parse()?;
-            self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
-            sub_cmp
-        };
+
+        // Fast path: already compiled - definitely not a TACEO_PRECOMPUTATION_* wrapper (those
+        // are never inserted into compiled_graphs, precisely so every repeated instantiation
+        // keeps going through the peek below instead). Handling this first, before touching
+        // `self.templates` at all, matters: a regular template's entry there is removed the first
+        // time it's compiled (below), so a naive peek-first order would panic on a *second*
+        // instantiation of any repeated regular template.
+        if let Some(sub_cmp) = self.compiled_graphs.get(&symbol) {
+            let sub_cmp = sub_cmp.clone();
+            let mut offset = create_cmp_bucket.signal_offset;
+            let offset_jump = create_cmp_bucket.signal_offset_jump;
+            for _ in 0..create_cmp_bucket.number_of_cmp {
+                self.sub_graphs.push(SubGraphInstance::Compiled {
+                    template: sub_cmp.clone(),
+                    signal_offset: offset,
+                });
+                offset += offset_jump;
+            }
+            return Ok(());
+        }
+
+        // Note: the prefix marks the *wrapper* (e.g. `TACEO_PRECOMPUTATION_Poseidon2`), which is
+        // the template currently being compiled (`self.code`) - not the component this bucket
+        // instantiates (e.g. plain `Poseidon2`), which never carries the prefix itself. Every
+        // wrapper's body is exactly one line (`out <== Gadget(...)(in);`), so it creates exactly
+        // one subcomponent; that's the one this intercepts.
+        if self.precomputation == PrecomputationMode::Extract
+            && self.code.name.starts_with(PRECOMPUTATION_PREFIX)
+        {
+            // Peek, never remove: the wrapped component's body is never compiled at all (see
+            // SubGraphInstance::Precomputed), so its entry in `templates` must stay put for every
+            // repeated instantiation of the same wrapper to find it too.
+            let template_code = self.templates.get(&symbol).expect("must be here");
+            let name = template_code.name.clone();
+            let header = template_code.header.clone();
+            let num_inputs = template_code.number_of_inputs;
+            let num_outputs = template_code.number_of_outputs;
+            let span = *self
+                .precompute_spans
+                .get(&header)
+                .unwrap_or_else(|| panic!("no signal-span entry for precomputed template `{header}`"));
+            let num_intermediates = span - num_inputs - num_outputs;
+
+            let mut offset = create_cmp_bucket.signal_offset;
+            let offset_jump = create_cmp_bucket.signal_offset_jump;
+            for _ in 0..create_cmp_bucket.number_of_cmp {
+                self.sub_graphs.push(SubGraphInstance::Precomputed {
+                    name: name.clone(),
+                    header: header.clone(),
+                    signal_offset: offset,
+                    num_inputs,
+                    num_outputs,
+                    num_intermediates,
+                });
+                offset += offset_jump;
+            }
+            return Ok(());
+        }
+
+        // First instantiation of a regular (non-precomputed) template: compile it now and cache
+        // the result for every later instantiation to hit the fast path above.
+        let template_code = self.templates.remove(&symbol).expect("must be here");
+        tracing::debug!("start compilation of {}", symbol);
+        let sub_cmp_compiler = GraphCompiler::<P>::new(
+            template_code,
+            self.templates,
+            self.compiled_graphs,
+            self.constant_table,
+            self.precomputation,
+            self.precompute_spans,
+        );
+        let sub_cmp = sub_cmp_compiler.parse()?;
+        self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
 
         let mut offset = create_cmp_bucket.signal_offset;
         let offset_jump = create_cmp_bucket.signal_offset_jump;
         for _ in 0..create_cmp_bucket.number_of_cmp {
-            self.sub_graphs.push(SubGraphInstance {
+            self.sub_graphs.push(SubGraphInstance::Compiled {
                 template: sub_cmp.clone(),
                 signal_offset: offset,
             });
@@ -358,6 +455,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Input(_))
+            // Precompute/PrecomputeResult are inlining-time-only ops (see TemplateOp::arity
+            // above) and never appear here, but are included so this match stays exhaustive as
+            // Op grows.
+            | TemplateOp::Real(Op::Precompute(_))
+            | TemplateOp::Real(Op::PrecomputeResult(_))
             | TemplateOp::LocalSignal(_)
             | TemplateOp::LocalSignalWrite(_)
             | TemplateOp::SubCmpInput { .. }

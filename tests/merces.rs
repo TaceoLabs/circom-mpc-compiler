@@ -5,10 +5,15 @@
 //! with a typed `Unsupported` error (a precise "this operator/instruction isn't supported yet")
 //! rather than a panic.
 //!
-//! All three currently fail - the operator surface is deliberately limited to `Add`/`Sub`/`Mul`
-//! (see `src/ir.rs`), and the circuits reach `Div` (field inversion inside `IsZero`) and
-//! `ShiftR`/`BitAnd` (bit extraction inside `Num2Bits`) at runtime. That failure is the point: it's
-//! the visible marker for what has to land before these circuits compile end-to-end.
+//! All three currently fail on `Instruction::Branch` (`if`/`else` on a non-constant condition)
+//! inside `IsZero` (`circuits/libs/comparators.circom`), reached through `IsEqual`'s bare,
+//! unwrapped use of it in `merkle_root_4.circom`'s depth-selection logic - the operator surface is
+//! deliberately limited to `Add`/`Sub`/`Mul` (see `src/ir.rs`), and `Instruction::Branch` is
+//! unimplemented (see `docs/ARCHITECTURE.md`, "Known gaps"). Every `TACEO_PRECOMPUTATION_*`-wrapped
+//! use of `IsZero`/`Num2Bits`/`Poseidon2`/`AliasCheck` - which is most of what these circuits do -
+//! is unaffected: `PrecomputationMode::Extract` (the default, see `CompilerConfig`) cuts those
+//! subtrees into precomputation sites instead of compiling them, which is what gets these circuits
+//! past the `poseidon2_constants.circom` function-call gap that used to block them first.
 
 use ark_bn254::Bn254;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};

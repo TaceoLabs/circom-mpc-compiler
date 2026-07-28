@@ -28,18 +28,23 @@
 use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
-use super::build::{TemplateGraph, TemplateOp};
-use crate::ir::{self, Op, SignalIdx, ValueId};
+use super::build::{SubGraphInstance, TemplateGraph, TemplateOp};
+use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
 
 /// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
 /// signal space) into `nodes`/`outputs`. `input_mapping` carries the values the *caller* stored
 /// into this template's own input ports (empty for main, which has no caller).
+///
+/// `precompute_sites` accumulates one entry per `TACEO_PRECOMPUTATION_*`-wrapped component
+/// encountered anywhere in the recursion, in encounter order - that order is the contract the
+/// runtime's supplied traces must follow (see `docs/ARCHITECTURE.md`, "Precomputation").
 ///
 /// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
 /// can resolve it once this call returns.
 pub(crate) fn inline_template<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
+    precompute_sites: &mut Vec<PrecomputeSite>,
     template: TemplateGraph<F>,
     signal_offset: usize,
     input_mapping: &FxHashMap<usize, ValueId>,
@@ -111,11 +116,11 @@ pub(crate) fn inline_template<F: PrimeField>(
                     let instance = sub_graphs[sub_cmp]
                         .take()
                         .expect("subcomponent instance consumed twice");
-                    inline_template(
+                    inline_sub_graph_instance(
                         nodes,
                         outputs,
-                        instance.template,
-                        instance.signal_offset,
+                        precompute_sites,
+                        instance,
                         &sub_cmp_inputs[sub_cmp],
                     )
                 });
@@ -125,6 +130,134 @@ pub(crate) fn inline_template<F: PrimeField>(
                 local_remap[local_idx] = Some(resolved);
             }
         }
+    }
+
+    // Any subcomponent instance whose outputs are never read (declares none at all, like
+    // TACEO_PRECOMPUTATION_AliasCheck, or simply has no caller interested in them) is otherwise
+    // never inlined by the SubCmpOutput arm above - none of its signals would reach `outputs`,
+    // silently leaving them as zero in the witness. Its inputs are already fully resolved by this
+    // point (every SubCmpInput targeting it was processed in the loop above), so inlining it now
+    // is still topologically sound.
+    for (instance, inputs) in sub_graphs.into_iter().zip(sub_cmp_inputs) {
+        if let Some(instance) = instance {
+            // Nothing in this template holds a SubCmpOutput reference to it (that's exactly why
+            // it's still Some here) - its port_outputs map has no reader, so discard it.
+            inline_sub_graph_instance(nodes, outputs, precompute_sites, instance, &inputs);
+        }
+    }
+
+    port_outputs
+}
+
+/// Dispatches one subcomponent instance to whichever inlining strategy applies: recurse into a
+/// compiled body, or (for a `TACEO_PRECOMPUTATION_*` wrapper) turn it into a precomputation site
+/// instead of compiling anything - see [`inline_precomputed`].
+fn inline_sub_graph_instance<F: PrimeField>(
+    nodes: &mut Vec<ir::Node<F>>,
+    outputs: &mut Vec<(SignalIdx, ValueId)>,
+    precompute_sites: &mut Vec<PrecomputeSite>,
+    instance: SubGraphInstance<F>,
+    sub_cmp_inputs: &FxHashMap<usize, ValueId>,
+) -> FxHashMap<usize, ValueId> {
+    match instance {
+        SubGraphInstance::Compiled {
+            template,
+            signal_offset,
+        } => inline_template(
+            nodes,
+            outputs,
+            precompute_sites,
+            template,
+            signal_offset,
+            sub_cmp_inputs,
+        ),
+        SubGraphInstance::Precomputed {
+            name,
+            header,
+            signal_offset,
+            num_inputs,
+            num_outputs,
+            num_intermediates,
+        } => inline_precomputed(
+            nodes,
+            outputs,
+            precompute_sites,
+            name,
+            header,
+            signal_offset,
+            num_inputs,
+            num_outputs,
+            num_intermediates,
+            sub_cmp_inputs,
+        ),
+    }
+}
+
+/// Turns one `TACEO_PRECOMPUTATION_*`-wrapped component instance into an `Op::Precompute` node
+/// plus one `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body.
+/// Implements the exact contract documented in `docs/ARCHITECTURE.md`, "Precomputation" (kept
+/// byte-compatible with the co-snarks VM's `ComponentAcceleratorOutput`): result slots
+/// `0..num_outputs` are the wrapped component's own outputs (signals `signal_offset ..`), slots
+/// `num_outputs..` are its subtree's intermediate signals in flat order (signals
+/// `signal_offset + num_outputs + num_inputs ..`).
+#[allow(clippy::too_many_arguments)]
+fn inline_precomputed<F: PrimeField>(
+    nodes: &mut Vec<ir::Node<F>>,
+    outputs: &mut Vec<(SignalIdx, ValueId)>,
+    precompute_sites: &mut Vec<PrecomputeSite>,
+    name: String,
+    header: String,
+    signal_offset: usize,
+    num_inputs: usize,
+    num_outputs: usize,
+    num_intermediates: usize,
+    sub_cmp_inputs: &FxHashMap<usize, ValueId>,
+) -> FxHashMap<usize, ValueId> {
+    let site_id = PrecomputeId::new(precompute_sites.len());
+    precompute_sites.push(PrecomputeSite {
+        name,
+        header,
+        num_inputs,
+        num_outputs,
+        num_intermediates,
+    });
+
+    // The site's inputs, in port order. `TemplateOp::SubCmpInput`'s `port` (and `sub_cmp_inputs`'
+    // keys) are the wrapped component's own *local signal index*, which - like every template's -
+    // numbers outputs first, then inputs (matching `TemplateOp::LocalSignal`/`LocalSignalWrite`,
+    // see `frontend/build.rs`), so input k lives at local signal `num_outputs + k`, not at k
+    // directly. Each is also a genuine witness signal (the wrapped component's own input port) -
+    // bind it into `outputs`, same as the LocalSignal arm above does for a regular subcomponent's
+    // input signal.
+    let inputs: Vec<ValueId> = (0..num_inputs)
+        .map(|k| {
+            let local_signal = num_outputs + k;
+            let value = *sub_cmp_inputs.get(&local_signal).unwrap_or_else(|| {
+                panic!("precomputed component input signal {local_signal} read before it was provided")
+            });
+            outputs.push((SignalIdx::new(signal_offset + local_signal), value));
+            value
+        })
+        .collect();
+
+    let precompute_id = ValueId::new(nodes.len());
+    nodes.push(ir::Node::new(Op::Precompute(site_id), inputs));
+
+    let mut port_outputs = FxHashMap::default();
+    for slot in 0..(num_outputs + num_intermediates) {
+        let result_id = ValueId::new(nodes.len());
+        let slot_u32 = u32::try_from(slot).expect("precompute site has more than u32::MAX slots");
+        nodes.push(ir::Node::new(
+            Op::PrecomputeResult(slot_u32),
+            vec![precompute_id],
+        ));
+        let signal = if slot < num_outputs {
+            port_outputs.insert(slot, result_id);
+            signal_offset + slot
+        } else {
+            signal_offset + num_outputs + num_inputs + (slot - num_outputs)
+        };
+        outputs.push((SignalIdx::new(signal), result_id));
     }
     port_outputs
 }

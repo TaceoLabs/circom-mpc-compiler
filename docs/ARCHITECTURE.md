@@ -16,15 +16,16 @@ circom source in, a procedure that computes the full witness (public and secret)
 ```
 circom source
   -> circom's own parser + type checker + constraint generation + simplification   (frontend/mod.rs, upstream circom crates)
-  -> per-template lowering to TemplateGraph, recursing into subcomponents lazily,   (frontend/build.rs)
-     unrolling loops eagerly, folding removed operators at compile time            (frontend/unroll.rs, frontend/fold.rs)
+  -> per-template lowering to TemplateGraph, recursing into subcomponents lazily    (frontend/build.rs)
+     (unless TACEO_PRECOMPUTATION_*-wrapped - see "Precomputation"), unrolling
+     loops eagerly, folding removed operators at compile time                      (frontend/unroll.rs, frontend/fold.rs)
   -> recursive inlining: flatten the TemplateGraph tree into one ir::Graph          (frontend/inline.rs)
-  -> ir::Graph::gc() + ir::Graph::verify()                                          (ir.rs, called from lib.rs)
+  -> ir::Graph::verify(), then PassManager::for_opt_level(config.opt_level).run()   (ir.rs, passes/, called from lib.rs)
   -> interpreter (debug/reference, the only execution path in this crate)          (interpreter.rs)
 ```
 
-`CoCircomCompiler::<P>::parse(file, config)` in `lib.rs` runs everything up to and including
-`gc`/`verify`, and returns the `ir::Graph`. The plain `Interpreter` is the only consumer in this
+`CoCircomCompiler::<P>::parse(file, config)` in `lib.rs` runs everything up to and including the
+`PassManager`, and returns the `ir::Graph`. The plain `Interpreter` is the only consumer in this
 crate - MPC execution (rep3, the plaintext stand-in `PlainExecutor`, the `mpc_ir` share-kind
 translation pass) was deleted; see "Non-goals" below for why and where to find it again.
 
@@ -166,6 +167,146 @@ of nesting level, so both cases work the same way. This was verified by re-enabl
 `binsum_test`, `binsub_test`, `lessthan`, `sum_test`, and `constants_test` in `tests/circom_ir.rs`
 — all exercise real sub-component nesting and were never runnable before (they were commented out).
 
+**A second correctness gap found and fixed while adding precomputation support:** a subcomponent
+whose outputs are never read via `SubCmpOutput` was never inlined at all — nothing in
+`inline_template` visited it unless some `SubCmpOutput` reference forced it, so none of its signals
+ever reached `outputs`, silently leaving them `0` in the witness. This blocks any subcomponent that
+declares no outputs (`TACEO_PRECOMPUTATION_AliasCheck` is exactly this shape) but is otherwise
+latent for any pure-constraint subcomponent. Fixed by a trailing pass at the end of
+`inline_template`: after the main node loop, every `sub_graphs` entry still `Some` (i.e. never
+claimed by the `SubCmpOutput` arm) is inlined anyway. This is topologically sound because every such
+subcomponent's inputs were necessarily already resolved earlier in the same loop (by the
+`SubCmpInput` arm) - nothing about *reading* its outputs was required to *write* its inputs.
+
+## Pass infrastructure (`src/passes/`)
+
+A `Pass` trait (`fn run(&mut self, graph: &mut Graph<F>, ctx: &mut PassContext) -> Result<Changed>`)
+plus a `PassManager` that runs a fixed pass list to a fixpoint (bounded by `max_iterations`),
+re-verifying the graph after every pass in debug builds. `OptLevel` (`CompilerConfig::opt_level`)
+selects the pass list - `O0` is dead code elimination only, `O1` (default) adds constant folding,
+`O2` is reserved for CSE/GVN and the rep3-specific passes from the roadmap below. This is
+deliberately a separate knob from `SimplificationLevel`, which configures upstream circom
+constraint simplification, not this crate's own IR passes.
+
+The piece that makes a `Pass` cheap to write correctly is `Graph::rewrite` (`src/ir.rs`): it walks
+the old node list in original order, handing each pass's callback the node with its inputs already
+remapped to new-space `ValueId`s, plus every node already emitted so far (so a pass can inspect an
+input's *producer* - e.g. "is this a constant?" - by indexing into it). The callback returns
+`Keep`, `ReplaceWith(other_value)` (alias, no node emitted), or `Emit(different_node)`; `rewrite`
+owns the old-to-new remap and fixes up `outputs`, so a pass can never accidentally produce a forward
+reference - the exact bug class that would otherwise be easy to introduce in this IR, since a
+node's `ValueId` doubles as its position and deleting or replacing any node shifts every later
+reference. `Graph::gc` (dead code elimination) predates `rewrite` and keeps its own hand-written
+reverse-liveness sweep instead - it's a liveness walk, not a node-for-node rewrite, so the same
+abstraction doesn't fit it - but its remap type is shared.
+
+`passes/dead_code.rs` is a thin `Pass` wrapper over `Graph::gc`. `passes/const_fold.rs` is the first
+real `Graph::rewrite` consumer: it folds `Add`/`Sub`/`Mul` when both operands are already
+`Op::Constant`, plus the identity/annihilator cases (`x+0`/`x-0`/`x*1` alias to `x`; `x*0` folds to
+`0`). This is a different, broader fold from the two pre-existing ones and doesn't replace either:
+`frontend/fold.rs::fold_binary` folds the *removed* operators (`Div`, `ShiftR`, ...) at lowering
+time, before a node ever exists, and `GraphCompiler::eval_constant_node` only folds in
+array/signal/component *address* position. Both predate the pass infrastructure and still exist for
+the reasons documented under "Where compile-time folding lives" above; `const_fold` is the first
+pass that folds `Add`/`Sub`/`Mul` themselves, anywhere in the graph.
+
+`Op::is_pure` (`false` only for `Op::Precompute`/`Op::PrecomputeResult`) is added alongside the
+precomputation ops it protects, not consulted by anything yet - it's the signal a future CSE/GVN
+pass needs to avoid merging two precomputation sites, since that would change how many traces the
+runtime has to supply.
+
+## Precomputation (`TACEO_PRECOMPUTATION_*`)
+
+Circuits can wrap a gadget in a template named `TACEO_PRECOMPUTATION_<Name>` (see
+`circuits/libs/taceo/precomputations.circom` for the four merces uses: `Poseidon2`, `Num2Bits`,
+`IsZero`, `AliasCheck`) to mark it as a site the *runtime* computes out-of-band and injects, rather
+than something this compiler has to execute. The co-snarks MPC witness-extension VM already
+special-cases this convention (`circom-mpc-vm/src/mpc_vm.rs`: once a component whose name starts
+with `TACEO_PRECOMPUTATION` has all its inputs bound, its wrapped component's body is never run -
+an externally-supplied `ComponentAcceleratorOutput` trace is written into the signal array
+instead), and merces computes those traces up front in one batched MPC pass specifically so witness
+extension doesn't pay a network round per Poseidon2 call. Making this a first-class IR primitive
+here does more than mirror that: it cuts a subtree this compiler cannot compile at all -
+`poseidon2_constants.circom`'s round-constant-table functions (`Instruction::Call`), `IsZero`'s
+field inversion (`Div`), and `Num2Bits`' bit extraction (`ShiftR`/`BitAnd`) are all *inside* wrapped
+components, so cutting the subtree makes them irrelevant rather than blocking, without implementing
+function calls or re-adding removed operators.
+
+### The contract, kept byte-compatible with the co-snarks VM
+
+The site is the wrapped *inner* component (e.g. `Poseidon2`), not the wrapper
+(`TACEO_PRECOMPUTATION_Poseidon2`) - matching exactly what the VM cuts. For an inner instance at
+signal offset `o` with `num_inputs`/`num_outputs`/`num_intermediates` (its own local signals plus
+every signal in everything it in turn instantiates - see below), circom's layout is `[outputs at
+o][inputs at o+num_outputs][intermediates + subtree at o+num_outputs+num_inputs]`, and a runtime
+trace's result slots map onto it as:
+
+- inputs are bound normally by the wrapper, like any subcomponent's;
+- slots `0..num_outputs` → signals `o..o+num_outputs`;
+- slots `num_outputs..` → signals `o+num_outputs+num_inputs..`, i.e. every remaining signal in the
+  inner component's subtree, in flat order.
+
+Sites are numbered in the order encountered during inlining (deterministic single-threaded
+traversal) - that order *is* the trace order the runtime must supply results in.
+
+### IR shape (`src/ir.rs`)
+
+`Op::Precompute(PrecomputeId)` takes the site's input values as its node inputs (arity equals the
+site's `num_inputs` - the one case `Op::arity()` can't answer without the site table, hence
+`Arity::{Fixed, SiteInputs}` and why `Graph::verify`, not `Node::new`, checks it). One
+`Op::PrecomputeResult(slot)` node per result slot hangs off the `Precompute` node as its sole input,
+matching this IR's "single result per node" invariant the same way `docs/ARCHITECTURE.md`
+prescribes for any future multi-output op. `Graph::precompute_sites: Vec<PrecomputeSite>` is the
+side table `PrecomputeId` indexes into. `Graph::gc` treats every `Op::Precompute` node as an
+unconditional root: every result slot is already bound to a witness signal (so it's normally kept
+anyway), but this is deliberate defense in depth - the runtime supplies traces positionally, so
+silently dropping a "dead" site would desynchronize every later site's trace.
+
+### Frontend (`frontend/build.rs`, `frontend/inline.rs`)
+
+The prefix marks the *wrapper* template, not the component a `CreateCmpBucket` instantiates - each
+wrapper's body is exactly one line (`out <== Gadget(...)(in);`), so `GraphCompiler::
+handle_create_cmp_bucket` checks `self.code.name` (the template currently being compiled) against
+the prefix, not the newly-instantiated symbol's name. When it matches (and
+`CompilerConfig::precomputation` is `Extract`, the default), the wrapped component's body is never
+compiled: its `TemplateCodeInfo` is only *peeked* (never removed from the shared `templates` map,
+unlike a normally-compiled template - a precomputed template is never inserted into
+`compiled_graphs` either, precisely so every repeated instantiation keeps going through this same
+peek instead of the removed-on-first-compile path) for its `name`/`header`/`number_of_inputs`/
+`number_of_outputs`, and a `SubGraphInstance::Precomputed` is pushed instead of a compiled one.
+`frontend/inline.rs::inline_precomputed` then does the three things "IR shape" above describes.
+`PrecomputationMode::Inline` (config knob, default `Extract`) disables all of this, compiling the
+wrapped body like any other template - useful for plaintext comparison, and expected to fail with
+the same typed errors the gadget would hit unwrapped.
+
+One indexing subtlety worth recording: `TemplateOp::SubCmpInput`/`SubCmpOutput`'s `port` is the
+wrapped component's own *local signal index*, which - like every template - numbers outputs first,
+then inputs (matching `TemplateOp::LocalSignal`/`LocalSignalWrite`). So input `k` of the site lives
+at local signal `num_outputs + k`, not at `k` directly; only the output side is directly `0..
+num_outputs`. This is easy to get backwards (it was, once, while landing this) since the two look
+symmetric until you check where the actual bucket-level indices land.
+
+### The signal-span problem (`frontend/mod.rs::compute_signal_spans`)
+
+`num_intermediates` (the wrapped component's own locally-declared signals *plus* every signal
+belonging to everything it transitively instantiates) is the one quantity not sitting in a
+directly-usable field anywhere reachable from this crate. circom itself computes exactly this
+(`constraint_generation::execution_data::executed_program::produce_dags_stats`, over its internal
+`DAG`), but `circom_constraint_generation::build_circuit`'s public return type only exposes a
+`Box<dyn ConstraintExporter>` (an `r1cs`/`sym`/`json` file-writer trait object, no structural
+accessors) - the DAG itself never crosses the public API. `compute_signal_spans` recomputes the
+same recursive sum from `VCP::templates` instead (public, and already relied on by
+`get_output_mapping` above): each `TemplateInstance` already carries its own direct signal counts
+and a `triggers` list naming every subcomponent it instantiates by `template_id` (an index into
+that same `templates` list), so `span(id) = own(inputs+outputs+intermediates) + Σ span(child)`
+falls out directly, just sourced from a different (but equivalent) part of circom's output. Keyed
+by `template_header`, which is identical to the bucket-level `TemplateCodeInfo::header` the
+`templates` map itself is keyed by (both trace back to the same `TemplateInstance.template_header`
+- confirmed by reading `circuit_design::build.rs`, not assumed). Cross-checked in
+`tests/precomputation.rs::signal_span_matches_independent_total` against
+`circuit.c_producer.total_number_of_signals` (an independent computation, from a different part of
+the circom crate) for all four vendored precomputation-wrapper circuits.
+
 ## Known gaps
 
 - **Only `Add`/`Sub`/`Mul` are supported at runtime.** Every other circom operator is a typed
@@ -179,8 +320,9 @@ of nesting level, so both cases work the same way. This was verified by re-enabl
   folding can save. All are still wired up in `tests/circom_ir.rs`, deliberately red, alongside every
   previously-commented-out fixture (69 total) - the failure list is the visible worklist. Re-adding
   `Div`/`IntDiv`/`Pow`/`ShiftL`/`ShiftR`/`BitOr`/`BitAnd`/`BitXor` as real ops is the most-requested
-  next step; see "Real-world target circuits" below for exactly which two gadgets block the merces
-  circuits on this.
+  next step for this KAT worklist; see "Real-world target circuits" below for why the merces
+  circuits themselves no longer block on this (`CompilerConfig::precomputation` routes around it
+  for every wrapped gadget call).
 - **The two-level-subcomponent-nesting wrong-witness gap is currently masked, not fixed.**
   `greaterthan`, `greatereqthan`, `lesseqthan`, `mux2_1`, `mux3_1`, `mux4_1` used to compile and run
   to a wrong witness (nesting a subcomponent inside another nested subcomponent, e.g.
@@ -218,9 +360,10 @@ of nesting level, so both cases work the same way. This was verified by re-enabl
 - `Instruction::Call`/`Branch`/`Return` (unconstrained functions, `if`/`else` on a non-constant
   condition) remain entirely unimplemented - each is a clean `Unsupported::Instruction` error naming
   the call/branch and line, not a panic. This is why `poseidon_hasher1.circom` (calls a helper
-  function) and every merces circuit that reaches `poseidon2_constants.circom`'s
-  `load_rc_full1`/`load_diag`-style constant-table functions don't compile - see "Real-world target
-  circuits" below.
+  function) doesn't compile, and - now that `CompilerConfig::precomputation` (see "Precomputation"
+  above) cuts every wrapped Poseidon2 call before it reaches `poseidon2_constants.circom`'s
+  constant-table functions - why `IsEqual`'s bare, unwrapped `IsZero` call blocks all three merces
+  circuits on `Instruction::Branch` instead; see "Real-world target circuits" below.
 
 ## Real-world target circuits
 
@@ -233,23 +376,29 @@ either a typed `Unsupported` error or a genuine pass, never a panic. **There is 
 for them** (unlike `kats/`, which holds circom's own golden witnesses); do not add witness
 comparison here without also adding real golden witnesses.
 
-As of this writing all three fail with `unsupported instruction: call to function
-`load_diag_*``/`load_rc_*`` (inside `InternalMatMulT`/`Poseidon2`, from `poseidon2_constants.circom`
-- the `Instruction::Call` gap above), not on an operator - Poseidon2 hashing runs early and
-pervasively in these circuits (every commitment goes through it), so its function-call gap is hit
-before the operator gaps below ever get a chance to. Re-check this comment's accuracy after
-`Instruction::Call` lands: the next blocker is very likely the operator gap described next.
+As of this writing all three fail with `unsupported instruction: branch (if/else on a non-constant
+condition)` inside `IsZero` (`circuits/libs/comparators.circom`, the `Instruction::Branch` gap
+above) - reached through `IsEqual`'s bare, unwrapped use of it inside
+`merces/dependencies/merkle_root_4.circom`'s depth-selection logic (`IsEqual()([depth, i])`, used to
+pick which Merkle level's root is the real one). This is a different, and much later, blocker than
+before `CompilerConfig::precomputation` (default `Extract`, see "Precomputation" above) existed:
+every `TACEO_PRECOMPUTATION_*`-wrapped call - which is most of what these circuits do, since Poseidon2
+hashing runs early and pervasively (every commitment goes through it) - is cut into a precomputation
+site instead of compiled, so `poseidon2_constants.circom`'s constant-table functions (the
+`Instruction::Call` gap) are never reached at all. What's left is `IsZero` used *unwrapped* - not
+every use of a gadget in these circuits goes through its `TACEO_PRECOMPUTATION_*` wrapper, only the
+ones the circuit author routed through one.
 
 All three project-level circuits use only `Add`/`Sub`/`Mul` on signals - confirmed by direct
 inspection, zero occurrences of any other signal-level operator anywhere in `merces/`,
-`oblivious_vector/`, `main/`. The only runtime-non-linear operators anywhere in the transitive
-closure (including the vendored libraries) are inside two circomlib gadgets, both reached by every
-one of the three: `circuits/libs/comparators.circom`'s `1/in` (field inversion, `Div`) inside
-`IsZero`, and `circuits/libs/bitify.circom`'s `(in >> i) & 1` (`ShiftR`, `BitAnd`) inside
-`Num2Bits`. So the three circuits are currently blocked on exactly the same "known gap" as the
-KAT-suite regressions above (only `Add`/`Sub`/`Mul` are runtime ops) - re-adding those three
-operators is what would move all three from "typed error" to either "compiles" or "next gap"
-(`poseidon2_constants.circom`'s constant-table functions, per the `Instruction::Call` gap above).
+`oblivious_vector/`, `main/`. The two circomlib gadgets that reach a runtime-non-linear operator -
+`circuits/libs/comparators.circom`'s `1/in` (field inversion, `Div`) inside `IsZero`, and
+`circuits/libs/bitify.circom`'s `(in >> i) & 1` (`ShiftR`, `BitAnd`) inside `Num2Bits` - are both
+reached exclusively through their `TACEO_PRECOMPUTATION_*` wrapper *except* for `IsEqual`'s bare
+`IsZero` call above, confirmed by direct inspection of every remaining `IsZero`/`Num2Bits` call site
+in the transitive closure. So re-adding those two operators is no longer what's needed to get past
+this blocker - either wrapping this specific `IsEqual` call too (a circuit-side change, outside this
+repo), or implementing `Instruction::Branch` (this repo's own gap) would.
 
 ## Why `rustc-hash` instead of `intmap`/`std::collections::HashMap`
 
@@ -307,9 +456,10 @@ this section goes stale):
 
 1. **(done)** Value-graph IR, recursive inliner, `gc`/`verify` replacing the three old cleanup
    passes.
-2. Pass infrastructure: a `Pass` trait, a `PassManager`, an opt-level/pass-list config distinct from
-   the existing `SimplificationLevel` (which configures upstream circom constraint simplification,
-   a different knob).
+2. **(done)** Pass infrastructure: a `Pass` trait, a `PassManager`, an opt-level config
+   (`OptLevel`, `src/passes/mod.rs`) distinct from the existing `SimplificationLevel` (which
+   configures upstream circom constraint simplification, a different knob). See "Pass
+   infrastructure" below.
 3. Design constraint for the future MPC/VM work (not a refactor of code that exists anymore - the
    code this step used to describe collapsing was deleted, see "Non-goals"): share-kind
    specialization belongs in a share-kind analysis pass over this one IR plus a generic
@@ -319,18 +469,19 @@ this section goes stale):
    `amount_public_inputs = 0`, three full-length wire banks) rather than reintroduce them.
 4. Bytecode + the flat-slot-machine VM described above, with linear-scan slot allocation over
    liveness so VM memory tracks live width, not total node count.
-5. General optimization passes: constant folding, CSE/GVN (the value-graph model makes this a
-   single hash-cons pass), algebraic simplification. Note a narrow, address-position-only version of
-   constant folding already exists (`frontend/fold.rs`, `GraphCompiler::eval_constant_node` - see
-   "Where compile-time folding lives" above); a real pass would fold `Add`/`Sub`/`Mul` generally,
-   not just the operators this cut removed and not just in address position.
+5. General optimization passes: constant folding **(done - `passes/const_fold.rs`)**, CSE/GVN (the
+   value-graph model makes this a single hash-cons pass), algebraic simplification. The narrow,
+   address-position-only fold that predates this (`frontend/fold.rs`, `GraphCompiler::
+   eval_constant_node` - see "Where compile-time folding lives" above) still exists alongside it;
+   see "Pass infrastructure" below for why both stay.
 6. Rep3-specific passes, the actual point of all of the above: linear fusion (free ops never cost a
    round), conversion minimization (cancel `B2A(A2B(x))`, sink conversions past free linear ops),
    round scheduling (depth analysis, batch independent muls/opens into shared rounds), open
    sinking.
 7. Re-add the operator surface removed in this cut (`Div`, `IntDiv`, `Pow`, `ShiftL`/`ShiftR`,
    `BitOr`/`BitAnd`/`BitXor`) as real `ir::Op` variants, and implement `Instruction::Call`/`Branch`/
-   `Return`. Together these are what stand between the current compiler and actually running the
-   circuits in `circuits/merces/` - see "Real-world target circuits" above for exactly which two
-   gadgets (`IsZero`'s field inversion, `Num2Bits`'s bit extraction) and which function-call pattern
-   (`poseidon2_constants.circom`'s round-constant tables) block them today.
+   `Return`. This is now only needed for gadgets used *unwrapped* - every
+   `TACEO_PRECOMPUTATION_*`-wrapped use of `IsZero`/`Num2Bits`/`Poseidon2`/`AliasCheck` sidesteps
+   these gaps entirely (see "Precomputation" below), which is what got `circuits/merces/` past the
+   `poseidon2_constants.circom` function-call gap. What's left blocking them is `IsZero` used
+   *unwrapped* (`merkle_root_4.circom`'s `IsEqual`) - see "Real-world target circuits" below.

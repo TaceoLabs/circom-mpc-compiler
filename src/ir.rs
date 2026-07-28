@@ -41,6 +41,34 @@ impl SignalIdx {
     }
 }
 
+/// Identifies one entry in [`Graph::precompute_sites`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PrecomputeId(u32);
+
+impl PrecomputeId {
+    pub(crate) fn new(index: usize) -> Self {
+        Self(u32::try_from(index).expect("more precompute sites than fit into u32"))
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One `TACEO_PRECOMPUTATION_*`-wrapped component: the shape the runtime must supply a trace for.
+/// See `docs/ARCHITECTURE.md`, "Precomputation", for the exact result-slot -> signal contract
+/// (kept byte-compatible with the co-snarks VM's `ComponentAcceleratorOutput`).
+#[derive(Debug, Clone)]
+pub struct PrecomputeSite {
+    /// The wrapped (inner) template's name, e.g. `"Poseidon2"`, `"Num2Bits"`, `"IsZero"`.
+    pub name: String,
+    /// The wrapped template's concrete header (parameterized name), diagnostics only.
+    pub header: String,
+    pub num_inputs: usize,
+    pub num_outputs: usize,
+    pub num_intermediates: usize,
+}
+
 /// One operation of the value graph. Every variant produces exactly one value.
 ///
 /// Deliberately narrow: only the linear/multiplicative core (`Add`/`Sub`/`Mul`) is a runtime op.
@@ -57,15 +85,52 @@ pub enum Op<F: PrimeField> {
     Add,
     Sub,
     Mul,
+    /// Invokes an externally-supplied precomputation site (see [`PrecomputeSite`]), used for
+    /// `TACEO_PRECOMPUTATION_*`-wrapped components. Arity equals the referenced site's
+    /// `num_inputs` (checked by [`Graph::verify`], not [`Node::new`] - see [`Arity::SiteInputs`]).
+    /// This node's own value is never read directly, only through [`Op::PrecomputeResult`] nodes
+    /// that reference it.
+    Precompute(PrecomputeId),
+    /// Reads one result slot of the [`Op::Precompute`] node that is this node's sole input. Slot
+    /// `0..num_outputs` are the wrapped component's outputs; `num_outputs..` are its subtree's
+    /// intermediate signals, in flat circuit order. See `docs/ARCHITECTURE.md`, "Precomputation".
+    PrecomputeResult(u32),
+}
+
+/// How many inputs a node's op requires. Almost every op has a fixed arity known without any
+/// other context; [`Op::Precompute`] is the sole exception (see [`PrecomputeSite`]), which is why
+/// this is a small enum rather than a bare `usize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arity {
+    Fixed(usize),
+    /// Equal to the `num_inputs` of the [`PrecomputeSite`] the node's [`PrecomputeId`] refers to -
+    /// only [`Graph::verify`] can check this, since it alone has access to the site table.
+    SiteInputs,
 }
 
 impl<F: PrimeField> Op<F> {
     /// The number of operands this op reads from other values in the graph.
-    pub(crate) fn arity(&self) -> usize {
+    pub(crate) fn arity(&self) -> Arity {
         match self {
-            Op::Input(_) | Op::Constant(_) => 0,
-            Op::Add | Op::Sub | Op::Mul => 2,
+            Op::Input(_) | Op::Constant(_) => Arity::Fixed(0),
+            Op::Add | Op::Sub | Op::Mul => Arity::Fixed(2),
+            Op::Precompute(_) => Arity::SiteInputs,
+            Op::PrecomputeResult(_) => Arity::Fixed(1),
         }
+    }
+
+    /// Whether this op is free of side effects a rewrite pass must preserve exactly once each -
+    /// `false` for the precomputation ops, since merging or duplicating a site would change how
+    /// many traces the runtime has to supply (see `docs/ARCHITECTURE.md`, "Precomputation").
+    /// Everything else is pure arithmetic or a plain read, safe to deduplicate or reorder freely.
+    ///
+    /// Not consulted yet - no pass merges or reorders nodes across sites today - but it's the
+    /// signal a future CSE/GVN pass (`docs/ARCHITECTURE.md`, "Where this is headed") needs to
+    /// avoid merging two precomputation sites, so it's added alongside the ops it must protect
+    /// rather than bolted on later.
+    #[allow(dead_code)]
+    pub(crate) fn is_pure(&self) -> bool {
+        !matches!(self, Op::Precompute(_) | Op::PrecomputeResult(_))
     }
 }
 
@@ -79,13 +144,32 @@ pub struct Node<F: PrimeField> {
 
 impl<F: PrimeField> Node<F> {
     pub(crate) fn new(op: Op<F>, inputs: Vec<ValueId>) -> Self {
-        debug_assert_eq!(
-            inputs.len(),
-            op.arity(),
-            "node input count does not match op arity"
-        );
+        // Arity::SiteInputs can't be checked here - only Graph::verify has the site table to
+        // check it against.
+        if let Arity::Fixed(arity) = op.arity() {
+            debug_assert_eq!(
+                inputs.len(),
+                arity,
+                "node input count does not match op arity"
+            );
+        }
         Self { op, inputs }
     }
+}
+
+/// What a [`Graph::rewrite`] callback decides to do with one original node, in original graph
+/// order.
+pub(crate) enum RewriteAction<F: PrimeField> {
+    /// Emit the node unchanged (its `inputs`, as seen by the callback, are already remapped to
+    /// their new ids).
+    Keep,
+    /// This value is an alias for an already-emitted value; no node is pushed for it. `target`
+    /// must be a value already emitted earlier in this rewrite (i.e. a "new-space" [`ValueId`] -
+    /// the same space the callback's `inputs` and `already_emitted` are in).
+    ReplaceWith(ValueId),
+    /// Emit a different node in its place. `node.inputs` must reference only already-emitted
+    /// (new-space) values.
+    Emit(Node<F>),
 }
 
 /// A list of circuit inputs: (name, witness offset, size).
@@ -100,6 +184,10 @@ pub struct Graph<F: PrimeField> {
     /// input and output signal is also recorded here (not just main's declared outputs), because
     /// circom's witness vector addresses every signal in the circuit, not only main's I/O.
     outputs: Vec<(SignalIdx, ValueId)>,
+    /// Every `TACEO_PRECOMPUTATION_*`-wrapped component encountered while inlining, in the order
+    /// encountered - that order *is* the trace order the runtime must supply results in. See
+    /// `docs/ARCHITECTURE.md`, "Precomputation".
+    precompute_sites: Vec<PrecomputeSite>,
     pub signal_to_witness: Vec<usize>,
     pub input_list: InputList,
     pub public_inputs: Vec<String>,
@@ -113,6 +201,7 @@ impl<F: PrimeField> Graph<F> {
     pub(crate) fn from_parts(
         nodes: Vec<Node<F>>,
         outputs: Vec<(SignalIdx, ValueId)>,
+        precompute_sites: Vec<PrecomputeSite>,
         signal_to_witness: Vec<usize>,
         input_list: InputList,
         public_inputs: Vec<String>,
@@ -123,6 +212,7 @@ impl<F: PrimeField> Graph<F> {
         Self {
             nodes,
             outputs,
+            precompute_sites,
             signal_to_witness,
             input_list,
             public_inputs,
@@ -147,6 +237,12 @@ impl<F: PrimeField> Graph<F> {
         &self.nodes
     }
 
+    /// Every `TACEO_PRECOMPUTATION_*`-wrapped component in this graph, in inlining order - the
+    /// order the runtime must supply traces in. See `docs/ARCHITECTURE.md`, "Precomputation".
+    pub fn precompute_sites(&self) -> &[PrecomputeSite] {
+        &self.precompute_sites
+    }
+
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {
         &self.outputs
     }
@@ -161,6 +257,16 @@ impl<F: PrimeField> Graph<F> {
         let mut keep = vec![false; self.nodes.len()];
         for &(_, root) in &self.outputs {
             keep[root.index()] = true;
+        }
+        // Every precomputation site must survive gc even if none of its results end up read
+        // (they normally do, via the outputs pushed for each result slot - this is a defense in
+        // depth, not the only thing keeping them alive): the runtime supplies traces positionally,
+        // one per site in inlining order, so silently dropping a "dead" site would desynchronize
+        // every later site's trace. See docs/ARCHITECTURE.md, "Precomputation".
+        for (i, node) in self.nodes.iter().enumerate() {
+            if matches!(node.op, Op::Precompute(_)) {
+                keep[i] = true;
+            }
         }
         // single reverse sweep: since inputs only ever point strictly earlier, marking in
         // reverse order sees every use of a node before deciding whether to keep it.
@@ -207,13 +313,49 @@ impl<F: PrimeField> Graph<F> {
     /// Called once after the frontend builds the graph and, in debug builds, between every pass.
     pub(crate) fn verify(&self) -> eyre::Result<()> {
         for (i, node) in self.nodes.iter().enumerate() {
-            if node.inputs.len() != node.op.arity() {
-                eyre::bail!(
-                    "node {i} ({:?}) has {} inputs, expected {}",
-                    node.op,
-                    node.inputs.len(),
-                    node.op.arity()
-                );
+            match node.op.arity() {
+                Arity::Fixed(arity) => {
+                    if node.inputs.len() != arity {
+                        eyre::bail!(
+                            "node {i} ({:?}) has {} inputs, expected {arity}",
+                            node.op,
+                            node.inputs.len(),
+                        );
+                    }
+                }
+                Arity::SiteInputs => {
+                    let Op::Precompute(site_id) = &node.op else {
+                        unreachable!("only Op::Precompute has Arity::SiteInputs");
+                    };
+                    let site = self.precompute_sites.get(site_id.index()).ok_or_else(|| {
+                        eyre::eyre!(
+                            "node {i} references precompute site {} which does not exist",
+                            site_id.index()
+                        )
+                    })?;
+                    if node.inputs.len() != site.num_inputs {
+                        eyre::bail!(
+                            "node {i} (Precompute({})) has {} inputs, expected {} (site num_inputs)",
+                            site_id.index(),
+                            node.inputs.len(),
+                            site.num_inputs
+                        );
+                    }
+                }
+            }
+            if let Op::PrecomputeResult(slot) = &node.op {
+                let referenced = &self.nodes[node.inputs[0].index()];
+                let Op::Precompute(site_id) = &referenced.op else {
+                    eyre::bail!("node {i} (PrecomputeResult) does not reference a Precompute node");
+                };
+                let site = &self.precompute_sites[site_id.index()];
+                let total_results = site.num_outputs + site.num_intermediates;
+                if *slot as usize >= total_results {
+                    eyre::bail!(
+                        "node {i} (PrecomputeResult({slot})) references out-of-range slot \
+                         (site has {total_results} results)"
+                    );
+                }
             }
             for input in &node.inputs {
                 if input.index() >= i {
@@ -235,6 +377,67 @@ impl<F: PrimeField> Graph<F> {
             }
         }
         Ok(())
+    }
+
+    /// Rewrites the graph node-by-node, in original order, driving each pass's transformation
+    /// without it having to hand-roll `ValueId` remapping (easy to get wrong: `ValueId` doubles as
+    /// a node's position, so deleting or replacing any node shifts every later reference).
+    ///
+    /// `f` is called once per original node, in order, with: the node's original id, the node
+    /// itself with `inputs` already translated to their *new* ids, and every node already emitted
+    /// so far (also in new-id space, so `f` can inspect an input's producer - e.g. "is this input
+    /// a constant?" - by indexing `already_emitted` with an entry from `inputs`). It returns what
+    /// to emit; see [`RewriteAction`]. A `ReplaceWith`/`Emit` referencing anything other than an
+    /// already-emitted value is a bug in the pass, not in this function - topological order makes
+    /// that the only value space `f` ever has to work with.
+    ///
+    /// Returns whether the graph actually changed (a node was aliased or replaced, or the node
+    /// count changed because some input became dead) - passes use this as their `Pass::run`
+    /// return value.
+    pub(crate) fn rewrite(
+        &mut self,
+        mut f: impl FnMut(ValueId, &Node<F>, &[Node<F>]) -> RewriteAction<F>,
+    ) -> bool {
+        let old_len = self.nodes.len();
+        let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
+        let mut new_nodes = Vec::with_capacity(old_len);
+        let mut changed = false;
+
+        for (i, node) in std::mem::take(&mut self.nodes).into_iter().enumerate() {
+            let remapped_inputs = node
+                .inputs
+                .iter()
+                .map(|input| {
+                    remap[input.index()].expect("rewrite visited a node before its input")
+                })
+                .collect();
+            let remapped_node = Node {
+                op: node.op,
+                inputs: remapped_inputs,
+            };
+            match f(ValueId::new(i), &remapped_node, &new_nodes) {
+                RewriteAction::Keep => {
+                    remap[i] = Some(ValueId::new(new_nodes.len()));
+                    new_nodes.push(remapped_node);
+                }
+                RewriteAction::ReplaceWith(target) => {
+                    changed = true;
+                    remap[i] = Some(target);
+                }
+                RewriteAction::Emit(new_node) => {
+                    changed = true;
+                    remap[i] = Some(ValueId::new(new_nodes.len()));
+                    new_nodes.push(new_node);
+                }
+            }
+        }
+        changed |= new_nodes.len() != old_len;
+
+        for (_, value) in self.outputs.iter_mut() {
+            *value = remap[value.index()].expect("rewrite dropped a node an output depends on");
+        }
+        self.nodes = new_nodes;
+        changed
     }
 }
 
@@ -267,7 +470,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(2))];
-        Graph::from_parts(nodes, outputs, vec![0, 1], vec![], vec![], 1, 1, 2)
+        Graph::from_parts(nodes, outputs, vec![], vec![0, 1], vec![], vec![], 1, 1, 2)
     }
 
     #[test]
@@ -282,7 +485,8 @@ mod tests {
             Node::new(Op::Constant(Fr::from(1u64)), vec![]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph: Graph<Fr> = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], 0, 1, 1);
+        let graph: Graph<Fr> =
+            Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }
 
@@ -297,7 +501,8 @@ mod tests {
         let mut nodes = nodes;
         nodes.push(bad);
         let outputs = vec![(SignalIdx::new(0), ValueId::new(1))];
-        let graph: Graph<Fr> = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], 0, 1, 1);
+        let graph: Graph<Fr> =
+            Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }
 

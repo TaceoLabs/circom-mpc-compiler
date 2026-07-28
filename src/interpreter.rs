@@ -3,7 +3,29 @@
 
 use ark_ff::PrimeField;
 
-use crate::ir::{self, Op};
+use crate::ir::{self, Op, PrecomputeId, PrecomputeSite};
+
+/// Supplies results for `Op::Precompute` sites during interpretation - the plaintext-evaluator
+/// counterpart of the co-snarks VM's externally-supplied `ComponentAcceleratorOutput` traces (see
+/// `docs/ARCHITECTURE.md`, "Precomputation"). `call` must return exactly
+/// `site.num_outputs + site.num_intermediates` values, in slot order.
+pub trait PrecomputeProvider<F: PrimeField> {
+    fn call(&mut self, id: PrecomputeId, site: &PrecomputeSite, inputs: &[F]) -> eyre::Result<Vec<F>>;
+}
+
+/// The default provider: any graph with a precomputation site is a hard error, naming the first
+/// site encountered, rather than silently running with zeros.
+pub struct NoPrecomputation;
+
+impl<F: PrimeField> PrecomputeProvider<F> for NoPrecomputation {
+    fn call(&mut self, id: PrecomputeId, site: &PrecomputeSite, _inputs: &[F]) -> eyre::Result<Vec<F>> {
+        eyre::bail!(
+            "graph has precomputation site {} ({}) but no PrecomputeProvider was given",
+            id.index(),
+            site.name
+        )
+    }
+}
 
 pub struct Interpreter<F: PrimeField> {
     graph: ir::Graph<F>,
@@ -33,7 +55,20 @@ impl<F: PrimeField> Interpreter<F> {
             .collect()
     }
 
+    /// Runs with the default [`NoPrecomputation`] provider - errors if the graph has any
+    /// precomputation site. Most callers (the plain KAT tests) want this; use [`Self::run_with`]
+    /// for graphs that have `TACEO_PRECOMPUTATION_*` sites.
     pub fn run(&mut self) -> Vec<F> {
+        self.run_with(&mut NoPrecomputation)
+            .expect("graph has no precomputation sites")
+    }
+
+    pub fn run_with(&mut self, provider: &mut impl PrecomputeProvider<F>) -> eyre::Result<Vec<F>> {
+        // Cached per-site results, indexed by PrecomputeId, populated the first time any of a
+        // site's PrecomputeResult nodes is evaluated (a Precompute node's own "value" is never
+        // read directly - only via its result slots).
+        let mut site_results: Vec<Option<Vec<F>>> = vec![None; self.graph.precompute_sites().len()];
+
         for (id, node) in self.graph.nodes().iter().enumerate() {
             tracing::trace!("node {id} = {node:?}");
             let value = match &node.op {
@@ -51,12 +86,44 @@ impl<F: PrimeField> Interpreter<F> {
                     tracing::trace!("{lhs}*{rhs} = {}", lhs * rhs);
                     lhs * rhs
                 }
+                // The Precompute node's own value is never read (only PrecomputeResult nodes
+                // reference it, and they index site_results directly) - park a placeholder.
+                Op::Precompute(_) => F::zero(),
+                Op::PrecomputeResult(slot) => {
+                    let Op::Precompute(site_id) = &self.graph.nodes()[node.inputs[0].index()].op
+                    else {
+                        unreachable!("verify() guarantees PrecomputeResult's input is Precompute");
+                    };
+                    if site_results[site_id.index()].is_none() {
+                        let site = &self.graph.precompute_sites()[site_id.index()];
+                        // The Precompute node's own inputs are the site's actual inputs - look
+                        // them up via the Precompute node, not this PrecomputeResult node (whose
+                        // sole input is the Precompute node itself).
+                        let precompute_node = &self.graph.nodes()[node.inputs[0].index()];
+                        let inputs: Vec<F> = precompute_node
+                            .inputs
+                            .iter()
+                            .map(|v| self.values[v.index()])
+                            .collect();
+                        let results = provider.call(*site_id, site, &inputs)?;
+                        eyre::ensure!(
+                            results.len() == site.num_outputs + site.num_intermediates,
+                            "precompute site {} ({}) returned {} results, expected {}",
+                            site_id.index(),
+                            site.name,
+                            results.len(),
+                            site.num_outputs + site.num_intermediates
+                        );
+                        site_results[site_id.index()] = Some(results);
+                    }
+                    site_results[site_id.index()].as_ref().unwrap()[*slot as usize]
+                }
             };
             self.values[id] = value;
         }
         for &(signal, value) in self.graph.outputs() {
             self.signals[signal.index() + 1] = self.values[value.index()];
         }
-        self.output_mapping()
+        Ok(self.output_mapping())
     }
 }
