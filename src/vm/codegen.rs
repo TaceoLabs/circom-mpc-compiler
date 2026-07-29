@@ -262,7 +262,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     // into `graph.outputs()`, and `compute_last_use` pins outputs to `nodes.len()`. Done anyway,
     // because hand-built codegen test graphs don't bind site inputs to outputs, and any future
     // witness-compaction pass that stops binding intermediate signals would silently reintroduce a
-    // clobbered-input bug that no golden KAT would localize.
+    // clobbered-input bug that no proof would necessarily localize.
     for plan in &plans {
         for &(_, site_node) in &plan.sites {
             for input in &nodes[site_node].inputs {

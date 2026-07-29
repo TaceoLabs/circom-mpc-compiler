@@ -7,23 +7,23 @@
 //! `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and -
 //! the part that is easy to get wrong - **sibling subcomponent subtrees are ordered by the *callee
 //! template's own definition order in the source file*, not by the order their creating statements
-//! execute within the caller.** Four consequences, all of them observable in a golden witness:
+//! execute within the caller.** Four consequences, all confirmed against a passing proof:
 //!
 //! - `FullRound` emits its `ExternalMatMulT` subtree *before* its `Sbox` subtree, even though the
 //!   source instantiates `Sbox` first: `ExternalMatMulT` is defined earlier in the file.
 //! - `ExternalMatMulT`'s own `t >= 8` branch emits its 4 `Acc(t/4)` subtrees *before* its `t/4`
 //!   `ExternalMatMul4` subtrees, even though the source creates `mds[]` (the `ExternalMatMul4`s)
 //!   before `accs[]` (the `Acc`s): `template Acc(t)` is defined before `template ExternalMatMul4` in
-//!   `poseidon2.circom`. Verified directly against a real (`--O0`) circom witness for `t=16` - the
-//!   only width that reaches this branch (`t/4 >= 2`) among the widths this repo exercises.
+//!   `poseidon2.circom`. Verified directly against circom's own R1CS for `t=16` - the only width
+//!   that reaches this branch (`t/4 >= 2`) among the widths this repo exercises.
 //! - `Poseidon2` emits all 8 `FullRound` blocks contiguously and only then all `PartialRound` blocks
 //!   - so **layout order is not execution order**, since rounds 5..(4+pr) run between them.
 //! - Within one template, *same-definition* sibling instances keep their own creation order: the 8
 //!   full rounds are the first group's 4 followed by the second group's 4, and `accs[0..4]`/
 //!   `mds[0..4]` are each in their own loop's `l`/`i` order.
 //!
-//! Verified against `kats/precomputation_poseidon2_test/` (t=3, 2045 witness entries) by
-//! `tests/circom_ir.rs::precomputation_poseidon2_test`, which is the real oracle for all of this.
+//! Verified for t=3 (2045 witness entries) by `tests/proving.rs`'s
+//! `precomputation_poseidon2_test`, which is the real oracle for all of this.
 //!
 //! # Structure
 //!
@@ -763,7 +763,7 @@ mod tests {
                 "t={t}"
             );
         }
-        // The one width with a golden witness to anchor against.
+        // The one width verified against circom's own R1CS (see the module doc).
         assert_eq!(total_signals(3), 2038);
         assert_eq!(result_slots(3), 2035);
     }

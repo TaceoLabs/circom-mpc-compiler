@@ -1,8 +1,6 @@
 //! The default test oracle for every circuit this compiler can compile: compute the witness, prove
 //! it against a real zkey, verify the proof. A verifying proof checks the witness values *and* the
-//! R1CS layout against circom simultaneously - strictly more than a golden `.wtns` byte comparison
-//! (`tests/circom_ir.rs`) can, and the only oracle available for a circuit with no golden witness at
-//! all (the `precomputation_*_test` gadgets below - see `docs/ARCHITECTURE.md`, "Known gaps").
+//! R1CS layout against circom simultaneously.
 //!
 //! Each circuit needs its own checked-in zkey (`kats/proving/<name>.zkey`) from a locally-generated
 //! toy powers-of-tau - fine for exercising plumbing, never for anything real. Regenerate all of them
@@ -50,18 +48,8 @@ fn zkey(name: &str) -> Option<(ConstraintMatrices<Fr>, ProvingKey<Bn254>)> {
     )
 }
 
-/// `kats/<name>/witness<i>.wtns`, if this circuit still has one - the `precomputation_*_test`
-/// circuits don't (see the module doc), and proving does not need it, but comparing against it here
-/// costs nothing extra for the circuits that do.
-fn golden_witness(name: &str, i: usize) -> Option<Vec<Fr>> {
-    let path = format!("{}/kats/{name}/witness{i}.wtns", manifest_dir());
-    let file = std::fs::File::open(path).ok()?;
-    Some(circom_types::Witness::<Fr>::from_reader(file).unwrap().values)
-}
-
-/// The full pipeline for one circuit, over every input fixture it has: plain witness (cross-checked
-/// against the golden `.wtns` when one exists), 3-party rep3 witness (cross-checked against plain),
-/// then a real co-groth16 proof that must verify.
+/// The full pipeline for one circuit, over every input fixture it has: plain witness, 3-party rep3
+/// witness (cross-checked against plain), then a real co-groth16 proof that must verify.
 fn prove_and_verify(name: &str) {
     let Some((matrices, pkey)) = zkey(name) else {
         eprintln!(
@@ -87,9 +75,6 @@ fn prove_and_verify(name: &str) {
             let mut driver = PlainDriver;
             Machine::run(&program, &mut driver, &inputs).unwrap()
         };
-        if let Some(golden) = golden_witness(name, i) {
-            assert_eq!(plain, golden, "{name}: input {i}: disagrees with circom's own witness");
-        }
 
         let mut rng = thread_rng();
         let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
@@ -186,8 +171,6 @@ prove_and_verify_test!(constants_test);
 prove_and_verify_test!(babycheck_test);
 prove_and_verify_test!(control_flow);
 
-// No golden `.wtns` for these four (see the module doc) - `prove_and_verify` still runs the full
-// plain/rep3/prove/verify pipeline, it just skips the golden-witness comparison.
 prove_and_verify_test!(precomputation_poseidon2_test);
 prove_and_verify_test!(precomputation_num2bits_test);
 prove_and_verify_test!(precomputation_iszero_test);

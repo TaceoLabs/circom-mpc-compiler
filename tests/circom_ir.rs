@@ -1,4 +1,4 @@
-use ark_bn254::Bn254;
+use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::CoCircomCompiler;
@@ -7,21 +7,23 @@ use circom_mpc_compiler::OptLevel;
 
 mod common;
 
-use common::{circuit_path, from_test_name, libs_path, TestInputs};
+use common::{circuit_path, inputs_from_test_name, libs_path};
 
 /// Every opt level exercises `CoCircomCompiler::compile`'s unconditional MPC lowering and codegen
 /// (see `docs/ARCHITECTURE.md`, "MPC lowering", "Bytecode and the slot machine") - there is no
-/// plaintext-only path any more, so this matrix is what makes every KAT below also a correctness
-/// test for lowering and codegen, not just the frontend and the classical passes.
+/// plaintext-only path any more, so this matrix is what makes every test below also a correctness
+/// test for lowering and codegen, not just the frontend and the classical passes. The oracle is
+/// agreement across opt levels; `tests/proving.rs`'s prove+verify tests are the value oracle.
 const OPT_LEVELS: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
 
 macro_rules! witness_extension_test_plain {
     ($name: ident) => {
         #[test]
         fn $name() {
-            let inp: TestInputs = from_test_name(stringify!($name));
-            for opt_level in OPT_LEVELS {
-                for i in 0..inp.inputs.len() {
+            let inputs = inputs_from_test_name(stringify!($name));
+            for input in &inputs {
+                let mut prev: Option<Vec<Fr>> = None;
+                for opt_level in OPT_LEVELS {
                     let mut config = CompilerConfig::default();
                     config.link_library.push(libs_path());
                     config.opt_level = opt_level;
@@ -29,13 +31,16 @@ macro_rules! witness_extension_test_plain {
                         CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
                             .unwrap();
 
-                    assert_eq!(program.num_inputs, inp.inputs[i].len());
+                    assert_eq!(program.num_inputs, input.len());
 
-                    let inputs = program.classify_inputs(&inp.inputs[i], |v| v);
+                    let classified = program.classify_inputs(input, |v| v);
                     let mut driver = PlainDriver;
-                    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
+                    let witness = Machine::run(&program, &mut driver, &classified).unwrap();
 
-                    assert_eq!(witness, inp.witnesses[i].values, "opt_level {opt_level:?}, input {i}");
+                    if let Some(prev) = &prev {
+                        assert_eq!(&witness, prev, "opt_level {opt_level:?} disagrees with O0");
+                    }
+                    prev = Some(witness);
                 }
             }
         }
@@ -57,5 +62,5 @@ witness_extension_test_plain!(control_flow);
 // hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
 // calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The
 // inventory of what's missing lives in `docs/ARCHITECTURE.md`, "Known gaps", not in this file's
-// failure list. The precomputation gadgets have no golden-witness KAT here (see "Known gaps") -
-// `tests/proving.rs`'s prove+verify tests cover them instead.
+// failure list. The precomputation gadgets aren't wired up here - `tests/proving.rs`'s
+// prove+verify tests cover them instead.

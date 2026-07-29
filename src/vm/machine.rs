@@ -1,5 +1,5 @@
 //! Executes a `Program` against a `VmDriver`: the same bytecode runs against `PlainDriver` (the
-//! KAT oracle) or a real rep3 driver, the only difference being which `VmDriver` is passed in. See
+//! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed in. See
 //! `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
 
 use ark_ff::PrimeField;
@@ -12,7 +12,7 @@ use super::program::{Bank, Opcode, PrecomputeBatch, Program};
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
 /// `Program::classify_inputs` builds this array from a flat `&[F]` automatically for callers that
-/// don't want to track domains themselves (e.g. the plain KAT tests).
+/// don't want to track domains themselves (e.g. the plain-driver tests).
 #[derive(Debug, Clone)]
 pub enum InputValue<F, S> {
     Public(F),

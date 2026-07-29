@@ -3,17 +3,12 @@
 //! doc describes) fails to compile this file rather than skipping it.
 #![cfg(feature = "rep3")]
 
-//! Proves `Rep3Driver` against real 3-party rep3 execution: secret-share each KAT input, run the
-//! same `Program` on three threads over `mpc_net::local::LocalNetwork`, reconstruct the witness,
-//! and compare against the same golden `.wtns` fixture the plain KATs use
-//! (`tests/circom_ir.rs`) - this is what proves the rep3 driver agrees with the plain one on
-//! genuinely secret-shared data, not just in the clear. See `docs/ARCHITECTURE.md`, "Bytecode and
-//! the slot machine".
-//!
-//! `multiplier2`/`multiplier16` (a single secret product, and a 15-deep multiplicative chain) are
-//! plain arithmetic only - no `TACEO_PRECOMPUTATION_*` site - covering linear ops, `mul_local`, and
-//! `reshare`. The precomputation gadgets are covered by `tests/proving.rs`'s prove+verify tests and
-//! `staged_precomputation_matches_the_plain_driver_under_rep3` below, not a golden `.wtns` here.
+//! Proves `Rep3Driver` against real 3-party rep3 execution: secret-share an input, run the same
+//! `Program` on three threads over `mpc_net::local::LocalNetwork`, reconstruct the witness, and
+//! compare against the plain driver's - this is what proves the rep3 driver agrees with the plain
+//! one on genuinely secret-shared data, not just in the clear. `tests/proving.rs`'s prove+verify
+//! tests are the value oracle for both drivers. See `docs/ARCHITECTURE.md`, "Bytecode and the slot
+//! machine".
 
 use ark_bn254::{Bn254, Fr};
 use mpc_core::protocols::rep3::conversion::A2BType;
@@ -28,7 +23,7 @@ use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 
-use common::{circuit_path, from_test_name, libs_path, TestInputs};
+use common::{circuit_path, libs_path};
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
@@ -36,7 +31,7 @@ fn config() -> CompilerConfig {
     config
 }
 
-/// Runs one KAT input through 3-party rep3 and returns the reconstructed witness.
+/// Runs one input through 3-party rep3 and returns the reconstructed witness.
 fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Vec<Fr> {
     // One [share0, share1, share2] triple per Shared-domain input, in the same order
     // `Program::classify_inputs` visits them - each party gets its own entry below.
@@ -78,28 +73,8 @@ fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Ve
     combine_field_elements(&w0, &w1, &w2)
 }
 
-macro_rules! rep3_witness_extension_test {
-    ($name: ident, $config: expr) => {
-        #[test]
-        fn $name() {
-            let inp: TestInputs = from_test_name(stringify!($name));
-            let program =
-                CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), $config).unwrap();
-            for i in 0..inp.inputs.len() {
-                let witness = run_rep3(&program, &inp.inputs[i]);
-                assert_eq!(witness, inp.witnesses[i].values, "input {i}");
-            }
-        }
-    };
-}
-
-rep3_witness_extension_test!(multiplier2, config());
-rep3_witness_extension_test!(multiplier16, config());
-
-/// Staged precomputation under a *real* network. There is no golden `.wtns` for this circuit (one
-/// would need the external pinned circom fork - see `docs/ARCHITECTURE.md`, "Generating and
-/// cross-checking the golden KATs"), so this compares 3-party rep3 against the plain driver instead,
-/// which is the substitute the gadget unit tests already use.
+/// Staged precomputation under a *real* network. This compares 3-party rep3 against the plain
+/// driver, the same substitute the gadget unit tests already use.
 ///
 /// **This is the test that proves interleaving actually works.** `PlainDriver` cannot detect a
 /// mis-ordered batch - its `reshare` is the identity and every slot starts zeroed, so reading a

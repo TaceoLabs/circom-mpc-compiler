@@ -14,7 +14,7 @@
 #   A `circom` built from THIS CRATE'S PINNED FORK REVISION (`rev = "1cc17fb"` in Cargo.toml), not
 #   whatever is on PATH. Different forks disagree on constraint-simplification-driven witness
 #   compaction, so a circuit's variable count can differ for the same source and the same flags.
-#   See docs/ARCHITECTURE.md, "Generating and cross-checking the golden KATs". That revision also
+#   See docs/ARCHITECTURE.md, "Generating the zkeys and R1CS fixtures". That revision also
 #   self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so patch the VERSION const
 #   before building it:
 #

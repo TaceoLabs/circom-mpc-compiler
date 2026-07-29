@@ -25,9 +25,8 @@
 //! | `shouldBeZeros[i] * indexBits[..] === 0` | `merkle_root_4.circom:76` | `depth = 3 < MAX_DEPTH = 13`, and every index bit at position `2*depth..` is zero |
 //!
 //! Everything else is `<--`/`<==` assignment, satisfied by construction. The root-linking family is
-//! not checkable by anything in this crate - it was confirmed externally with `snarkjs wtns check`
-//! against a circom-generated witness (see `scripts/gen-merces-artifacts.sh`), which is also what a
-//! passing prove+verify test in `tests/merces.rs` confirms again.
+//! not checkable by anything in this crate - it is confirmed externally by a passing prove+verify
+//! test in `tests/merces.rs`, against circom's own R1CS (see `scripts/gen-merces-artifacts.sh`).
 
 use std::{collections::BTreeMap, path::Path};
 

@@ -1,8 +1,8 @@
 //! Proves the MPC lowering pipeline's headline claim - independent secret multiplications at the
 //! same multiplicative depth batch into a single network round - against three synthetic circuits
-//! with known round structure (`circuits/bench_{chain,tree,widesum}.circom`). No golden witness is
-//! needed here: `Graph::mpc_summary` reports round *shape*, which a witness comparison can't see.
-//! See `docs/ARCHITECTURE.md`, "MPC lowering".
+//! with known round structure (`circuits/bench_{chain,tree,widesum}.circom`). No witness value
+//! oracle is needed here: `Graph::mpc_summary` reports round *shape*, which a value comparison
+//! can't see. See `docs/ARCHITECTURE.md`, "MPC lowering".
 //!
 //! These are synthetic because the circuits that currently compile at all are small (only
 //! `Add`/`Sub`/`Mul` are supported - see `docs/ARCHITECTURE.md`, "Known gaps") - there is no large

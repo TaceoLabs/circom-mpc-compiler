@@ -1,4 +1,4 @@
-//! `PlainDriver`: single-party execution in the clear - the KAT oracle. `Share = Local = F`: there
+//! `PlainDriver`: single-party execution in the clear - the reference driver. `Share = Local = F`: there
 //! is nothing to mask or reshare with only one party, so `reshare` is the identity and `mul_local`
 //! is a plain product.
 

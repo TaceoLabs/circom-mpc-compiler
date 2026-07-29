@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Generates the reference artifacts tests/merces.rs needs to check this compiler's output against
+# Generates the reference artifact tests/merces.rs needs to check this compiler's output against
 # circom's:
 #
 #   artifacts/<main>/<main>.r1cs           the constraint system
-#   artifacts/<main>/witness/<scenario>.wtns   circom's own witness, one per inputs/<main>_<scenario>.json
 #
 # `artifacts/` is gitignored. tests/merces.rs degrades gracefully on whatever is present and skips
 # with a clear message when nothing is, so `cargo test` stays green on a fresh clone.
@@ -16,10 +15,10 @@
 #
 #   A `circom` built from THIS CRATE'S PINNED FORK REVISION (`rev = "1cc17fb"` in Cargo.toml), not
 #   whatever is on PATH. Different forks disagree on constraint-simplification-driven witness
-#   compaction, so a witness from the wrong binary has a different length for the same circuit and
-#   the same flags. See docs/ARCHITECTURE.md, "Generating and cross-checking the golden KATs". That
-#   revision also self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so patch the
-#   VERSION const before building it:
+#   compaction, so an R1CS from the wrong binary disagrees with this compiler's own witness layout
+#   for the same circuit and flags. See docs/ARCHITECTURE.md, "Generating the zkeys and R1CS
+#   fixtures". That revision also self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so
+#   patch the VERSION const before building it:
 #
 #     cd ~/.cargo/git/checkouts/circom-*/1cc17fb
 #     sed -i '' 's/^pub const VERSION.*/pub const VERSION: \&str = "2.2.2";/' circom/src/main.rs
@@ -49,30 +48,20 @@ fi
 
 echo "circom: $CIRCOM ($("$CIRCOM" --version 2>&1 | head -1))"
 echo "note: this MUST be the pinned fork rev 1cc17fb - a stock circom produces a different"
-echo "      witness length for the same circuit, and the KAT comparison will fail confusingly."
+echo "      witness length for the same circuit, and proving will fail confusingly."
 
 for main in "${MAINS[@]}"; do
     out="$ROOT/artifacts/$main"
-    mkdir -p "$out/witness"
+    mkdir -p "$out"
     echo
     echo "=== $main ==="
 
-    # R1CS + the witness calculator. --O2 is the only level this compiler supports.
+    # --O2 is the only level this compiler supports.
     "$CIRCOM" "$ROOT/circuits/merces/main/$main.circom" \
         -l "$ROOT/circuits/libs" -l "$ROOT/circuits/merces" \
-        --r1cs --wasm --O2 -o "$out"
+        --r1cs --O2 -o "$out"
     echo "r1cs            $(wc -c < "$out/$main.r1cs") bytes"
     snarkjs r1cs info "$out/$main.r1cs" | tee "$out/r1cs-info.txt" >/dev/null
-
-    # One golden witness per real-protocol scenario in inputs/, cross-checked against the R1CS.
-    for input_json in "$ROOT"/inputs/"${main}"_*.json; do
-        scenario="$(basename "$input_json" .json)"
-        scenario="${scenario#"${main}"_}"
-        node "$out/${main}_js/generate_witness.js" \
-            "$out/${main}_js/$main.wasm" "$input_json" "$out/witness/$scenario.wtns"
-        snarkjs wtns check "$out/$main.r1cs" "$out/witness/$scenario.wtns"
-        echo "witness/$scenario.wtns   $(wc -c < "$out/witness/$scenario.wtns") bytes - R1CS satisfied"
-    done
 done
 
 echo

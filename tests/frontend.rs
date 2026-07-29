@@ -1,6 +1,6 @@
-//! Frontend behaviours that a golden-witness KAT cannot express: the *typed* errors this compiler
+//! Frontend behaviours a prove+verify test cannot express: the *typed* errors this compiler
 //! produces for circom constructs it deliberately doesn't support, and the input metadata it derives
-//! alongside the graph. The positive value cases live in `tests/circom_ir.rs`.
+//! alongside the graph. The positive value cases live in `tests/proving.rs`.
 //!
 //! See `docs/ARCHITECTURE.md`, "Known gaps", for why each gap is a gap.
 

@@ -15,18 +15,18 @@ codebase, not a one-time writeup.
 
 ## Ground truth for correctness
 
-`tests/circom_ir.rs` (plain) and `tests/rep3_vm.rs` (real 3-party rep3) compare this compiler's output
-against circom's own golden witnesses (`kats/*/witness*.wtns`, generated independently of this repo).
-`tests/proving.rs` is the default oracle: compute the witness, prove it against a real zkey
-(`kats/proving/<name>.zkey`), verify the proof — this checks the witness values *and* the R1CS layout
-against circom simultaneously, and is the only oracle for a circuit with no golden `.wtns` at all. Any
-change to the IR, frontend, passes, or VM must keep every test in these files passing — they are the
-oracle, and they catch layout and scheduling mistakes that no unit test can.
+`tests/proving.rs` is the default oracle and the final verdict for every circuit this compiler can
+compile: compute the witness, prove it against a real zkey (`kats/proving/<name>.zkey`), verify the
+proof — this checks the witness values *and* the R1CS layout against circom simultaneously.
+`tests/circom_ir.rs` additionally checks that every opt level (`O0`/`O1`/`O2`) produces the identical
+witness, and `tests/rep3_vm.rs` checks the rep3 driver agrees with the plain driver under a real
+3-party network. Any change to the IR, frontend, passes, or VM must keep every test in these files
+passing — they are the oracle, and they catch layout and scheduling mistakes that no unit test can.
 
 `cargo test` is expected to be **fully green**. When adding support for a previously-unsupported
 circuit, prefer wiring up one more `prove_and_verify_test!(...)` line in `tests/proving.rs` (generate
-its zkey with `scripts/gen-proving-artifacts.sh`) over writing a new ad hoc test — the KAT fixture is
-very likely already sitting in `kats/`, since `circuits/` and `kats/` still hold fixtures for
+its zkey with `scripts/gen-proving-artifacts.sh`) over writing a new ad hoc test — the input fixture
+is very likely already sitting in `kats/`, since `circuits/` and `kats/` still hold fixtures for
 everything not yet supported. `docs/ARCHITECTURE.md`'s "Known gaps" is the worklist of what's
 missing, not the test suite's failure list.
 

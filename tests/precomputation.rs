@@ -139,8 +139,8 @@ fn signal_span_matches_independent_total() {
 fn extract_mode_runs_end_to_end_through_the_plain_driver() {
     // Every recognized gadget kind must actually be serviceable by `PlainDriver` - this asserts the
     // whole VM pipeline (codegen -> Machine::precompute -> the main instruction stream) runs to
-    // completion. This is a smoke test only (all-zero inputs, no golden witness yet - see
-    // tests/circom_ir.rs's plain KATs for a real golden-witness comparison).
+    // completion. This is a smoke test only (all-zero inputs) - see tests/proving.rs's prove+verify
+    // tests for a real value comparison.
     for w in WRAPPERS {
         let program = CoCircomCompiler::<Bn254>::compile(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));

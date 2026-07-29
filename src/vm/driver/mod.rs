@@ -1,5 +1,5 @@
 //! `VmDriver`: the pluggable backend `Machine::run` executes a `Program` against - either
-//! `plain::PlainDriver` (single-party, the KAT oracle) or a real rep3 driver (three-party, behind
+//! `plain::PlainDriver` (single-party, the reference driver) or a real rep3 driver (three-party, behind
 //! the `rep3` feature). See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
 
 pub mod plain;

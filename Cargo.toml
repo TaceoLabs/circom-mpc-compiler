@@ -37,8 +37,8 @@ round-counting = ["rep3"]
 
 [dev-dependencies]
 rand = "0.8.5"
-# The golden-KAT `.wtns` parser (plus `R1CS`/`groth16::Zkey`, used by the merces end-to-end test).
-# Aliased the same way co-snarks itself aliases it, so the type paths match its docs.
+# `groth16::Zkey`/`groth16::ArkZkey` (proving-key parsing, used by tests/proving.rs and the merces
+# end-to-end test). Aliased the same way co-snarks itself aliases it, so the type paths match its docs.
 circom-types = { package = "taceo-circom-types", version = "0.2" }
 # Converting this VM's native witness into co-snarks' `SharedWitness`, so a co-groth16 proof can be
 # produced from it. Dev-only: proving is exercised by tests and examples, not the library itself.

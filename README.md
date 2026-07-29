@@ -13,9 +13,9 @@ The runtime operator surface is deliberately narrow — only `Add`/`Sub`/`Mul` a
 other circom operator is a typed `unsupported operator: ...` error. `docs/ARCHITECTURE.md`'s "Known
 gaps" section is the up-to-date list of what that means for which circuits, including a set of
 real-world circuits vendored under `circuits/merces/` — the two server mains compile, run under real
-3-party rep3, and their witness matches circom's own byte for byte against real protocol inputs
-(`inputs/`), with a co-groth16 proof that verifies (see "Real-world target circuits" in the
-architecture doc). `cargo run --release --example merces` runs this end to end, including the proof.
+3-party rep3, and produce a co-groth16 proof against circom's own R1CS that verifies, against real
+protocol inputs (`inputs/`) (see "Real-world target circuits" in the architecture doc).
+`cargo run --release --example merces` runs this end to end, including the proof.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design: the IR's data model and
 invariants, why it's shaped the way it is, known gaps, and the planned path to a configurable pass
@@ -24,7 +24,7 @@ pipeline and a bytecode VM.
 ## Development
 
 ```
-cargo test                              # KAT + prove/verify correctness tests (checked against circom itself)
+cargo test                              # prove/verify correctness tests (checked against circom itself)
 cargo run --bin run -- <circuit.circom> # compile a circuit and dump its graph
 cargo run --release --example merces    # full pipeline on a real production circuit, proof included
 ```
