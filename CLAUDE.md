@@ -17,14 +17,18 @@ codebase, not a one-time writeup.
 
 `tests/circom_ir.rs` (plain) and `tests/rep3_vm.rs` (real 3-party rep3) compare this compiler's output
 against circom's own golden witnesses (`kats/*/witness*.wtns`, generated independently of this repo).
-Any change to the IR, frontend, passes, or VM must keep every test in those files passing — they are the
+`tests/proving.rs` is the default oracle: compute the witness, prove it against a real zkey
+(`kats/proving/<name>.zkey`), verify the proof — this checks the witness values *and* the R1CS layout
+against circom simultaneously, and is the only oracle for a circuit with no golden `.wtns` at all. Any
+change to the IR, frontend, passes, or VM must keep every test in these files passing — they are the
 oracle, and they catch layout and scheduling mistakes that no unit test can.
 
 `cargo test` is expected to be **fully green**. When adding support for a previously-unsupported
-circuit, prefer wiring up one more `witness_extension_test_plain!(...)` line in `tests/circom_ir.rs`
-over writing a new ad hoc test — the KAT fixture is very likely already sitting in `kats/`, since
-`circuits/` and `kats/` still hold fixtures for everything not yet supported. `docs/ARCHITECTURE.md`'s
-"Known gaps" is the worklist of what's missing, not the test suite's failure list.
+circuit, prefer wiring up one more `prove_and_verify_test!(...)` line in `tests/proving.rs` (generate
+its zkey with `scripts/gen-proving-artifacts.sh`) over writing a new ad hoc test — the KAT fixture is
+very likely already sitting in `kats/`, since `circuits/` and `kats/` still hold fixtures for
+everything not yet supported. `docs/ARCHITECTURE.md`'s "Known gaps" is the worklist of what's
+missing, not the test suite's failure list.
 
-Also check both feature configurations, since each drops real code paths:
-`cargo test --no-default-features` (plain-only, no `mpc-core`) and `cargo test --features proving`.
+Also check the plain-only feature configuration, which drops real code paths:
+`cargo test --no-default-features`.

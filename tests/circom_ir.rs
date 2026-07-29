@@ -23,44 +23,6 @@ macro_rules! witness_extension_test_plain {
             for opt_level in OPT_LEVELS {
                 for i in 0..inp.inputs.len() {
                     let mut config = CompilerConfig::default();
-                    config.simplification = circom_mpc_compiler::SimplificationLevel::O2(usize::MAX);
-                    config.link_library.push(libs_path());
-                    config.opt_level = opt_level;
-                    let program =
-                        CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
-                            .unwrap();
-
-                    assert_eq!(program.num_inputs, inp.inputs[i].len());
-
-                    let inputs = program.classify_inputs(&inp.inputs[i], |v| v);
-                    let mut driver = PlainDriver;
-                    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
-
-                    assert_eq!(witness, inp.witnesses[i].values, "opt_level {opt_level:?}, input {i}");
-                }
-            }
-        }
-    };
-}
-
-/// Same shape as `witness_extension_test_plain!`, but at `SimplificationLevel::O0` instead of
-/// `O2(usize::MAX)`. The `TACEO_PRECOMPUTATION_*` wrapper circuits below have a genuine subtree
-/// under the wrapped (inner) component - the wrapper's own I/O plus the inner component's own I/O
-/// both land in the witness (see `ir::PrecomputeKind`, `vm::gadgets`) - and *how much* of that
-/// subtree survives into the witness is simplification-level-sensitive (confirmed empirically:
-/// `circom --O0` on the exact same vendored circom revision this crate depends on produces a
-/// witness whose length matches this crate's own `Program::signal_to_witness.len()` exactly at
-/// `O0`; other levels do not). The golden `.wtns` fixtures below were generated the same way, so
-/// this must match. See `docs/ARCHITECTURE.md`, "Precomputation".
-macro_rules! witness_extension_test_precompute {
-    ($name: ident) => {
-        #[test]
-        fn $name() {
-            let inp: TestInputs = from_test_name(stringify!($name));
-            for opt_level in OPT_LEVELS {
-                for i in 0..inp.inputs.len() {
-                    let mut config = CompilerConfig::default();
-                    config.simplification = circom_mpc_compiler::SimplificationLevel::O0;
                     config.link_library.push(libs_path());
                     config.opt_level = opt_level;
                     let program =
@@ -95,8 +57,5 @@ witness_extension_test_plain!(control_flow);
 // hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
 // calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The
 // inventory of what's missing lives in `docs/ARCHITECTURE.md`, "Known gaps", not in this file's
-// failure list.
-witness_extension_test_precompute!(precomputation_poseidon2_test);
-witness_extension_test_precompute!(precomputation_num2bits_test);
-witness_extension_test_precompute!(precomputation_iszero_test);
-witness_extension_test_precompute!(precomputation_aliascheck_test);
+// failure list. The precomputation gadgets have no golden-witness KAT here (see "Known gaps") -
+// `tests/proving.rs`'s prove+verify tests cover them instead.

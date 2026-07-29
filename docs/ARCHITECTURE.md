@@ -158,6 +158,23 @@ the main node loop (i.e. never claimed by the `SubCmpOutput` arm). This is topol
 because every such subcomponent's inputs were necessarily already resolved earlier in the same loop
 (by the `SubCmpInput` arm) - nothing about *reading* its outputs was required to *write* its inputs.
 
+**Signal offsets accumulate additively across nesting depth - `inline_sub_graph_instance` adds the
+enclosing template's own absolute offset to the instance's stored one before recursing.** A
+`SubGraphInstance`'s `signal_offset` field is *father-relative*: it comes straight from circom's own
+`CreateCmpBucket::signal_offset`, which that struct's own doc comment in the pinned fork describes as
+"signal offset with respect to the start of the father's signals" - i.e. relative to whichever
+template's own body created the instance, not globally absolute. A regular (`Compiled`) template gets
+compiled once and its `TemplateGraph` reused, unmodified, at every instantiation site (parameterized
+only by the caller-supplied absolute offset) - which is exactly why the nested instances *inside* that
+reused body cannot have baked in a correct absolute offset at compile time: the same body is inlined
+at a different absolute base every time it's instantiated. `inline_template`'s own `signal_offset`
+parameter is that instantiation's absolute base, so `inline_sub_graph_instance(..., parent_offset,
+...)` adds `parent_offset` to each nested instance's own (still father-relative) `signal_offset` before
+placing its signals or recursing into it - one addition per nesting level, so it composes correctly to
+arbitrary depth. This is invisible at depth 2 (main instantiates a leaf directly: the father is main,
+whose absolute offset is 0, so father-relative and globally-absolute coincide), which is why the
+missing addition went unnoticed until a genuinely deep circuit exercised it - see "Known gaps".
+
 ## Pass infrastructure (`src/passes/`)
 
 A `Pass` trait (`fn run(&mut self, graph: &mut Graph<F>, ctx: &mut PassContext) -> Result<Changed>`)
@@ -167,9 +184,10 @@ bounded by `max_iterations`) then `lower` (the MPC pipeline, `passes/mpc/`, run 
 Re-verifies the graph after every pass in debug builds. `OptLevel` (`CompilerConfig::opt_level`)
 selects the *classical* pass list only - `O0` is dead code elimination, `O1` (default) adds constant
 folding, `O2` adds CSE/GVN, commutative-operand canonicalization, and affine normalization. This is
-deliberately a separate knob from `SimplificationLevel`, which configures upstream circom constraint
-simplification, not this crate's own IR passes, and independent of MPC lowering, which runs at every
-opt level.
+deliberately a separate knob from upstream circom's own constraint simplification, which always runs
+at full `--O2` (`no_rounds: usize::MAX` in `src/frontend/mod.rs`'s `BuildConfig` - see "Known gaps"
+for why no other level is supported) and has no bearing on this crate's own IR passes. Independent of
+MPC lowering, which runs at every opt level.
 
 The piece that makes a `Pass` cheap to write correctly is `Graph::rewrite` (`src/ir.rs`): it walks
 the old node list in original order, handing each pass's callback the node with its inputs already
@@ -433,10 +451,13 @@ it (`--no-default-features`) drops `mpc-core`/`mpc-net` (and the `swanky`/`fancy
 tree they pull in for OT-related gadgets this crate never uses) entirely, leaving a fast-building,
 plain-only compiler in which **all five precompute gadgets work** - every plain path is this crate's
 own field arithmetic, with no dependency on `mpc_core::gadgets` at all. `tests/rep3_vm.rs` and
-`tests/proving.rs` are `#![cfg(feature = ...)]`-gated so the plain-only configuration builds its
+`tests/proving.rs` are `#![cfg(feature = "rep3")]`-gated so the plain-only configuration builds its
 whole test suite too, not just the library.
 
-A third feature, non-default `proving`, adds `co-circom-types` for `vm::witness` - see "Proving" below.
+`co-circom-types` and `co-groth16` (the co-snarks proving stack `vm::witness` and the prove+verify
+tests build on - see "Proving" below) are dev-dependencies only, not a Cargo feature: the library
+itself never proves, only splits a witness at the public/secret boundary, so nothing about proving
+is gated behind a feature flag at all.
 
 ### Three banks: `Public`, `Shared`, `Local`
 
@@ -559,7 +580,13 @@ never `graph.outputs()` entries (see "Precomputation" for why: only a *nested* s
 input signal is) - directly from the caller-supplied `inputs`, and returns
 `signal_to_witness.iter().map(|&i| signals[i])`.
 
-### Proving (`vm/witness.rs`, feature `proving`)
+### Proving (`vm/witness.rs`)
+
+This is the default test oracle (`tests/proving.rs`), not a side path: compute the witness, prove it
+against a real zkey, verify the proof. A verifying proof checks the witness values *and* the R1CS
+layout against circom simultaneously - strictly more than a golden `.wtns` byte comparison
+(`tests/circom_ir.rs`) can, and the only oracle available for a circuit with no golden witness at all
+(the `precomputation_*_test` gadgets - see "Generating and cross-checking the golden KATs" below).
 
 `Rep3Driver`'s output is `Vec<Rep3PrimeFieldShare<F>>` - this crate's *native* witness format:
 **uniformly** shared, one entry per witness position in circom's order, position 0 the reserved constant
@@ -568,31 +595,49 @@ a secret-shared remainder, so the conversion is one batched open of the prefix a
 Opening is a real network operation, which is why `VmDriver` has an `open` method (identity for
 `PlainDriver`, `rep3::arithmetic::open_vec` for
 `Rep3Driver`). It is the only `VmDriver` method `Machine::run` never calls - witness extension has nothing
-to reveal.
+to reveal. `vm::witness::split_witness` does the split and the `public_inputs[0] == 1` sanity check;
+it is the library's entire proving surface - assembling co-snarks' own `SharedWitness` from its output
+is one caller-side struct literal, done in the tests and examples that actually prove rather than in
+the library (see "Cargo features" above).
 
 **The split index comes from the zkey, not from this compiler.**
 `ConstraintMatrices::num_instance_variables` is circom's own count for the circuit being proved.
 Re-deriving it from `Program::input_domains` would only be an approximation, because
 `passes::mpc::domain` falls back to `Shared` whenever it cannot prove a signal public - harmless for
 lowering (a missed optimization) but wrong as a split point, where being off by one silently proves a
-different statement. `split_witness` also asserts `public_inputs[0] == 1`, which catches a misalignment
-rather than letting it through.
+different statement.
 
 The recipe, end to end (`tests/proving.rs`):
 
 ```rust
 let zkey = circom_types::groth16::Zkey::<Bn254>::from_reader(file, CheckElement::No)?;
 let (matrices, pkey) = zkey.into();          // a standard snarkjs zkey - no convert-zkey-to-ark
-let shared = to_shared_witness(&mut driver, witness, matrices.num_instance_variables)?;
+let (public_inputs, witness) = split_witness(&mut driver, witness, matrices.num_instance_variables)?;
+let shared = co_circom_types::SharedWitness { public_inputs, witness };
 let proof = Rep3CoGroth16::prove::<_, CircomReduction>(&net0, &net1, &pkey, &matrices, shared)?;
-Groth16::verify(&pkey.vk, &proof, &shared_public[1..])?;
+Groth16::verify(&pkey.vk, &proof, &public_inputs[1..])?;
 ```
 
 `co-groth16`'s `verify` is behind *its* non-default `verifier` feature, which is easy to miss.
-`tests/proving.rs` keeps a checked-in 2.5 KB `multiplier2` zkey so this path is permanently covered with no
-external prerequisites - `tests/merces.rs`'s equivalent needs a zkey far too large to commit and therefore
-skips by default, which would otherwise leave the whole integration untested. That zkey comes from a toy
-locally-generated powers-of-tau: fine for exercising plumbing, never for anything real.
+`tests/proving.rs` wires up a `prove_and_verify_test!(...)` per circuit this compiler can compile,
+each against its own checked-in zkey (`kats/proving/<name>.zkey`, from a locally-generated toy
+powers-of-tau - fine for exercising plumbing, never for anything real; regenerate with
+`scripts/gen-proving-artifacts.sh`). A test whose zkey is missing skips with a printed note rather
+than failing, so `cargo test` stays green on a fresh clone before that script has run.
+
+`tests/merces.rs` exercises the same recipe with a real zkey - too large to commit, and in a different
+format: `inputs/zkey/<main>.arks.zkey` is `circom_types::groth16::ArkZkey<Bn254>`, ark-serialized
+*uncompressed* (`ArkZkey::deserialize_with_mode(bytes, Compress::No, Validate::No)`, matching how
+merces' own tooling produces it via `convert-zkey-to-ark --uncompressed`), not the snarkjs zkey format
+`Zkey::from_reader` reads above - `ArkZkey::into_inner()` yields the same
+`(ConstraintMatrices, ProvingKey)` pair either way, so everything below the read is identical.
+`Validate::No` is deliberate: validating hundreds of MB of group elements costs far more than the proof
+itself, and a genuinely bad zkey shows up immediately as a proof that fails to verify. The zkey is
+gitignored (13-178 MB), so the test skips with a message rather than failing when it's absent - but
+with it present, this is a real ceremony key over real protocol inputs, and the proof verifies.
+`examples/merces.rs` runs this same recipe against the ceremony zkey (or an explicit zkey path, e.g.
+`kats/proving/multiplier2.zkey` for a non-merces circuit), so the example demonstrates proving too,
+not just witness agreement.
 
 ### Serialization (`vm/serialize.rs`)
 
@@ -739,17 +784,27 @@ table. `precomputation_poseidon2_test` passes in both `tests/circom_ir.rs` and `
 
 **The layout rule, which is the load-bearing discovery.** circom lays out each component as
 `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and
-**subcomponent subtrees are ordered by circom's template *instance id* - global first-instantiation order -
-not by source or creation order within the template.** Three consequences, all visible in the golden
-witness, and no other rule tried (source order, first-use, alphabetical) fits all three:
+**sibling subcomponent subtrees are ordered by the *callee template's own definition order in the
+source file*, not by the order their creating statements execute within the caller.** ("Instance id"
+happened to track creation order for the first two cases below, which is why an earlier revision of
+this doc described the rule that way - the third case shows definition order is the real rule, and
+creation order is only a special case of it when the templates in question also happen to be defined
+in that order.) Four consequences, all visible in a golden witness, and no other rule tried (source
+order, first-use, alphabetical) fits all four:
 
 - `FullRound` emits its `ExternalMatMulT` subtree *before* its `Sbox` subtree, despite instantiating
-  `Sbox` first in source, because `ExternalMatMulT` was first instantiated earlier - by `Poseidon2`
-  itself, for `state[0]`.
+  `Sbox` first in source, because `ExternalMatMulT` is defined earlier in the file.
+- `ExternalMatMulT`'s `t >= 8` branch emits its 4 `Acc(t/4)` subtrees *before* its `t/4`
+  `ExternalMatMul4` subtrees, despite creating `mds[]` (the `ExternalMatMul4`s) before `accs[]` (the
+  `Acc`s) in source: `template Acc(t)` is defined before `template ExternalMatMul4` in
+  `poseidon2.circom`. This one was gotten backwards in an earlier revision of the gadget (see "Known
+  gaps" history) - it silently produced a wrong witness for every `t >= 8` site (`t=16` only, among
+  the widths this repo exercises) until the real merces circuits' golden-witness comparison caught it.
 - `Poseidon2` emits all 8 `FullRound` blocks contiguously and only then all `PartialRound` blocks, so
   **layout order is not execution order** (the partial rounds run *between* the two full-round groups).
-- Within one template, instances keep creation order: the 8 full rounds are the first group's 4 then the
-  second group's 4.
+- Within one template, *same-definition* sibling instances keep their own creation order: the 8 full
+  rounds are the first group's 4 then the second group's 4, and `accs[0..4]`/`mds[0..4]` are each in
+  their own loop's index order.
 
 Per-site result counts follow from the template structure, giving `expected_results()` its closed form:
 `t=2 → 1509`, `t=3 → 2035`, `t=4 → 2698`, `t=8 → 5137`, `t=12 → 7431`, `t=16 → 9725`. For `t=3` that is
@@ -780,13 +835,15 @@ The 22 constant tables in `vm/gadgets/poseidon2_constants.rs` are transcribed ve
 `poseidon2_constants.circom`, and a unit test re-extracts the hex from that circuit file at test time and
 asserts equality - so they cannot silently drift from the circuit they describe.
 
-**Unverified, and worth knowing:** only `t=3`'s *ordering* is witness-verified, since that is the only
-width with a golden KAT. The counts are order-independent and so trustworthy for every width, and
-plain-vs-rep3 agreement is checked for all six. But merces uses `t=4` and `t=16`, so **`t=16` sits on the
-critical path resting on an inferred ordering** - specifically, whether `ExternalMatMulT`'s `m ×
-ExternalMatMul4` blocks precede its `4 × Acc(m)` blocks (the instance-id rule says yes; nothing verifies
-it). Generating `precomputation_poseidon2_t{4,16}_test` fixtures with the pinned fork is the recommended
-next step before trusting a `transfer_arity4_batch8` proof.
+**Verified, for every width merces exercises.** `t=3`'s ordering is witness-verified via
+`precomputation_poseidon2_test`. `t=4` and `t=16` are witness-verified via `tests/merces.rs`: every
+scenario's `PlainDriver` witness matches circom's own (`--O2`, the pinned fork) byte for byte, for both
+server mains - and, since `transfer_arity4_batch1`'s co-groth16 proof also verifies, that is independent
+confirmation the R1CS is satisfied, not just that a witness comparison happened to line up. `t=8`/`t=12`
+remain order-*unverified*: their counts are order-independent and so trustworthy, and plain-vs-rep3
+agreement is checked for all six widths, but nothing exercises their ordering against a real circom
+witness. Generating `precomputation_poseidon2_t{8,12}_test` fixtures (or finding a real target circuit
+that uses them) would close that.
 
 ### IR shape (`src/ir.rs`)
 
@@ -847,15 +904,14 @@ by `template_header`, which is identical to the bucket-level `TemplateCodeInfo::
 `circuit.c_producer.total_number_of_signals` (an independent computation, from a different part of
 the circom crate) for all four vendored precomputation-wrapper circuits.
 
-### Generating and cross-checking the golden KATs
+### Generating and cross-checking the golden KATs and zkeys
 
-`kats/precomputation_{poseidon2,num2bits,iszero,aliascheck}_test/` were generated the same way as
-every other `kats/` fixture (real circom + a real witness calculator), but with one non-obvious
-requirement: **the circom binary used must be built from this crate's own pinned fork revision**
-(`circom-compiler`'s git dependency, `rev 1cc17fb`), not whatever `circom` happens to be on `PATH`.
-Confirmed the hard way: a locally-installed `circom 2.2.2` and this exact pinned revision (both
-built standalone, `cargo build --release --bin circom` in
-`~/.cargo/git/checkouts/circom-*/1cc17fb/`) produce **different witness lengths for the same circuit
+`kats/*/witness*.wtns` were generated the same way for every fixture (real circom + a real witness
+calculator), but with one non-obvious requirement: **the circom binary used must be built from this
+crate's own pinned fork revision** (`circom-compiler`'s git dependency, `rev 1cc17fb`), not whatever
+`circom` happens to be on `PATH`. Confirmed the hard way: a locally-installed `circom 2.2.2` and this
+exact pinned revision (both built standalone, `cargo build --release --bin circom` in
+`~/.cargo/git/checkouts/circom-*/1cc17fb/`) produce **different variable counts for the same circuit
 and the same `--O` flag** (`244` vs `2045` for `precomputation_poseidon2_test` at what should be
 equivalent settings) - the two forks' constraint-simplification-driven witness compaction disagrees,
 even though this crate's own `total_number_of_signals`/`compute_signal_spans` accounting (sourced
@@ -864,15 +920,18 @@ from the *pinned* fork's crates) does not. The pinned fork's CLI also self-repor
 `pragma circom 2.2.2;` circuits outright - patching that one const to `"2.2.2"` before rebuilding is
 enough to unblock it, since `CompilerConfig::version` already tells the Rust API the same thing
 (this doesn't ship anywhere; it's a one-line local patch to a vendored dependency purely to build a
-matching CLI for fixture generation).
+matching CLI for fixture generation). `scripts/gen-proving-artifacts.sh` (the zkeys in
+`kats/proving/`) and `scripts/gen-merces-artifacts.sh` (the `.wtns` fixtures and merces' own R1CS)
+both carry this same requirement in their own prerequisite comments.
 
-`SimplificationLevel::O0` is what these four fixtures were generated at (`circom --O0`), and what
-`witness_extension_test_precompute!`/the `precomputation_*_test` entries in `tests/rep3_vm.rs` use to
-match - confirmed empirically that `O0`'s witness length equals this compiler's own
-`Program::signal_to_witness.len()` (and `graph.num_signals - 1`) exactly, i.e. `O0` performs no
-witness compaction on this fork. This is *not* the same level the rest of `tests/circom_ir.rs` uses
-(`O2(usize::MAX)`, unaffected since those circuits have no precomputation sites whose layout is
-compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comment.
+`kats/precomputation_{poseidon2,num2bits,iszero,aliascheck}_test/` keep their `input*.json` but have
+no `witness*.wtns`: `tests/proving.rs`'s prove+verify tests are their oracle instead, per the
+project-wide default (see "Proving" above) - a verifying proof checks the witness against the R1CS
+itself, which subsumes a witness-length comparison and then some. (`prove_and_verify`'s own
+`program.signal_to_witness.len() == num_instance_variables + num_witness_variables` assertion does
+still confirm the lengths agree at full `--O2` for all four, for what it's worth - there was no
+compaction mismatch left to route around by the time this repo dropped every simplification level
+but `--O2`.)
 
 ## Known gaps
 
@@ -901,13 +960,24 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
   `Div`/`IntDiv`/`Pow`/`ShiftL`/`ShiftR`/`BitOr`/`BitAnd`/`BitXor` as real ops is the most-requested
   next step; see "Real-world target circuits" below for why the merces circuits themselves no longer
   block on it (precomputation recognition routes around it for every recognized gadget call).
-- **The two-level-subcomponent-nesting wrong-witness gap is currently masked, not fixed.**
-  `greaterthan`, `greatereqthan`, `lesseqthan`, `mux2_1`, `mux3_1`, `mux4_1` (nesting a subcomponent
-  inside another nested subcomponent, e.g. `GreaterThan -> LessThan -> Num2Bits`) fail on
-  `Num2Bits`'s `BITAND`, before reaching whatever else might be wrong two levels down. **This is very
-  likely the same underlying bug as the bulk-copy handling below** (both are about multi-signal data
-  crossing a subcomponent boundary) - re-test these six once shift/bitand return, rather than
-  assuming the nesting bug is closed just because `BITAND` blocks first.
+- ~~**The two-level-subcomponent-nesting wrong-witness gap is currently masked, not fixed.**~~
+  **Found and fixed** (`frontend/inline.rs::inline_sub_graph_instance`): a `SubGraphInstance`'s own
+  `signal_offset` is *father-relative* (circom's own doc comment on `CreateCmpBucket::signal_offset`:
+  "with respect to the start of the father's signals"), so placing a subcomponent's signals requires
+  adding the *enclosing* template's own absolute offset - which inlining never did. That's invisible
+  at depth 2 (main instantiates a leaf directly: the father is main, whose own absolute offset is 0,
+  so father-relative and globally-absolute coincide by construction) and silently wrong at depth 3+
+  (main instantiates a mid template that itself instantiates a leaf): the leaf's signals land at
+  whatever unrelated position the unadjusted low offset happens to name elsewhere in the flat witness.
+  `merces`'s server mains are 4+ templates deep (`TransferBatchedCompressedArity4 ->
+  TransferBatchedArity4 -> DepositWithdrawTransferArity4 -> MerkleRootArity4/Commit1/Commit2 -> ...`)
+  and were producing an almost-entirely-wrong witness before this fix (rep3-vs-plain still agreed,
+  since that only checks internal cross-consistency - it took a real circom golden witness to catch
+  it). `greaterthan`, `greatereqthan`, `lesseqthan`, `mux2_1`, `mux3_1`, `mux4_1` (nesting a
+  subcomponent inside another nested subcomponent, e.g. `GreaterThan -> LessThan -> Num2Bits`) are the
+  same shape and were very likely hitting the same bug, masked by `Num2Bits`'s `BITAND` blocking
+  first - **re-test these six once shift/bitand return**, since this fix was verified against merces
+  and the offset-probe circuits, not against these specific ones.
 - **`SizeOption::Multiple`** (a bulk array copy spanning more than one component instance) is a
   typed `Unsupported::Instruction` error, not silently mishandled - not needed by any circuit
   exercised so far. `handle_store_bucket`/`handle_load_bucket` do handle a single-instance bulk copy
@@ -948,25 +1018,28 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
 - `Instruction::Call`/`Return` (unconstrained functions) remain entirely unimplemented - a clean
   `Unsupported::Instruction` error naming the call and line, not a panic. This is why
   `poseidon_hasher1.circom` (calls a helper function) doesn't compile.
-- **`SimplificationLevel::O1` panics on this crate's pinned circom fork** (`rev 1cc17fb`):
-  `constraint_list::constraint_simplification` hits `attempt to subtract with overflow` on every
-  circuit tried at `O1` so far, including trivial ones (`bench_chain.circom`, and every
-  precomputation-gadget test circuit) - an upstream bug, not something fixable from this crate.
-  Every test in this repo therefore runs at `O0` or `O2(usize::MAX)`, never `O1` (circom's own
-  default), including `tests/mpc_lowering.rs` and the golden-KAT tests below.
-- **Only Poseidon2 `t=3`'s trace *ordering* is verified against a real circom witness**, because that is
-  the only width with a golden KAT. Result counts are order-independent and so trustworthy for all six
-  widths, and plain-vs-rep3 agreement is checked for all six - but merces uses `t=4` and `t=16`, so
-  `t=16` is on the critical path resting on an inferred ordering. See "Poseidon2 traces" for exactly
-  which inference, and generate `precomputation_poseidon2_t{4,16}_test` fixtures before trusting a
-  `transfer_arity4_batch8` proof.
-- **The merces end-to-end proof has not been run against a real zkey.** `tests/proving.rs` proves and
-  verifies for real on `multiplier2` with a checked-in 2.5 KB zkey, so the whole path
-  (`vm::witness` -> `Rep3CoGroth16::prove` -> `Groth16::verify`) is genuinely covered. But
-  `tests/merces.rs`'s proving test *skips* unless `artifacts/` has been generated, which needs the
-  pinned circom fork and a powers-of-tau file. Until someone runs it, whether the placeholder inputs in
-  `fixtures::merces_server_inputs` satisfy **every** R1CS constraint is reasoned, not observed - see
-  that module's doc for the four constraint families it accounts for.
+- ~~`SimplificationLevel::O1` panics on this crate's pinned circom fork~~ **Resolved by removing every
+  level but full `--O2`.** Upstream circom's own constraint simplification is no longer configurable
+  at all: `src/frontend/mod.rs`'s `BuildConfig` hardcodes `no_rounds: usize::MAX, flag_s: false,
+  flag_f: false`, circom's `--O2round` with an unbounded round count. `O1` was already unusable
+  (`constraint_list::constraint_simplification` hit `attempt to subtract with overflow` on every
+  circuit tried, including trivial ones) and `O0` existed only for four precomputation-gadget
+  circuits whose golden `.wtns` happened to need it (see "Generating and cross-checking the golden
+  KATs" above) - those fixtures are gone, replaced by `tests/proving.rs`'s prove+verify tests, which
+  turn out to pass at full `--O2` for all four with no compaction mismatch to route around.
+- ~~Only Poseidon2 `t=3`'s trace *ordering* is verified against a real circom witness~~ **`t=4` and
+  `t=16` are now also witness-verified**, via the real merces circuits rather than a synthetic KAT -
+  see "Poseidon2 traces". This is what caught the `Acc`-vs-`ExternalMatMul4` ordering bug in the same
+  section. `t=8`/`t=12` remain order-unverified (their counts and plain-vs-rep3 agreement are checked,
+  same as always, but nothing exercises their real circom ordering) - see "Where this is headed".
+- ~~The merces end-to-end proof has not been run against a real zkey.~~ **It has, with real protocol
+  inputs.** `inputs/` holds real merces protocol values (not placeholders) for both server mains, 4
+  scenarios each; `inputs/zkey/<main>.arks.zkey` holds the merces ceremony proving keys. Every
+  scenario's witness matches circom's own (`--O2`) byte for byte, and every scenario's co-groth16
+  proof verifies, for both mains - `transfer_arity4_batch1_all_scenarios_prove_and_verify` runs by
+  default (skipping cleanly if the gitignored zkey is absent), the `batch8` equivalent is `#[ignore]`d
+  for its cost. This closed both this gap and the Poseidon2 `t=4`/`t=16` ordering gap above at once,
+  since a verifying proof needs both the witness *and* the R1CS to agree with circom's.
 
 ## Real-world target circuits
 
@@ -975,10 +1048,11 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
 BabyJubJub-based private-transfer system) plus the six `@taceo/circom-lib` files and ten circomlib
 files they transitively need (`circuits/libs/taceo/`, `circuits/libs/`).
 
-**The two server mains compile and run, with no vendored circuit patched.** `transfer_arity4_batch1` and
-`transfer_arity4_batch8` go all the way through parse -> lowering -> codegen -> witness extension, under
-both `PlainDriver` and real 3-party rep3, with the two witnesses agreeing (`tests/merces.rs`). Shape, for
-scale:
+**The two server mains compile and run, with no vendored circuit patched, against real protocol
+inputs.** `transfer_arity4_batch1` and `transfer_arity4_batch8` go all the way through parse -> lowering
+-> codegen -> witness extension, under both `PlainDriver` and real 3-party rep3, with the two witnesses
+agreeing, matching circom's own witness (`--O2`, the pinned fork) byte for byte, and - with the ceremony
+zkey present - producing a co-groth16 proof that verifies (`tests/merces.rs`). Shape, for scale:
 
 | | rounds | reshare elements | widest round | sites | driver calls | instructions | witness |
 |---|---|---|---|---|---|---|---|
@@ -1000,10 +1074,24 @@ Features these circuits are load-bearing for:
 4. Unconditional precomputation recognition, for `merkle_root_4.circom`'s unwrapped `IsEqual` call
    (`Arity4CMux`, unrecognized, compiles as an ordinary template and gets round-batched instead).
 
-Inputs come from `fixtures::merces_server_inputs`: **placeholders**, but ones that satisfy the circuit's
-`===` constraints, which a proof needs even though witness extension does not. See that module's doc for
-the four constraint families. Golden-witness comparison and prove+verify are wired up and skip cleanly
-until `scripts/gen-merces-artifacts.sh` has been run - see "Known gaps" for what that leaves unobserved.
+### Real protocol inputs (`inputs/`)
+
+Inputs come from `inputs/<main>_<scenario>.json` - real merces protocol values, not placeholders: 4
+scenarios per server main (`deposit`/`withdraw`/`invalid_withdraw`/`transfer` for `batch1`;
+`full_batch`/`partial_batch`/`multi_withdraw`/`invalid_slot` for `batch8`), baked into the binary via
+`include_str!` in `src/fixtures.rs` (`MERCES_SCENARIOS`). Circom-style named JSON, decimal strings,
+nested arrays flattened row-major (circom's own multi-dimensional signal numbering) by
+`fixtures::from_input_json`. See that module's doc for the `===` constraint families these values
+satisfy - including the root-linking constraint (`server.circom:159`) that only a `transfer`/mixed-batch
+scenario with a genuine Merkle setup can satisfy, which no placeholder generator ever could.
+
+`scripts/gen-merces-artifacts.sh` compiles each main once (`--O2`, the pinned fork) and, for every
+scenario file, generates circom's own witness and cross-checks it against the R1CS
+(`snarkjs wtns check`) - the external oracle for that root-linking constraint, since nothing in this
+crate can check it. The proving key is separate again: `inputs/zkey/<main>.arks.zkey`, the merces
+ceremony proving key (ark-serialized, uncompressed, `circom_types::groth16::ArkZkey`) - too large to
+commit (13-178 MB) or regenerate here, so it's gitignored and the proving tests skip cleanly without
+it.
 
 ### `transfer_client_compressed` is still out of reach
 
@@ -1079,6 +1167,10 @@ plain `Vec`s — a direct index beats hashing, and a map isn't buying anything t
    gaps") - so there's nothing to convert or sink yet; `RoundKind::Open` and a future `Binary` domain
    are the extension points, deliberately not stubbed out ahead of a real producer. See "MPC
    lowering" above.
-3. Generate `precomputation_poseidon2_t{4,16}_test` golden KATs with the pinned circom fork, to close
-   the last unverified assumption in the Poseidon2 layout - see "Known gaps". `t=16` is on merces'
-   critical path.
+3. ~~Generate `precomputation_poseidon2_t{4,16}_test` golden KATs with the pinned circom fork, to
+   close the last unverified assumption in the Poseidon2 layout.~~ **Closed, by other means**: the real
+   merces circuits' golden-witness comparison and passing proof (`tests/merces.rs`) verify `t=4` and
+   `t=16` directly, on a larger and more representative circuit than a synthetic KAT would have been -
+   see "Known gaps" and "Poseidon2 traces". `t=8`/`t=12` remain unverified in the same sense; a
+   `precomputation_poseidon2_t{8,12}_test` KAT (or a real target circuit using those widths) would
+   close that.

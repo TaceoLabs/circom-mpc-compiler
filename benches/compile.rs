@@ -12,7 +12,7 @@ use ark_bn254::Bn254;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use circom_mpc_compiler::vm::codegen;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, OptLevel, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, OptLevel};
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -47,7 +47,6 @@ fn cases() -> Vec<Case> {
 
 fn config(case: &Case) -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config.simplification = SimplificationLevel::O2(usize::MAX);
     config
         .link_library
         .push(format!("{}/circuits/libs/", manifest_dir()).into());

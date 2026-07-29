@@ -27,7 +27,7 @@ use eyre::Result;
 use rustc_hash::FxHashMap;
 
 use crate::ir;
-use crate::{CompilerConfig, SimplificationLevel};
+use crate::CompilerConfig;
 
 use build::GraphCompiler;
 
@@ -115,15 +115,13 @@ fn build_circuit(
     config: &CompilerConfig,
 ) -> Result<(CircomCircuit, OutputMapping, FxHashMap<String, usize>)> {
     let build_config = BuildConfig {
-        no_rounds: if let SimplificationLevel::O2(r) = config.simplification {
-            r
-        } else {
-            0
-        },
+        // Full constraint simplification, unbounded round count - circom's `--O2`, no other level
+        // is supported (see `docs/ARCHITECTURE.md`, "Known gaps").
+        no_rounds: usize::MAX,
         flag_json_sub: false,
         json_substitutions: String::new(),
-        flag_s: config.simplification == SimplificationLevel::O1,
-        flag_f: config.simplification == SimplificationLevel::O0,
+        flag_s: false,
+        flag_f: false,
         flag_p: false,
         flag_verbose: config.verbose,
         flag_old_heuristics: false,

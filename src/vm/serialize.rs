@@ -351,7 +351,6 @@ mod tests {
     fn program(circuit: &str) -> super::Program<Fr> {
         let root = env!("CARGO_MANIFEST_DIR");
         let mut config = CompilerConfig::default();
-        config.simplification = crate::SimplificationLevel::O2(usize::MAX);
         config.link_library.push(format!("{root}/circuits/libs/").into());
         CoCircomCompiler::<Bn254>::compile(format!("{root}/circuits/{circuit}.circom"), config)
             .unwrap()

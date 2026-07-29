@@ -9,7 +9,7 @@
 //! real circuit yet to measure round batching against.
 
 use ark_bn254::Bn254;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -21,10 +21,6 @@ fn circuit_path(name: &str) -> String {
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    // O0: these circuits are tiny, purpose-built to have a known multiplicative-depth shape - no
-    // upstream constraint simplification needed, and circom's own simplifier is known to panic
-    // ("attempt to subtract with overflow") on at least one of them at O1.
-    config.simplification = SimplificationLevel::O0;
     config
         .link_library
         .push(format!("{}/circuits/libs/", manifest_dir()).into());

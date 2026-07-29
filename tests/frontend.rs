@@ -6,7 +6,7 @@
 
 use ark_bn254::Bn254;
 use circom_mpc_compiler::vm::program::Bank;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 
@@ -14,7 +14,6 @@ use common::{circuit_path, libs_path};
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config.simplification = SimplificationLevel::O2(usize::MAX);
     config.link_library.push(libs_path());
     config
 }

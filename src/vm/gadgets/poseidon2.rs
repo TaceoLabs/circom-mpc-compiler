@@ -5,17 +5,22 @@
 //!
 //! circom lays out each component as
 //! `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and -
-//! the part that is easy to get wrong - **subcomponent subtrees are ordered by circom's template
-//! *instance id* (global first-instantiation order), not by source or creation order within the
-//! template.** Three consequences, all of them observable in the golden witness:
+//! the part that is easy to get wrong - **sibling subcomponent subtrees are ordered by the *callee
+//! template's own definition order in the source file*, not by the order their creating statements
+//! execute within the caller.** Four consequences, all of them observable in a golden witness:
 //!
 //! - `FullRound` emits its `ExternalMatMulT` subtree *before* its `Sbox` subtree, even though the
-//!   source instantiates `Sbox` first, because `ExternalMatMulT` is first instantiated earlier (by
-//!   `Poseidon2` itself, for `state[0]`).
+//!   source instantiates `Sbox` first: `ExternalMatMulT` is defined earlier in the file.
+//! - `ExternalMatMulT`'s own `t >= 8` branch emits its 4 `Acc(t/4)` subtrees *before* its `t/4`
+//!   `ExternalMatMul4` subtrees, even though the source creates `mds[]` (the `ExternalMatMul4`s)
+//!   before `accs[]` (the `Acc`s): `template Acc(t)` is defined before `template ExternalMatMul4` in
+//!   `poseidon2.circom`. Verified directly against a real (`--O0`) circom witness for `t=16` - the
+//!   only width that reaches this branch (`t/4 >= 2`) among the widths this repo exercises.
 //! - `Poseidon2` emits all 8 `FullRound` blocks contiguously and only then all `PartialRound` blocks
 //!   - so **layout order is not execution order**, since rounds 5..(4+pr) run between them.
-//! - Within one template, instances keep their own creation order: the 8 full rounds are the first
-//!   group's 4 followed by the second group's 4.
+//! - Within one template, *same-definition* sibling instances keep their own creation order: the 8
+//!   full rounds are the first group's 4 followed by the second group's 4, and `accs[0..4]`/
+//!   `mds[0..4]` are each in their own loop's `l`/`i` order.
 //!
 //! Verified against `kats/precomputation_poseidon2_test/` (t=3, 2045 witness entries) by
 //! `tests/circom_ir.rs::precomputation_poseidon2_test`, which is the real oracle for all of this.
@@ -60,7 +65,8 @@ const fn external_matmul_signals(t: usize) -> usize {
         2..=4 => 2 * t + external_matmul_leaf_signals(t),
         _ => {
             let m = t / 4;
-            // m x ExternalMatMul4, then 4 x Acc(m) - in that order, per the instance-id rule.
+            // 4 x Acc(m), then m x ExternalMatMul4 - in that order, per the instance-id rule (a sum,
+            // so the two terms' order here doesn't matter; see `external_matmul` for where it does).
             2 * t + m * 18 + 4 * acc_signals(m)
         }
     }
@@ -264,7 +270,12 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
         external_matmul_leaf(ops, input)
     } else {
         let m = t / 4;
-        // m x ExternalMatMul4 first, then 4 x Acc(m) - the instance-id order.
+        // `mds[]` is created textually before `accs[]` in `ExternalMatMulT`'s source, but circom
+        // orders sibling subcomponents by *template definition order in the file*, not by
+        // creation-statement order within the enclosing body - `template Acc(t)` is defined before
+        // `template ExternalMatMul4` in `poseidon2.circom`, so every `accs[]` instance is numbered
+        // before every `mds[]` instance. Cross-checked against a real circom witness
+        // (`main.Poseidon2_..ExternalMatMulT_...accs[0].out` precedes `.mds[0].out[0]`).
         let mut mds_out = Vec::with_capacity(m);
         let mut mds_blocks = Vec::new();
         for i in 0..m {
@@ -286,8 +297,8 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
                 out.push(ops.add(value, &acc_out[j]));
             }
         }
-        mds_blocks.extend(acc_blocks);
-        (out, mds_blocks)
+        acc_blocks.extend(mds_blocks);
+        (out, acc_blocks)
     };
     let mut block = out.clone();
     block.extend_from_slice(input);

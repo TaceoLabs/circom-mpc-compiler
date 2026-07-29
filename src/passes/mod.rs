@@ -25,10 +25,10 @@ use crate::ir::Graph;
 pub type Changed = bool;
 
 /// Which *classical* passes [`PassManager::for_opt_level`] runs, in its fixpoint stage.
-/// Deliberately distinct from `SimplificationLevel` (`src/lib.rs`), which configures upstream
-/// circom constraint simplification, not this crate's own IR passes. Independent of MPC lowering
-/// (`passes::mpc`), which always runs regardless of opt level - see `docs/ARCHITECTURE.md`, "MPC
-/// lowering".
+/// Deliberately distinct from upstream circom's own constraint simplification (always run at full
+/// `--O2`, see `src/frontend/mod.rs`), which this crate's own IR passes have no bearing on.
+/// Independent of MPC lowering (`passes::mpc`), which always runs regardless of opt level - see
+/// `docs/ARCHITECTURE.md`, "MPC lowering".
 #[derive(
     Debug, Default, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord, Hash,
 )]

@@ -108,6 +108,7 @@ pub(crate) fn inline_template<F: PrimeField>(
                         outputs,
                         precompute_sites,
                         instance,
+                        signal_offset,
                         &sub_cmp_inputs[sub_cmp],
                     )
                 });
@@ -129,7 +130,7 @@ pub(crate) fn inline_template<F: PrimeField>(
         if let Some(instance) = instance {
             // Nothing in this template holds a SubCmpOutput reference to it (that's exactly why
             // it's still Some here) - its port_outputs map has no reader, so discard it.
-            inline_sub_graph_instance(nodes, outputs, precompute_sites, instance, &inputs);
+            inline_sub_graph_instance(nodes, outputs, precompute_sites, instance, signal_offset, &inputs);
         }
     }
 
@@ -139,11 +140,23 @@ pub(crate) fn inline_template<F: PrimeField>(
 /// Dispatches one subcomponent instance to whichever inlining strategy applies: recurse into a
 /// compiled body, or (for a recognized gadget) turn it into a precomputation site instead of
 /// compiling anything - see [`inline_precomputed`].
+///
+/// `parent_offset` is the *enclosing* template's own absolute signal offset (the `signal_offset`
+/// `inline_template` was itself called with). Circom's `CreateCmpBucket::signal_offset` - the value
+/// stored in `instance`'s own `signal_offset` field - is always relative to the immediate father's
+/// signal frame (`compiler::intermediate_representation::create_component_bucket`: "signal offset
+/// with respect to the start of the father's signals"), never globally absolute. That is harmless at
+/// depth 2 (main instantiates a leaf directly: the father *is* main, whose own absolute offset is 0,
+/// so father-relative and globally-absolute coincide) but wrong at depth 3+ (main instantiates a mid
+/// template that itself instantiates a leaf): the leaf's offset must accumulate the mid template's
+/// own placement, or the leaf's signals collide with whatever unrelated signal happens to occupy that
+/// low, unadjusted offset elsewhere in the flat witness - a silently wrong witness, not a panic.
 fn inline_sub_graph_instance<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
     instance: SubGraphInstance<F>,
+    parent_offset: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
     match instance {
@@ -155,7 +168,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
             outputs,
             precompute_sites,
             template,
-            signal_offset,
+            parent_offset + signal_offset,
             sub_cmp_inputs,
         ),
         SubGraphInstance::Precomputed {
@@ -171,7 +184,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
             precompute_sites,
             kind,
             header,
-            signal_offset,
+            parent_offset + signal_offset,
             num_inputs,
             num_outputs,
             num_intermediates,

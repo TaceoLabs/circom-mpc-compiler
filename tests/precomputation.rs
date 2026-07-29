@@ -7,7 +7,7 @@ use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::ir::PrecomputeKind;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::Machine;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -19,11 +19,6 @@ fn circuit_path(name: &str) -> String {
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    // No upstream simplification: signal_span_matches_independent_total cross-checks this
-    // crate's own span computation (frontend::compute_signal_spans) against circom's own
-    // `total_number_of_signals` - simplification could shrink either independently, so O0 keeps
-    // both counted over the same, unmodified signal set.
-    config.simplification = SimplificationLevel::O0;
     config
         .link_library
         .push(format!("{}/circuits/libs/", manifest_dir()).into());

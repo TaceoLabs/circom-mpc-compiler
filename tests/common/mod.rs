@@ -9,10 +9,7 @@
 // warn on the rest.
 #![allow(dead_code)]
 
-use std::{
-    fs::{self, File},
-    str::FromStr,
-};
+use std::{fs::File, str::FromStr};
 
 use circom_types::Witness;
 
@@ -42,19 +39,17 @@ pub fn read_field_element(s: &str) -> ark_bn254::Fr {
     }
 }
 
-pub fn from_test_name(fn_name: &str) -> TestInputs {
+/// Every `kats/<fn_name>/input<i>.json`, in order, with no golden witness requirement - the input
+/// half of `from_test_name`, usable by fixtures (like the prove+verify tests) that check the
+/// witness against a zkey-derived proof rather than a `.wtns` byte comparison.
+pub fn inputs_from_test_name(fn_name: &str) -> Vec<Vec<ark_bn254::Fr>> {
     let root = manifest_dir();
-    let mut witnesses: Vec<Witness<ark_bn254::Fr>> = Vec::new();
     let mut inputs: Vec<Vec<ark_bn254::Fr>> = Vec::new();
     let mut i = 0;
     loop {
-        if fs::metadata(format!("{root}/kats/{fn_name}/witness{i}.wtns")).is_err() {
+        let Ok(input_file) = File::open(format!("{root}/kats/{fn_name}/input{i}.json")) else {
             break;
-        }
-        let witness = File::open(format!("{root}/kats/{fn_name}/witness{i}.wtns")).unwrap();
-        let should_witness = Witness::<ark_bn254::Fr>::from_reader(witness).unwrap();
-        witnesses.push(should_witness);
-        let input_file = File::open(format!("{root}/kats/{fn_name}/input{i}.json")).unwrap();
+        };
         let json_str: serde_json::Value = serde_json::from_reader(input_file).unwrap();
         let input = json_str
             .get("in")
@@ -68,7 +63,19 @@ pub fn from_test_name(fn_name: &str) -> TestInputs {
         i += 1
     }
     if i == 0 {
-        panic!("no test for {fn_name}");
+        panic!("no input fixtures for {fn_name}");
     }
+    inputs
+}
+
+pub fn from_test_name(fn_name: &str) -> TestInputs {
+    let root = manifest_dir();
+    let inputs = inputs_from_test_name(fn_name);
+    let witnesses = (0..inputs.len())
+        .map(|i| {
+            let witness = File::open(format!("{root}/kats/{fn_name}/witness{i}.wtns")).unwrap();
+            Witness::<ark_bn254::Fr>::from_reader(witness).unwrap()
+        })
+        .collect();
     TestInputs { inputs, witnesses }
 }

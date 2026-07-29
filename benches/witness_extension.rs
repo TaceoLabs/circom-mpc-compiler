@@ -16,19 +16,16 @@
 use ark_bn254::{Bn254, Fr};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use circom_mpc_compiler::fixtures::{flatten, merces_server_inputs};
+use circom_mpc_compiler::fixtures;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
 use rand::thread_rng;
-
-const MAX_DEPTH: usize = 13;
-const SEED: u64 = 42;
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -39,9 +36,9 @@ struct Case {
     /// Benchmark label.
     name: &'static str,
     path: String,
-    /// `Some(n)` for a merces server main with batch size `n`; `None` for a simple circuit whose
-    /// inputs are just sequential values.
-    merces_batch: Option<usize>,
+    /// `Some(scenario)` for a merces server main, naming which real input set to use; `None` for a
+    /// simple circuit whose inputs are just sequential values.
+    merces_scenario: Option<&'static str>,
     /// Needs the merces link libraries.
     merces_config: bool,
 }
@@ -50,16 +47,16 @@ fn simple(name: &'static str) -> Case {
     Case {
         name,
         path: format!("{}/circuits/{name}.circom", manifest_dir()),
-        merces_batch: None,
+        merces_scenario: None,
         merces_config: false,
     }
 }
 
-fn merces(name: &'static str, n: usize) -> Case {
+fn merces(name: &'static str, scenario: &'static str) -> Case {
     Case {
         name,
         path: format!("{}/circuits/merces/main/{name}.circom", manifest_dir()),
-        merces_batch: Some(n),
+        merces_scenario: Some(scenario),
         merces_config: true,
     }
 }
@@ -71,14 +68,15 @@ fn cases() -> Vec<Case> {
         simple("bench_chain"),
         simple("bench_tree"),
         simple("bench_widesum"),
-        merces("transfer_arity4_batch1", 1),
-        merces("transfer_arity4_batch8", 8),
+        // `transfer`/`full_batch` are the scenarios with `isTransfer = 1` slots, the widest live
+        // value spread of the four scenarios each main has.
+        merces("transfer_arity4_batch1", "transfer"),
+        merces("transfer_arity4_batch8", "full_batch"),
     ]
 }
 
 fn config(case: &Case) -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config.simplification = SimplificationLevel::O2(usize::MAX);
     config
         .link_library
         .push(format!("{}/circuits/libs/", manifest_dir()).into());
@@ -97,11 +95,10 @@ fn prepare(case: &Case) -> (Program<Fr>, Vec<Fr>) {
     let graph = CoCircomCompiler::<Bn254>::parse(case.path.clone(), config(case))
         .unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let summary = graph.mpc_summary();
-    let values = match case.merces_batch {
-        Some(n) => {
-            let named = merces_server_inputs::<Fr>(n, MAX_DEPTH, SEED);
-            flatten(&named, &graph.input_list).unwrap_or_else(|e| panic!("{}: {e}", case.name))
-        }
+    let values = match case.merces_scenario {
+        Some(scenario) => fixtures::scenario(case.name, scenario)
+            .and_then(|s| s.values(&graph.input_list))
+            .unwrap_or_else(|e| panic!("{}: {e}", case.name)),
         // Arbitrary but non-zero, so nothing degenerates into a trivial product.
         None => (0..graph.num_inputs).map(|i| Fr::from(i as u64 + 1)).collect(),
     };

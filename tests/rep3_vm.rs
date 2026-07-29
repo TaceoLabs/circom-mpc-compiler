@@ -12,9 +12,8 @@
 //!
 //! `multiplier2`/`multiplier16` (a single secret product, and a 15-deep multiplicative chain) are
 //! plain arithmetic only - no `TACEO_PRECOMPUTATION_*` site - covering linear ops, `mul_local`, and
-//! `reshare`. The `precomputation_*_test` circuits below cover the precomputation gadgets instead,
-//! at `SimplificationLevel::O0` - see `tests/circom_ir.rs`'s `witness_extension_test_precompute!`
-//! for why that level specifically.
+//! `reshare`. The precomputation gadgets are covered by `tests/proving.rs`'s prove+verify tests and
+//! `staged_precomputation_matches_the_plain_driver_under_rep3` below, not a golden `.wtns` here.
 
 use ark_bn254::{Bn254, Fr};
 use mpc_core::protocols::rep3::conversion::A2BType;
@@ -25,7 +24,7 @@ use rand::thread_rng;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::Machine;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 
@@ -33,14 +32,6 @@ use common::{circuit_path, from_test_name, libs_path, TestInputs};
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config.simplification = SimplificationLevel::O2(usize::MAX);
-    config.link_library.push(libs_path());
-    config
-}
-
-fn config_precompute() -> CompilerConfig {
-    let mut config = CompilerConfig::default();
-    config.simplification = SimplificationLevel::O0;
     config.link_library.push(libs_path());
     config
 }
@@ -105,11 +96,6 @@ macro_rules! rep3_witness_extension_test {
 rep3_witness_extension_test!(multiplier2, config());
 rep3_witness_extension_test!(multiplier16, config());
 
-rep3_witness_extension_test!(precomputation_num2bits_test, config_precompute());
-rep3_witness_extension_test!(precomputation_iszero_test, config_precompute());
-rep3_witness_extension_test!(precomputation_aliascheck_test, config_precompute());
-rep3_witness_extension_test!(precomputation_poseidon2_test, config_precompute());
-
 /// Staged precomputation under a *real* network. There is no golden `.wtns` for this circuit (one
 /// would need the external pinned circom fork - see `docs/ARCHITECTURE.md`, "Generating and
 /// cross-checking the golden KATs"), so this compares 3-party rep3 against the plain driver instead,
@@ -125,7 +111,7 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
 
     let program = CoCircomCompiler::<Bn254>::compile(
         circuit_path("precomputation_staged_test"),
-        config_precompute(),
+        config(),
     )
     .unwrap();
     assert_eq!(

@@ -1,5 +1,7 @@
 //! Converting this VM's native witness into co-snarks' `SharedWitness`, so a `co-groth16` proof can
-//! be produced from it. Behind the `proving` feature.
+//! be produced from it, in the tests and examples that actually prove (`tests/proving.rs`,
+//! `tests/merces.rs`, `examples/merces.rs`) - this module has no dependency on co-snarks' proving
+//! crates.
 //!
 //! `Machine::run` returns `Vec<D::Share>` - **uniformly** shared, one entry per witness position in
 //! circom's own order, with position 0 the reserved constant `1`. co-snarks'
@@ -49,21 +51,6 @@ pub fn split_witness<F: PrimeField, D: VmDriver<F>>(
          is malformed or n_pub is misaligned"
     );
     Ok((public, secret))
-}
-
-/// The rep3 specialization, producing co-snarks' own type directly so a caller can hand it to
-/// `Rep3CoGroth16::prove` without touching field internals.
-#[cfg(feature = "proving")]
-pub fn to_shared_witness<F: PrimeField, N: mpc_net::Network>(
-    driver: &mut super::driver::rep3::Rep3Driver<'_, N>,
-    witness: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
-    n_pub: usize,
-) -> eyre::Result<co_circom_types::Rep3SharedWitness<F>> {
-    let (public_inputs, witness) = split_witness(driver, witness, n_pub)?;
-    Ok(co_circom_types::SharedWitness {
-        public_inputs,
-        witness,
-    })
 }
 
 #[cfg(test)]
