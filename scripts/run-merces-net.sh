@@ -4,7 +4,7 @@
 # produced outside this repo. Run this from wherever those configs' relative cert paths resolve.
 #
 # Usage:
-#   scripts/run-merces-net.sh [merces-net args, e.g. --runs 5 --opt 2 --check]
+#   scripts/run-merces-net.sh [merces-net args, e.g. --runs 5 --opt 2 --batches 1,8,16,32]
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
