@@ -7,6 +7,7 @@
 pub(crate) mod domain;
 pub(crate) mod level;
 mod mul_split;
+pub(crate) mod precompute_schedule;
 mod round_schedule;
 
 use ark_ff::PrimeField;

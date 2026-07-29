@@ -8,6 +8,8 @@
 //! lowering", for why a degree-2 extension (fusing multiple products behind one reshare slot) is
 //! rejected rather than built speculatively here.
 
+use std::collections::HashMap;
+
 use ark_ff::PrimeField;
 
 use crate::ir::ValueId;
@@ -15,56 +17,85 @@ use crate::ir::ValueId;
 #[derive(Debug, Clone)]
 pub(crate) struct Affine<F: PrimeField> {
     pub(crate) constant: F,
-    /// Sorted by `ValueId`, no zero coefficients.
-    pub(crate) terms: Vec<(F, ValueId)>,
+    /// Coefficients before applying `term_scale`, with no zero entries. Keeping the common scale
+    /// separate makes both scaling and a small-to-large merge constant-time in the size of the
+    /// larger map (including when subtraction chooses its right-hand map as the destination).
+    term_scale: F,
+    terms: HashMap<ValueId, F>,
 }
 
 impl<F: PrimeField> Affine<F> {
     pub(crate) fn constant(c: F) -> Self {
         Self {
             constant: c,
-            terms: Vec::new(),
+            term_scale: F::one(),
+            terms: HashMap::new(),
         }
     }
 
     pub(crate) fn atom(v: ValueId) -> Self {
         Self {
             constant: F::zero(),
-            terms: vec![(F::one(), v)],
+            term_scale: F::one(),
+            terms: HashMap::from([(v, F::one())]),
         }
     }
 
-    pub(crate) fn add(&self, other: &Self) -> Self {
+    pub(crate) fn add(self, other: Self) -> Self {
         self.combine(other, F::one())
     }
 
-    pub(crate) fn sub(&self, other: &Self) -> Self {
+    pub(crate) fn sub(self, other: Self) -> Self {
         self.combine(other, -F::one())
     }
 
-    fn combine(&self, other: &Self, sign: F) -> Self {
-        let mut terms = self.terms.clone();
-        for &(c, v) in &other.terms {
-            match terms.binary_search_by_key(&v, |&(_, tv)| tv) {
-                Ok(pos) => terms[pos].0 += c * sign,
-                Err(pos) => terms.insert(pos, (c * sign, v)),
+    fn combine(self, mut other: Self, sign: F) -> Self {
+        let constant = self.constant + other.constant * sign;
+        other.term_scale *= sign;
+
+        // Insert the smaller map into the larger one. `term_scale` lets the destination keep its
+        // representation unchanged: only coefficients crossing into it need conversion.
+        let (mut base, small) = if self.terms.len() >= other.terms.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let ratio = if small.term_scale == base.term_scale {
+            F::one()
+        } else if small.term_scale == -base.term_scale {
+            -F::one()
+        } else {
+            small.term_scale
+                * base
+                    .term_scale
+                    .inverse()
+                    .expect("an affine term scale is never zero")
+        };
+        for (atom, coefficient) in small.terms {
+            let scaled = coefficient * ratio;
+            match base.terms.entry(atom) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    *entry.get_mut() += scaled;
+                    if *entry.get() == F::zero() {
+                        entry.remove();
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(scaled);
+                }
             }
         }
-        terms.retain(|&(c, _)| c != F::zero());
-        Self {
-            constant: self.constant + other.constant * sign,
-            terms,
-        }
+        base.constant = constant;
+        base
     }
 
-    pub(crate) fn scale(&self, k: F) -> Self {
+    pub(crate) fn scale(mut self, k: F) -> Self {
         if k == F::zero() {
             return Self::constant(F::zero());
         }
-        Self {
-            constant: self.constant * k,
-            terms: self.terms.iter().map(|&(c, v)| (c * k, v)).collect(),
-        }
+        self.constant *= k;
+        self.term_scale *= k;
+        self
     }
 
     /// If this form is a bare constant (no terms), returns it.
@@ -78,11 +109,25 @@ impl<F: PrimeField> Affine<F> {
 
     /// If this form is exactly one bare atom (coefficient 1, no constant), returns it.
     pub(crate) fn as_atom(&self) -> Option<ValueId> {
-        if self.constant == F::zero() && self.terms.len() == 1 && self.terms[0].0 == F::one() {
-            Some(self.terms[0].1)
+        if self.constant == F::zero() && self.terms.len() == 1 {
+            let (&atom, &coefficient) = self.terms.iter().next().unwrap();
+            (coefficient * self.term_scale == F::one()).then_some(atom)
         } else {
             None
         }
+    }
+
+    /// Terms in deterministic `ValueId` order, with the lazy common scale applied. Sorting is
+    /// deliberately deferred until a form is actually materialized: most intermediate forms are
+    /// moved into a successor and never emitted on their own.
+    pub(crate) fn sorted_terms(&self) -> Vec<(F, ValueId)> {
+        let mut terms: Vec<_> = self
+            .terms
+            .iter()
+            .map(|(&atom, &coefficient)| (coefficient * self.term_scale, atom))
+            .collect();
+        terms.sort_unstable_by_key(|&(_, atom)| atom);
+        terms
     }
 }
 
@@ -99,8 +144,8 @@ mod tests {
         // (a+b) - a -> b
         let a = Affine::<Fr>::atom(ValueId::new(0));
         let b = Affine::<Fr>::atom(ValueId::new(1));
-        let sum = a.add(&b);
-        let result = sum.sub(&a);
+        let sum = a.clone().add(b);
+        let result = sum.sub(a);
         assert_eq!(result.as_atom(), Some(ValueId::new(1)));
     }
 
@@ -115,7 +160,24 @@ mod tests {
     fn combines_like_terms() {
         // a + a -> 2a
         let a = Affine::<Fr>::atom(ValueId::new(0));
-        let sum = a.add(&a);
-        assert_eq!(sum.terms, vec![(Fr::from(2u64), ValueId::new(0))]);
+        let sum = a.clone().add(a);
+        assert_eq!(sum.sorted_terms(), vec![(Fr::from(2u64), ValueId::new(0))]);
+    }
+
+    #[test]
+    fn subtraction_can_merge_into_the_larger_right_hand_map() {
+        let a = Affine::<Fr>::atom(ValueId::new(0));
+        let b = Affine::<Fr>::atom(ValueId::new(1));
+        let c = Affine::<Fr>::atom(ValueId::new(2));
+        let rhs = a.clone().add(b).add(c);
+
+        let result = a.sub(rhs);
+        assert_eq!(
+            result.sorted_terms(),
+            vec![
+                (-Fr::from(1u64), ValueId::new(1)),
+                (-Fr::from(1u64), ValueId::new(2)),
+            ]
+        );
     }
 }

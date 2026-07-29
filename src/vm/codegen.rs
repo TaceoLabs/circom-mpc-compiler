@@ -7,9 +7,9 @@
 
 use ark_ff::PrimeField;
 
-use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
-use crate::passes::mpc::domain::{signal_domain, Domain};
-use crate::passes::mpc::level;
+use crate::ir::{Graph, Op, ValueId};
+use crate::passes::mpc::domain::{compute_domains, signal_domain, Domain};
+use crate::passes::mpc::precompute_schedule::plan_precompute_batches;
 
 use super::program::{
     Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
@@ -55,35 +55,6 @@ impl BankAlloc {
 struct Slot {
     bank: Bank,
     index: u32,
-}
-
-/// Domain of every node, in the graph's own order - the same per-node classification `mul_split`
-/// computes while rewriting (see its module doc for why it can't be precomputed there), but
-/// codegen only *reads* the graph, so a single old-space pass suffices here.
-fn compute_domains<F: PrimeField>(graph: &Graph<F>) -> Vec<Domain> {
-    let nodes = graph.nodes();
-    let mut domain: Vec<Domain> = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        let d = match &node.op {
-            Op::Input(sig) => signal_domain(
-                graph.num_outputs,
-                &graph.input_list,
-                &graph.public_inputs,
-                *sig,
-            ),
-            Op::Constant(_) => Domain::Public,
-            Op::Add | Op::Sub | Op::Mul => {
-                domain[node.inputs[0].index()].join(domain[node.inputs[1].index()])
-            }
-            Op::MulLocal => Domain::Local,
-            // Never read directly (see their own docs) - the domain recorded here is never
-            // consulted by anything.
-            Op::Round(_) | Op::Precompute(_) => Domain::Public,
-            Op::RoundResult(_) | Op::PrecomputeResult(_) => Domain::Shared,
-        };
-        domain.push(d);
-    }
-    domain
 }
 
 /// Last node index (in graph order) that reads each value - a value with no reader at all keeps
@@ -142,118 +113,13 @@ fn select_opcode(op: &Op<impl PrimeField>, da: Domain, db: Domain) -> eyre::Resu
     })
 }
 
-/// One planned [`PrecomputeBatch`]: which sites it services, and where in the instruction stream its
-/// [`Opcode::Precompute`] goes.
-struct BatchPlan {
-    kind: PrecomputeKind,
-    /// `(PrecomputeId, that site's `Op::Precompute` node index)`, in site order - which is also the
-    /// order the batch's flat input/result slot lists are laid out in.
-    sites: Vec<(usize, usize)>,
-    /// The last node index defining any of this batch's sites. Every input of every site in the
-    /// batch precedes its own `Op::Precompute` node, so all of them are resolved by here.
-    anchor: usize,
-}
-
-/// Groups a circuit's precomputation sites into batches keyed by `(kind, stage)` and decides where
-/// each batch is serviced.
-///
-/// Placement is **anchor/deadline**, not "flush once the level advances past the stage". The latter
-/// would assume graph order is level-sorted; `round_schedule` does produce such an order, but it
-/// early-returns without reordering anything when the circuit has no secret multiplications at all -
-/// which is exactly the `Num2Bits` -> `AliasCheck` -> `IsZero` shape in
-/// `circuits/merces/merces/server.circom` (three stages, zero rounds). An anchor is correct on any
-/// topological order.
-///
-/// Levels only *propose* the grouping; the `anchor < deadline` check disposes of a bad one with a
-/// real error. Same posture as the `Local`-escape assertion elsewhere in this module: analysis
-/// proposes, check disposes.
-fn plan_precompute_batches<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Vec<BatchPlan>> {
-    let nodes = graph.nodes();
-    let sites = graph.precompute_sites();
-    if sites.is_empty() {
-        return Ok(Vec::new());
-    }
-    let levels = level::network_levels(graph);
-
-    // Graph::verify guarantees exactly one Op::Precompute node per site.
-    let mut site_node = vec![usize::MAX; sites.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        if let Op::Precompute(site_id) = &node.op {
-            site_node[site_id.index()] = i;
-        }
-    }
-
-    // The earliest node that *reads* any of a site's results. `Op::PrecomputeResult` nodes are the
-    // results themselves, not readers, so this looks one edge further out.
-    let mut first_reader = vec![nodes.len(); sites.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        for input in &node.inputs {
-            if !matches!(nodes[input.index()].op, Op::PrecomputeResult(_)) {
-                continue;
-            }
-            let producer = &nodes[nodes[input.index()].inputs[0].index()];
-            if let Op::Precompute(site_id) = &producer.op {
-                let slot = &mut first_reader[site_id.index()];
-                *slot = (*slot).min(i);
-            }
-        }
-    }
-
-    let mut plans: Vec<BatchPlan> = Vec::new();
-    let mut stages: Vec<usize> = Vec::new();
-    for (site_id, site) in sites.iter().enumerate() {
-        let stage = levels[site_node[site_id]];
-        match plans
-            .iter_mut()
-            .zip(&stages)
-            .find(|(plan, s)| plan.kind == site.kind && **s == stage)
-        {
-            Some((plan, _)) => {
-                plan.sites.push((site_id, site_node[site_id]));
-                plan.anchor = plan.anchor.max(site_node[site_id]);
-            }
-            None => {
-                plans.push(BatchPlan {
-                    kind: site.kind,
-                    sites: vec![(site_id, site_node[site_id])],
-                    anchor: site_node[site_id],
-                });
-                stages.push(stage);
-            }
-        }
-    }
-
-    // Deterministic order: by stage, then by the batch's first site.
-    let mut ordered: Vec<(usize, BatchPlan)> = stages.into_iter().zip(plans).collect();
-    ordered.sort_by_key(|(stage, plan)| (*stage, plan.sites[0].0));
-
-    for (stage, plan) in &ordered {
-        let deadline = plan
-            .sites
-            .iter()
-            .map(|&(site_id, _)| first_reader[site_id])
-            .min()
-            .expect("a batch always has at least one site");
-        eyre::ensure!(
-            plan.anchor < deadline,
-            "codegen: precomputation batch ({:?}, stage {stage}) cannot be serviced as a single \
-             driver call - one of its sites' inputs is only defined after another's results are \
-             already read. Two sites in one batch must be mutually independent (see \
-             passes::mpc::level).",
-            plan.kind,
-        );
-    }
-
-    Ok(ordered.into_iter().map(|(_, plan)| plan).collect())
-}
-
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `CoCircomCompiler::compile`) into a `Program`.
 pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     let nodes = graph.nodes();
     let domain = compute_domains(graph);
     let mut last_use = compute_last_use(graph);
-    let plans = plan_precompute_batches(graph)?;
+    let plans = plan_precompute_batches(graph, &domain);
 
     // A site's inputs must still hold their values when its *batch* runs, which is later than the
     // `Op::Precompute` node that reads them - so extend their lifetimes to the batch's anchor.
@@ -277,9 +143,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     }
 
     // --- Phase A: reserved (non-recycled) regions ---
-    // Public bank: constants, in encounter order, then every Public-domain kept Op::Input.
-    // Shared bank: every precompute site's result span (site order), then every Shared-domain
-    // kept Op::Input. See docs/ARCHITECTURE.md, "Bytecode and the slot machine".
+    // Public bank: constants, public precompute results, then Public-domain kept Op::Input.
+    // Shared bank: shared precompute results, then Shared-domain kept Op::Input.
     let mut slot: Vec<Option<Slot>> = vec![None; nodes.len()];
     let mut constants: Vec<F> = Vec::new();
     let mut p_next: u32 = 0;
@@ -296,12 +161,36 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         }
     }
 
-    let mut site_result_base: Vec<u32> = Vec::with_capacity(graph.precompute_sites().len());
-    for site in graph.precompute_sites() {
-        site_result_base.push(s_next);
+    let mut site_domains = vec![Domain::Public; graph.precompute_sites().len()];
+    for (i, node) in nodes.iter().enumerate() {
+        if let Op::Precompute(site_id) = &node.op {
+            site_domains[site_id.index()] = domain[i];
+        }
+    }
+    let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.precompute_sites().len());
+    for (site, site_domain) in graph.precompute_sites().iter().zip(site_domains) {
         let results = u32::try_from(site.num_outputs + site.num_intermediates)
             .expect("precompute site has more results than fit into u32");
-        s_next += results;
+        match site_domain {
+            Domain::Public => {
+                site_result_base.push(Slot {
+                    bank: Bank::Public,
+                    index: p_next,
+                });
+                p_next += results;
+            }
+            Domain::Shared => {
+                site_result_base.push(Slot {
+                    bank: Bank::Shared,
+                    index: s_next,
+                });
+                s_next += results;
+            }
+            Domain::Local => eyre::bail!(
+                "codegen: a precomputation site reads a Local (un-reshared MulLocal) value - \
+                 it must be reshared first; this is a lowering invariant violation"
+            ),
+        }
     }
 
     let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs);
@@ -394,8 +283,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     bank: dst_bank,
                     index: dst,
                 });
-                free_if_dead(node.inputs[0], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
-                free_if_dead(node.inputs[1], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[0], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[1], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
             }
             Op::MulLocal => {
                 let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
@@ -421,8 +310,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     bank: Bank::Local,
                     index: dst,
                 });
-                free_if_dead(node.inputs[0], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
-                free_if_dead(node.inputs[1], i, &last_use, &slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[0], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(node.inputs[1], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
             }
             Op::Round(round_id) => {
                 let operand_start = u32::try_from(round_operands.len()).expect("too many round operands");
@@ -482,7 +371,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                         ValueId::new(result_idx),
                         result_idx,
                         &last_use,
-                        &slot,
+                        &mut slot,
                         &mut p_alloc,
                         &mut s_alloc,
                         p_reserved_end,
@@ -527,10 +416,10 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 let Op::Precompute(site_id) = &nodes[node.inputs[0].index()].op else {
                     unreachable!("Graph::verify guarantees PrecomputeResult's input is Precompute");
                 };
-                let dst = site_result_base[site_id.index()] + result_slot;
+                let base = site_result_base[site_id.index()];
                 slot[i] = Some(Slot {
-                    bank: Bank::Shared,
-                    index: dst,
+                    bank: base.bank,
+                    index: base.index + result_slot,
                 });
             }
         }
@@ -551,7 +440,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                         input,
                         i,
                         &last_use,
-                        &slot,
+                        &mut slot,
                         &mut p_alloc,
                         &mut s_alloc,
                         p_reserved_end,
@@ -573,13 +462,25 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 let site = &graph.precompute_sites()[site_id];
                 input_slots.extend_from_slice(&site_inputs[site_id]);
                 let results = site.num_outputs + site.num_intermediates;
-                result_slots.extend(
-                    (0..results).map(|k| site_result_base[site_id] + u32::try_from(k).unwrap()),
+                let base = site_result_base[site_id];
+                debug_assert_eq!(
+                    base.bank,
+                    match plan.domain {
+                        Domain::Public => Bank::Public,
+                        Domain::Shared => Bank::Shared,
+                        Domain::Local => unreachable!(),
+                    }
                 );
+                result_slots.extend((0..results).map(|k| base.index + u32::try_from(k).unwrap()));
             }
             PrecomputeBatch {
                 kind: plan.kind,
                 sites: plan.sites.len(),
+                result_bank: match plan.domain {
+                    Domain::Public => Bank::Public,
+                    Domain::Shared => Bank::Shared,
+                    Domain::Local => unreachable!(),
+                },
                 input_slots,
                 result_slots,
             }
@@ -631,7 +532,7 @@ fn free_if_dead(
     value: ValueId,
     current: usize,
     last_use: &[usize],
-    slot: &[Option<Slot>],
+    slot: &mut [Option<Slot>],
     p_alloc: &mut BankAlloc,
     s_alloc: &mut BankAlloc,
     p_reserved_end: u32,
@@ -640,7 +541,9 @@ fn free_if_dead(
     if last_use[value.index()] != current {
         return;
     }
-    let Some(s) = slot[value.index()] else {
+    // Taking the mapping makes release idempotent when one consumer mentions the same SSA value
+    // more than once (`x*x`, or the same value in several positions of one gadget batch).
+    let Some(s) = slot[value.index()].take() else {
         return;
     };
     match s.bank {
@@ -655,7 +558,7 @@ mod tests {
     use ark_bn254::Fr;
 
     use super::*;
-    use crate::ir::{Node, PrecomputeId, PrecomputeSite, SignalIdx};
+    use crate::ir::{Node, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx};
 
     #[test]
     fn slot_reuse_keeps_peak_width_below_node_count() {
@@ -787,6 +690,32 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Codegen remains safe for a valid topological graph that was not level-sorted: an early
+    /// result consumer closes the active batch instead of making a later independent site move the
+    /// batch anchor past that consumer.
+    #[test]
+    fn early_consumer_defensively_splits_an_unsorted_batch() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 2: A
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: reads A
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(1)]), // 5: B
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(6)]), // 7
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(7))],
+            vec![iszero_site(), iszero_site()],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program.precompute_batches.iter().all(|batch| batch.sites == 1));
     }
 
     /// Dependent sites can't share a driver call, and each batch's instruction must precede anything

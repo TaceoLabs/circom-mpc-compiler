@@ -25,6 +25,5 @@ pipeline and a bytecode VM.
 
 ```
 cargo test                              # prove/verify correctness tests (checked against circom itself)
-cargo run --bin run -- <circuit.circom> # compile a circuit and dump its graph
 cargo run --release --example merces    # full pipeline on a real production circuit, proof included
 ```

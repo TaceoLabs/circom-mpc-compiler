@@ -58,6 +58,55 @@ witness_extension_test_plain!(babycheck_test);
 // Exercises constant-condition `if`/`else` (`frontend/build.rs::handle_branch_bucket`).
 witness_extension_test_plain!(control_flow);
 
+#[test]
+fn repeated_dynamic_operands_are_safe_at_o2() {
+    let values = inputs_from_test_name("repeated_operands_o2").remove(0);
+    let mut config = CompilerConfig::default();
+    config.link_library.push(libs_path());
+    config.opt_level = OptLevel::O2;
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("repeated_operands_o2"), config)
+        .unwrap();
+    let inputs = program.classify_inputs(&values, |v| v);
+    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    assert_eq!(witness[1], Fr::from(436u64));
+}
+
+fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
+    let mut config = CompilerConfig::default();
+    config.link_library.push(libs_path());
+    config.opt_level = OptLevel::O2;
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path(circuit), config).unwrap();
+    assert_eq!(program.num_inputs, 0);
+    let mut driver = PlainDriver;
+    Machine::run(&program, &mut driver, &[]).unwrap()
+}
+
+#[test]
+fn static_comparisons_use_circoms_signed_field_order_at_o2() {
+    let witness = run_o2_without_inputs("static_signed_condition");
+    assert_eq!(
+        &witness[1..4],
+        &[Fr::from(7u64), Fr::from(7u64), Fr::from(9u64)]
+    );
+}
+
+#[test]
+fn static_arithmetic_branch_roots_fold_at_o2() {
+    let witness = run_o2_without_inputs("static_arithmetic_condition");
+    assert_eq!(
+        &witness[1..4],
+        &[Fr::from(7u64), Fr::from(8u64), Fr::from(9u64)]
+    );
+}
+
+#[test]
+fn nested_component_at_absolute_offset_zero_is_not_the_root_at_o2() {
+    // The main wrapper declares no signals, so Leaf's absolute signal offset is zero. Compiling and
+    // running must still resolve Leaf's input from its caller rather than treating it as a main
+    // input (which used to produce an out-of-bounds VM input index).
+    run_o2_without_inputs("zero_offset_subcomponent");
+}
+
 // Only the circuits this compiler can actually run are wired up. `circuits/` and `kats/` still
 // hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
 // calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The

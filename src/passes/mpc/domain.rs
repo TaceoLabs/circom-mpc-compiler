@@ -10,13 +10,47 @@
 //! reasoning), so this stays a small library of pure functions `mul_split` calls incrementally
 //! rather than a separate pass with its own `PassContext` cache entry.
 
-use crate::ir::{InputList, SignalIdx};
+use ark_ff::PrimeField;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+use crate::ir::{Graph, InputList, Op, SignalIdx};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Domain {
     Public,
     Shared,
     Local,
+}
+
+/// Classifies every value in an already-built graph. Unlike `mul_split`'s incremental table, this
+/// analysis only reads the graph, so it can be shared by codegen, batch planning, and diagnostics.
+pub(crate) fn compute_domains<F: PrimeField>(graph: &Graph<F>) -> Vec<Domain> {
+    let mut domains: Vec<Domain> = Vec::with_capacity(graph.len());
+    for node in graph.nodes() {
+        let domain = match &node.op {
+            Op::Input(signal) => signal_domain(
+                graph.num_outputs,
+                &graph.input_list,
+                &graph.public_inputs,
+                *signal,
+            ),
+            Op::Constant(_) => Domain::Public,
+            Op::Add | Op::Sub | Op::Mul => {
+                domains[node.inputs[0].index()].join(domains[node.inputs[1].index()])
+            }
+            Op::MulLocal => Domain::Local,
+            Op::Round(_) => Domain::Public,
+            Op::RoundResult(_) => Domain::Shared,
+            // A deterministic gadget is public exactly when all of its inputs are public. Keeping
+            // this domain on the otherwise-unread service node lets each result inherit it.
+            Op::Precompute(_) => node
+                .inputs
+                .iter()
+                .fold(Domain::Public, |d, input| d.join(domains[input.index()])),
+            Op::PrecomputeResult(_) => domains[node.inputs[0].index()],
+        };
+        domains.push(domain);
+    }
+    domains
 }
 
 impl Domain {

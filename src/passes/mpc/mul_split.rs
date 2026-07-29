@@ -76,14 +76,16 @@ impl<F: PrimeField> Pass<F> for MulSplit {
                 domain.push(d);
                 RewriteAction::Keep
             }
-            // Never read directly (see Op::Precompute's own doc) - the domain recorded here is
-            // never consulted by anything.
             Op::Precompute(_) => {
-                domain.push(Domain::Public);
+                let d = node
+                    .inputs
+                    .iter()
+                    .fold(Domain::Public, |d, input| d.join(domain[input.index()]));
+                domain.push(d);
                 RewriteAction::Keep
             }
             Op::PrecomputeResult(_) => {
-                domain.push(Domain::Shared);
+                domain.push(domain[node.inputs[0].index()]);
                 RewriteAction::Keep
             }
             // mul_split runs before any of these exist (frontend never produces them, and it's the

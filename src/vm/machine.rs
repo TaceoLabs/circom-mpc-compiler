@@ -84,6 +84,9 @@ impl Machine {
             }
         }
 
+        let mut pending_mul_lhs: Vec<D::Share> = Vec::new();
+        let mut pending_mul_rhs: Vec<D::Share> = Vec::new();
+        let mut pending_mul_dst: Vec<u32> = Vec::new();
         for instr in &program.instructions {
             match instr.op {
                 Opcode::AddPP => {
@@ -120,13 +123,34 @@ impl Machine {
                         driver.mul_sp(&shared[instr.a as usize], public[instr.b as usize])
                 }
                 Opcode::MulLocal => {
-                    local[instr.dst as usize] =
-                        driver.mul_local(&shared[instr.a as usize], &shared[instr.b as usize])
+                    // Codegen may recycle these shared slots before the round boundary, so retain
+                    // the values rather than only their indices. The expensive masked product is
+                    // still delayed and vectorized across the complete round.
+                    pending_mul_lhs.push(shared[instr.a as usize].clone());
+                    pending_mul_rhs.push(shared[instr.b as usize].clone());
+                    pending_mul_dst.push(instr.dst);
                 }
                 Opcode::Reshare => {
                     let entry = program.rounds[instr.a as usize];
                     let start = entry.operand_start as usize;
                     let len = entry.len as usize;
+                    eyre::ensure!(
+                        pending_mul_dst.as_slice()
+                            == &program.round_operands[start..start + len],
+                        "MulLocal instructions do not match the following round's operand table"
+                    );
+                    let products = driver.mul_local_vec(&pending_mul_lhs, &pending_mul_rhs);
+                    eyre::ensure!(
+                        products.len() == len,
+                        "mul_local_vec returned {} products, expected {len}",
+                        products.len()
+                    );
+                    for (&dst, product) in pending_mul_dst.iter().zip(products) {
+                        local[dst as usize] = product;
+                    }
+                    pending_mul_lhs.clear();
+                    pending_mul_rhs.clear();
+                    pending_mul_dst.clear();
                     let locals: Vec<D::Local> = program.round_operands[start..start + len]
                         .iter()
                         .map(|&slot| local[slot as usize].clone())
@@ -148,11 +172,15 @@ impl Machine {
                 Opcode::Precompute => Self::run_batch(
                     &program.precompute_batches[instr.a as usize],
                     driver,
-                    &public,
+                    &mut public,
                     &mut shared,
                 )?,
             }
         }
+        eyre::ensure!(
+            pending_mul_dst.is_empty(),
+            "program ended with MulLocal instructions not followed by Reshare"
+        );
 
         // Signal 0 is the reserved always-true constant; every genuine `SignalIdx` `s` lands at
         // `s + 1` - `Program::signal_to_witness` already indexes into this same, offset-by-one
@@ -187,10 +215,10 @@ impl Machine {
             .collect())
     }
 
-    /// Services one batched precomputation site group - a single driver call for every site of one
-    /// kind at one stage. Dispatched from [`Opcode::Precompute`] at the batch's own point in the
-    /// instruction stream, *not* from an up-front phase: a site's inputs may be produced by earlier
-    /// instructions (see `docs/ARCHITECTURE.md`, "Precomputation").
+    /// Services one batched precomputation site group at its point in the instruction stream. A
+    /// public batch uses the plain gadget path; a shared batch is one driver call. Interleaving is
+    /// required because a site's inputs may be produced by earlier instructions (see
+    /// `docs/ARCHITECTURE.md`, "Precomputation").
     ///
     /// A gadget's per-site result count may be *shorter* than the site's reserved capacity
     /// (`num_outputs + num_intermediates`, sized from the real circuit's own signal layout): the
@@ -204,9 +232,29 @@ impl Machine {
     fn run_batch<F: PrimeField, D: VmDriver<F>>(
         batch: &PrecomputeBatch,
         driver: &mut D,
-        public: &[F],
+        public: &mut [F],
         shared: &mut [D::Share],
     ) -> eyre::Result<()> {
+        if batch.result_bank == Bank::Public {
+            let inputs: Vec<F> = batch
+                .input_slots
+                .iter()
+                .map(|input| {
+                    eyre::ensure!(
+                        input.bank == Bank::Public,
+                        "public precompute batch has a non-public input"
+                    );
+                    Ok(public[input.slot as usize])
+                })
+                .collect::<eyre::Result<_>>()?;
+            let results = Self::run_plain_batch(batch.kind, &inputs)?;
+            return Self::store_batch_results(batch, &results, public);
+        }
+
+        eyre::ensure!(
+            batch.result_bank == Bank::Shared,
+            "precompute batch result bank cannot be Local"
+        );
         // A site input isn't always a share - a circuit may pass a literal, which codegen resolves
         // to a `Public`-bank slot (see `SiteInput`). Promote those; every gadget expects shares.
         let inputs: Vec<D::Share> = batch
@@ -227,9 +275,45 @@ impl Machine {
             PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
             PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
         };
+        Self::store_batch_results(batch, &results, shared)
+    }
+
+    fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
+        use super::gadgets::{aliascheck, isequal, iszero, num2bits, poseidon2};
+
+        Ok(match kind {
+            PrecomputeKind::Poseidon2 { t } => poseidon2::plain_trace(t, inputs)?,
+            PrecomputeKind::Num2Bits { n } => inputs
+                .iter()
+                .flat_map(|&x| num2bits::plain_trace(x, n))
+                .collect(),
+            PrecomputeKind::IsZero => inputs
+                .iter()
+                .flat_map(|&x| iszero::plain_trace(x))
+                .collect(),
+            PrecomputeKind::IsEqual => isequal::plain_trace(inputs)?,
+            PrecomputeKind::AliasCheck => {
+                eyre::ensure!(
+                    inputs.len().is_multiple_of(254),
+                    "alias_check_traces: {} inputs is not a multiple of 254",
+                    inputs.len()
+                );
+                inputs
+                    .chunks_exact(254)
+                    .flat_map(aliascheck::plain_trace)
+                    .collect()
+            }
+        })
+    }
+
+    fn store_batch_results<T: Clone>(
+        batch: &PrecomputeBatch,
+        results: &[T],
+        destination: &mut [T],
+    ) -> eyre::Result<()> {
         eyre::ensure!(batch.sites > 0, "precompute batch has no sites");
         eyre::ensure!(
-            results.len() % batch.sites == 0,
+            results.len().is_multiple_of(batch.sites),
             "precompute batch ({:?}, {} sites) returned {} results, not an even multiple of \
              the site count",
             batch.kind,
@@ -244,12 +328,15 @@ impl Machine {
              the {per_site_capacity} the circuit's own signal layout reserves",
             batch.kind
         );
+        if per_site_actual == 0 {
+            return Ok(());
+        }
         for (site_idx, chunk) in results.chunks_exact(per_site_actual).enumerate() {
             let base = site_idx * per_site_capacity;
             for (k, value) in chunk.iter().enumerate() {
                 let slot = batch.result_slots[base + k];
                 if slot != u32::MAX {
-                    shared[slot as usize] = value.clone();
+                    destination[slot as usize] = value.clone();
                 }
             }
         }

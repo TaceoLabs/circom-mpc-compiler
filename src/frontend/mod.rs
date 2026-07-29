@@ -239,6 +239,7 @@ pub(crate) fn build_graph<P: Pairing>(
         &mut precompute_sites,
         main_template_graph,
         0,
+        inline::TemplatePosition::Root,
         &FxHashMap::default(),
     );
 

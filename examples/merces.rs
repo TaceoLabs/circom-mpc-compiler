@@ -122,9 +122,9 @@ fn main() -> eyre::Result<()> {
         summary.reshare_elements,
         summary.max_slots_per_round.unwrap_or(0),
     );
-    // The batching claim, on a real circuit: hundreds of sites, a couple of dozen driver calls.
+    // The batching claim, on a real circuit: hundreds of sites, a couple of dozen services.
     println!(
-        "  precompute: {} sites -> {} driver calls ({} local muls, {} free public muls)",
+        "  precompute: {} sites -> {} batch services ({} local muls, {} free public muls)",
         summary.precompute_sites,
         summary.precompute_batches,
         summary.local_muls,
@@ -247,6 +247,7 @@ fn run_rep3(
                 scope.spawn(move || {
                     let net = CountingNet::new(net);
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    net.reset();
                     let mut driver = Rep3Driver::new(&net, &mut state);
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
@@ -255,6 +256,7 @@ fn run_rep3(
                         s
                     });
                     let witness = Machine::run(program, &mut driver, &inputs).unwrap();
+                    let witness_rounds = net.rounds();
                     let full_witness = witness.clone();
                     let (bytes_sent, bytes_recv) = net
                         .get_connection_stats()
@@ -280,7 +282,7 @@ fn run_rep3(
                         (proof, public_inputs)
                     });
 
-                    (full_witness, net.rounds(), bytes_sent, bytes_recv, proof)
+                    (full_witness, witness_rounds, bytes_sent, bytes_recv, proof)
                 })
             })
             .collect::<Vec<_>>()

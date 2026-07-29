@@ -272,7 +272,7 @@ costs one reshare message. **Every linear op is free in all three domains** - th
 reason round batching works: every independent product at the same multiplicative depth can share
 one message, because nothing about combining `Local` values linearly needs a round first. One
 security nuance worth stating explicitly: the fresh mask a local product carries comes from
-`local_mul`, so a round's slot count must equal its product count - a round with zero slots would
+`mul_local_vec`, so a round's slot count must equal its product count - a round with zero slots would
 have nothing to reshare, which is why `Graph::verify` rejects one (see below).
 
 ### The cost model
@@ -319,37 +319,40 @@ mirror-enum trap the deleted 37-variant `mpc_ir::Op` fell into (see "Non-goals")
 Unlike the classical passes, this is a lowering *sequence*, not a fixpoint - `PassManager` runs it
 once, after the classical passes converge, unconditionally at every `OptLevel`:
 
-1. **`domain.rs`** - not a registered `Pass` (see below), a small library `mul_split` calls
-   incrementally: `signal_domain` classifies an `Op::Input` as `Public` iff its signal falls in a
+1. **`domain.rs`** - not a registered `Pass`, but the shared domain-analysis library.
+   `signal_domain` classifies an `Op::Input` as `Public` iff its signal falls in a
    `public_inputs`-named range of `input_list` (both already on `Graph`), else `Shared`; everything
-   else is a simple lattice join over an op's inputs. Not cached in `PassContext`, and not its own
-   `Pass`, because the domain of a *new-space* value is what `mul_split` needs while it rewrites, and
-   `Graph::rewrite` remaps every node's inputs to new-space ids before the callback ever sees them -
-   an old-space array computed by a separate prior pass can't be indexed by the ids the callback
-   actually receives once an earlier `EmitMany` has shifted everything after it. Recomputing
-   alongside the rewrite's own `new_nodes` keeps the two in lockstep for free instead.
+   else is a lattice join over an op's inputs. In particular, a `Precompute` and all of its results
+   stay `Public` exactly when every site input is public. `mul_split` maintains this information
+   incrementally while rewriting because it needs *new-space* ids; `compute_domains` performs the
+   equivalent old-space forward analysis for read-only consumers (batch planning, codegen, and
+   diagnostics). It is not cached in `PassContext`: `EmitMany` invalidates an old-space array for a
+   rewrite, while the read-only consumers are cheap and need the table only once.
 2. **`mul_split.rs`** - every `Mul` with two `Shared` operands becomes `MulLocal` + a **singleton**
    `Round` + `RoundResult(0)`, via `EmitMany`. A `Mul` with any `Public` operand is untouched (already
    free). Emitting a singleton round (rather than a bare `MulLocal`) keeps every intermediate graph
-   state valid and is exactly `rep3::arithmetic::mul` called once per product - so this pass alone,
-   before `round_schedule` runs, is already a correct (if naive) lowering, independently testable.
+   state valid and is semantically one rep3 multiplication per product - so this pass alone, before
+   `round_schedule` runs, is already a correct (if naive) lowering, independently testable.
 3. **`round_schedule.rs`** - the headline transform. Buckets every value by `passes::mpc::level`'s
-   network-event level (see "The event axis" below - `Precompute`/`PrecomputeResult` charge a level
-   like everything else, they are not a `0` special case), then merges every singleton round at the
-   same level into one. ASAP scheduling, so the round count equals the circuit's multiplicative depth
-   plus any levels a precomputation site adds - the minimum for that DAG -
+   network-event level (see "The event axis" below - shared precomputation results advance it while
+   all-public results stay at their input level), then merges every singleton round at the same
+   level into one. ASAP scheduling, so the round count equals the circuit's multiplicative depth
+   plus any levels a shared precomputation site adds - the minimum for that DAG -
    and **message count drops from one-per-secret-mul to one-per-depth-level**. Not a
    `Graph::rewrite` consumer (see the note under "Pass infrastructure"): a product's final round is
    only fully known once every *other* product at its depth has been seen, which can be later in the
    original node order - a forward reference a single forward pass can't express. Instead: a direct
-   two-phase reconstruction (compute depths, then rebuild depth-bucket by depth-bucket, ordinary
-   nodes first then that depth's merged round) that produces a valid topological order by
-   construction - each bucket's ordinary nodes preserve their original relative order (still
-   topological, since depth is non-decreasing along every edge), and a depth's round is only emitted
-   once every node at that depth has been. `Graph::rebuild_nodes` installs the result.
+   two-phase reconstruction (compute depths and bucket every node once, then rebuild bucket by
+   bucket, ordinary nodes first and that depth's merged round last) that produces a valid
+   topological order by construction. Each bucket preserves original relative order (including
+   same-level public gadget dependencies), and a depth's round is emitted only after every ordinary
+   node at that depth. Building the buckets once keeps the pass linear in nodes plus levels instead
+   of rescanning all nodes for every level.
+   `Graph::rebuild_nodes` installs the result.
 4. **`Graph::mpc_summary`** - not a pass; a diagnostic method reporting rounds, total reshare
-   elements, min/max slots per round, local muls, free public muls, and precomputation sites. Exists
-   so every claim above is falsifiable rather than asserted - see `tests/mpc_lowering.rs`, which
+   elements, min/max slots per round, local muls, free public muls, and precomputation
+   sites/batches. Exists so every claim above is falsifiable rather than asserted - see
+   `tests/mpc_lowering.rs`, which
    checks it against three synthetic circuits with known multiplicative-depth shape
    (`circuits/bench_{chain,tree,widesum}.circom`): a chain of 3 dependent products needs 3 rounds of
    width 1, a balanced tree of 8 inputs needs 3 rounds of width 4/2/1, and 4 independent products
@@ -357,8 +360,9 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    visibility into a precomputation batch's own internal round cost, which is a property of
    `vm::gadgets`, not of the graph. `examples/merces.rs` (`round-counting` feature,
    `vm::counting_net::CountingNet`) reports the *measured* total against a real 3-party run on the
-   merces circuits and attributes the difference to gadget-internal rounds (see "Real-world target
-   circuits" below).
+   merces circuits. Its counter is reset after rep3 state setup and snapshotted immediately after
+   `Machine::run`, so the difference from IR reshare rounds is gadget-internal witness-execution
+   work, not setup or the optional public-witness opening (see "Real-world target circuits" below).
 
 **Deliberately deferred, reason recorded instead of stubbed:** open sinking and `B2A(A2B(x))`
 cancellation/conversion minimization need `Div`, comparisons, or bitwise ops to exist - none do (see
@@ -369,49 +373,55 @@ source-compatible by pre-declaring it.
 
 ### The event axis: `passes/mpc/level.rs`
 
-`passes::mpc::level::network_levels` computes a value's **level**: *how many network events must
-complete before it exists*, an event being either a reshare round or one precomputation batch
-service. A site's inputs may depend on values produced only partway through witness extension -
-this is what the merces circuits' chained Poseidon2 sites do as their main case - so a site's
-results must sit strictly above its inputs' level, never at the same level:
+`passes::mpc::level::network_levels` computes a value's **level**: *how many communication events
+must complete before it exists*. A reshare is one event, as is a shared-domain precomputation batch;
+an all-public batch is deterministic local work and does not advance this axis. A site's inputs may
+depend on values produced only partway through witness extension - this is what the merces circuits'
+chained Poseidon2 sites do as their main case - so the result rule is domain-aware:
 
 | Op | Level |
 |---|---|
 | `Input`, `Constant` | 0 |
 | `Add`/`Sub`/`Mul`/`MulLocal`, `Round`, `Precompute` | `max(inputs)` |
-| `RoundResult`, `PrecomputeResult` | `level(input) + 1` |
+| `RoundResult` | `level(input) + 1` |
+| `PrecomputeResult` | `level(input) + 1` if `Shared`; `level(input)` if `Public` |
 
-Charging for a site is simply truthful - every rep3 `VmDriver::*_traces` gadget takes a `&Network`
-and genuinely communicates, so a site's results are *not* available at the same instant as its inputs.
+Charging a shared site is simply truthful: its rep3 `VmDriver::*_traces` call genuinely communicates.
+A public result still becomes available only after its `Opcode::Precompute`, but ordinary graph order
+plus the planner's anchor/deadline placement enforces that local dependency without pretending it
+costs a network event.
 
-**One axis, not two.** Rounds and batch services share a counter rather than getting a `(depth, stage)`
-pair, for two reasons that matter more than the one thing it costs:
+**One axis, not two.** Rounds and shared batch services share a counter rather than getting a
+`(depth, stage)` pair; public services sit at their existing level. Two consequences matter:
 
-- Two sites at the same level are *provably* mutually independent, since any dependency forces `+1` -
-  exactly the property that folding N sites into one driver call requires. This cannot be recovered
-  from multiplicative depth: `server.circom` chains `Num2Bits(254)` → `AliasCheck` → `IsZero` with
-  **zero multiplications between them**, so all three sit at identical multiplicative depth despite
-  being sequentially dependent. Any depth-keyed scheme batches dependent sites together and is wrong.
-- With `PrecomputeResult` at `+1`, no node at level `d` can read a level-`d` site's result, so each
-  level schedules as `[ordinary nodes] [this level's batches] [this level's round]` - the existing
-  two-phase shape plus one event slot, needing no intra-level sub-order.
+- Shared sites at the same level are *provably* mutually independent, since any shared dependency
+  forces `+1` - exactly the property that folding N compatible sites into one MPC service requires.
+  This cannot be recovered from multiplicative depth: `server.circom` chains `Num2Bits(254)` →
+  `AliasCheck` → `IsZero` with **zero multiplications between them**, so all three sit at identical
+  multiplicative depth despite being sequentially dependent.
+- Public sites may depend on one another at the same level. `round_schedule` preserves their
+  topological source order within the bucket, and the batch planner refuses a merge whose combined
+  anchor would cross an earlier result deadline. Because the service is local, keeping its result at
+  the same level also lets secret products before and after it share one later reshare round.
 
-Accepted cost, recorded rather than hedged with a knob: for "site `S`, an unrelated product `A` at
-`S`'s input level, and a product `B` reading `S`'s result", this emits round `{A}`, batch, round `{B}`
-where a 2D scheme could emit batch, round `{A,B}` - one extra reshare message. A 2D scheme loses more
-by splitting batches harder (key `(kind, depth, stage)`), and a batch service costs strictly more than
-one reshare. `RoundDesc::level` is named for this axis, not for multiplicative depth.
+Accepted cost for a **shared** site, recorded rather than hedged with a knob: for "site `S`, an
+unrelated product `A` at `S`'s input level, and a product `B` reading `S`'s result", this emits round
+`{A}`, batch, round `{B}` where a 2D scheme could emit batch, round `{A,B}` - one extra reshare
+message. A 2D scheme loses more by splitting batches harder (key
+`(kind, domain, depth, stage)`), and a shared batch service costs strictly more than one reshare.
+For a public `S`, the domain-aware rule already produces the `{A,B}` merge. `RoundDesc::level` is
+named for this axis, not for multiplicative depth.
 
-Not a registered `Pass` - it mutates nothing, and has three consumers (`round_schedule`'s bucketing,
-`vm::codegen`'s batch grouping, `Graph::mpc_summary`'s diagnostics). It follows `domain.rs`'s precedent:
-pure functions, not cached in `PassContext`, because an old-space array is invalidated by the very
-rewrite that consumes it.
+Not a registered `Pass` - it mutates nothing. `round_schedule` consumes the levels directly;
+`precompute_schedule` consumes site stages and supplies the same plan to codegen and
+`Graph::mpc_summary`. It follows `domain.rs`'s precedent: pure functions, not cached in
+`PassContext`, because an old-space array is invalidated by the very rewrite that consumes it.
 
-**Deliberately deferred:** ASAP is not batch-optimal. Delaying an early site to join a later same-kind
-batch (ALAP, or a real list scheduler over both event types) is a genuine win precisely because batch
-services are the expensive events, and would also recover the `{A,B}` merge above. It needs a cost model
-over batch services, which does not exist. That is also the one change that would require a site's stage
-to be *recorded* in the IR rather than recomputed - see "Precomputation" for why it currently is not.
+**Deliberately deferred:** ASAP is not batch-optimal. Delaying an early shared site to join a later
+same-kind site (ALAP, or a real list scheduler over both event types) is a genuine win precisely
+because shared batch services are expensive. It needs a cost model over batch services, which does
+not exist. That is also the one change that would require a site's stage to be *recorded* in the IR
+rather than recomputed - see "Precomputation" for why it currently is not.
 
 ### Executing a lowered graph
 
@@ -424,7 +434,10 @@ matching how `Op::PrecomputeResult` also vanishes from the instruction stream (s
 distinguishes "local" from "shared" once there's only one party) or a real
 `vm::driver::rep3::Rep3Driver` (behind the `rep3` feature: `Share =
 Rep3PrimeFieldShare<F>`, `Local = F`, `reshare` a genuine `rep3::arithmetic::reshare_vec` network
-round). Since `CoCircomCompiler::compile` always lowers, this makes every existing prove+verify test
+round). `Machine::run` queues all `MulLocal` operands for a round, calls `mul_local_vec` once at that
+round's `Reshare` boundary, then performs the one batched reshare. The rep3 implementation therefore
+allocates masks and dispatches vector work once per round, not once per product. Since
+`CoCircomCompiler::compile` always lowers, this makes every existing prove+verify test
 (`tests/proving.rs`) a correctness test for the lowering and codegen both, not just the frontend and
 classical passes - and `tests/rep3_vm.rs` runs the same circuits through real 3-party `LocalNetwork`
 execution, proving the rep3 driver agrees with the plain one on genuinely secret-shared data, not
@@ -467,12 +480,11 @@ is gated behind a feature flag at all.
 | `Shared` | `Shared` | `F` | `Rep3PrimeFieldShare<F>` |
 | `Local` | `Local` | `F` | `F` (the `a` component of a replicated share, already valid on its own) |
 
-These are exactly `passes::mpc::domain::Domain`'s three values (that module is `pub(crate)` beyond
-`passes::mpc` specifically so `vm::codegen` can reuse it rather than re-deriving domain from scratch).
+These are exactly `passes::mpc::domain::Domain`'s three values. The shared `compute_domains` forward
+analysis classifies the already-lowered graph once for batch planning, codegen, and diagnostics;
+`mul_split` uses the equivalent incremental logic while its rewrite is still changing value ids.
 There is no `Binary` bank yet, matching the IR: no conversion op exists to produce one (see "Known
-gaps"). Codegen recomputes domain in one old-space forward pass over the already-lowered graph -
-simpler than `mul_split`'s own new-space incremental version, since codegen only reads the graph, it
-doesn't rewrite it.
+gaps").
 
 ### Instructions and opcodes (`vm/program.rs`)
 
@@ -491,7 +503,7 @@ removal, above.
 `Opcode::Precompute` (`a` is an index into `Program::precompute_batches`) services one batch. It is a
 real instruction rather than an out-of-band phase specifically so a site's inputs may be produced by
 earlier instructions - see "Precomputation". `Reshare` was the precedent and the reason this cost one
-enum variant, one match arm and one serialize tag: both are "a network event whose operands and results
+enum variant, one match arm and one serialize tag: both are "a service event whose operands and results
 are a side-table-owned slot list, not per-instruction operands". The alternative considered - an ordered
 `Vec<(position_in_stream, batch)>` the machine interleaves - was rejected for putting control flow in a
 side table (the run loop would test "is a batch due?" on every one of millions of iterations),
@@ -528,11 +540,12 @@ this is what makes VM memory track live width, not total node count (`vm::codege
 slot_reuse_keeps_peak_width_below_node_count`).
 
 Three regions are deliberately **not** recycled, for simplicity over maximal reuse: `Public`-bank
-constants (`0..constants.len()`), `Shared`-bank precompute results (one contiguous range per site, in
-site order - reserved before the main allocation loop runs, since a precompute batch's results must
-already exist wherever the main instruction stream, or another site, might read them), and
-`Shared`/`Public`-bank circuit inputs. A future optimization (not built): a precompute result read
-only by `stores` could write directly into the final witness buffer, skipping its slot entirely.
+constants (`0..constants.len()`), precompute results in their batch's `Public` or `Shared` bank (one
+contiguous range per site, in site order, reserved before the main allocation loop), and
+`Shared`/`Public`-bank circuit inputs. Precompute slots must already exist wherever the main
+instruction stream, or another site, might read them. A future optimization (not built): a
+precompute result read only by `stores` could write directly into the final witness buffer, skipping
+its slot entirely.
 
 `Op::Round`/`Op::RoundResult` need one adjacency assumption codegen relies on rather than re-derives:
 `round_schedule` always places a `Round` node immediately followed by its `len` `RoundResult(0..len)`
@@ -544,25 +557,28 @@ already known the moment the `Round` is processed. `Op::PrecomputeResult` doesn'
 gaps `gc` may have left between a `Precompute` node and its results).
 
 **Batch placement is anchor/deadline, and the check is what makes the analysis safe.**
-`plan_precompute_batches` groups sites by `(kind, level)` (see "The event axis"), then for each batch
-computes `anchor` = the last node defining any of its sites, and `deadline` = the first node reading any
-of its results. `anchor < deadline` is an `ensure!`, and `Opcode::Precompute` is emitted right after the
-anchor node.
+`plan_precompute_batches` groups sites by `(kind, level, domain)` (see "The event axis"), then for
+each candidate batch computes `anchor` = the last node defining any of its sites and `deadline` =
+the first node reading any of its results. It appends a site only while the combined
+`anchor < deadline`; otherwise it closes that active batch and starts another with the same key.
+`Opcode::Precompute` is emitted right after each final anchor. This defensive split preserves a
+valid topological program instead of rejecting a circuit merely because an early result consumer
+appears before a later independent site in source order.
 
-The tempting alternative - flush a batch once the walk's level advances past its stage - assumes graph
-order is level-sorted. `round_schedule` does produce such an order, but it **early-returns without
-reordering anything when the circuit has no secret multiplications at all**, which is exactly the
-`Num2Bits` → `AliasCheck` → `IsZero` shape in `server.circom` (three stages, zero rounds). An anchor is
-correct on any topological order, so that early return stays safe and needed no change. Levels only
-*propose* the grouping; the check disposes of a bad one with a real error - the same posture as the
-`Local`-escape assertion above. Analysis proposes, check disposes.
+The tempting alternative - flush a batch once the walk's level advances past its stage - assumes
+graph order is already level-sorted. `round_schedule` now returns early only when there are no
+secret rounds *and* the graph is already sorted; otherwise it rebuilds from its one-pass level
+buckets, including zero-round graphs such as a staged `Num2Bits` → `AliasCheck` → `IsZero` chain.
+The anchor/deadline split is also what orders dependent public services that intentionally remain at
+one network level, and remains defense in depth for any differently ordered shared graph.
 
 A value feeding an `Op::Precompute` may be any node the graph's level structure places before the
 batch's anchor - not only a bare `Op::Input`/`Op::Constant` - so a site's inputs can themselves be
-computed. The anchor check can only fire on a graph whose node order contradicts its own level
-structure, i.e. a compiler bug or a hand-built graph. Two narrower errors remain: a site reading a
-`Local` (un-reshared `MulLocal`) value, which `Graph::verify` also rejects structurally; and nothing
-else - a `Public`-bank site input is legal (see "Precomputation").
+computed. The anchor/deadline condition keeps independent compatible sites together; for a
+same-level public dependency or a valid but differently ordered graph it creates another batch.
+One narrower error remains: a site reading a `Local` (un-reshared `MulLocal`) value, which
+`Graph::verify` also rejects structurally. A `Public`-bank site input is legal (see
+"Precomputation").
 
 ### `Machine::run` (`vm/machine.rs`)
 
@@ -571,9 +587,13 @@ S>>` `Machine::run` takes, consulting `Program::input_domains` to wrap each valu
 `Secret(S)` automatically - `share` is only called for `Secret`-destined values (identity for
 `PlainDriver`, real secret-sharing for `Rep3Driver` - see `tests/rep3_vm.rs`). `Machine::run`: binds
 inputs into their banks, executes the instruction stream (a plain `match` over `Opcode`, dispatching
-linear ops straight to the driver, `Reshare` to `program.rounds[instr.a]`'s operand/result slot ranges,
-and `Precompute` to `run_batch` for `program.precompute_batches[instr.a]` - **interleaved**, at each
-batch's own point in the stream rather than in an up-front phase), then builds the final signal array
+linear ops straight to the driver, collecting `MulLocal`s until the next `Reshare`, and dispatching
+`Precompute` to `run_batch` for `program.precompute_batches[instr.a]` - **interleaved**, at each
+batch's own point in the stream rather than in an up-front phase). At a `Reshare` boundary it calls
+`mul_local_vec` once for the complete round before the one batched reshare. An all-public
+`PrecomputeBatch` runs the plain deterministic gadget and writes its `Public` result slots; a
+shared-domain batch promotes any public inputs, calls the driver's MPC gadget, and writes `Shared`
+slots. The machine then builds the final signal array
 (index 0 = the reserved constant-`1` signal; every genuine `SignalIdx` `s` lands at `s + 1`) from
 `stores` plus - since a circuit's own top-level inputs are
 never `graph.outputs()` entries (see "Precomputation" for why: only a *nested* subcomponent's own
@@ -648,12 +668,14 @@ fixed 16-byte record per instruction (`u8` opcode + 3 bytes padding + three `u32
 one genuinely *staged* (two same-kind batches at different levels, so the format change below is covered
 by more than a single-batch program).
 
-`VERSION` is **2**. A version-1 program carries a batch table but no `Opcode::Precompute`
+`VERSION` is **3**. A version-1 program carries a batch table but no `Opcode::Precompute`
 instruction - it assumes a machine that services every batch up front, which the current
 `Machine::run` does not do. Reading a version-1 program under today's interleaved semantics would
 silently service zero batches and return a plausible-looking wrong witness, so the version check in
-`read` is the only thing between an old artifact and a bad answer. Site inputs
-are also now encoded `(bank, slot)` like `stores`, since a site input may be a `Public` slot.
+`read` is the only thing between an old artifact and a bad answer. Version 2 added the interleaved
+opcode and encoded site inputs as `(bank, slot)`, but implicitly placed every batch result in
+`Shared`. Version 3 adds each `PrecomputeBatch`'s result bank so an all-public batch can round-trip
+without being silently reclassified; old versions are rejected rather than guessed.
 
 ## Precomputation
 
@@ -738,27 +760,33 @@ order**, one entry per site, and writes `result.intermediate.len()` values start
 intermediate region (not necessarily the region's full remaining span - see "Known gaps" for what
 this leniency turned out to matter for). This compiler's codegen instead resolves every site's
 destination once, at compile time (`site_result_base[site] + slot`, a fixed, non-recycled
-`Shared`-bank slot range - see "Bytecode and the slot machine") - there is no positional list for a
-caller to get out of order, and no injection point a caller supplies a provider through: codegen
-groups sites into `PrecomputeBatch`es and `Machine::run_batch` calls the *driver's* matching gadget
-method
-(`VmDriver::poseidon2_traces`/`num2bits_traces`/`is_zero_traces`/`is_equal_traces`/`alias_check_traces`,
-`vm/driver/mod.rs`) once per batch. This is exactly the batching merces performs by hand per protocol
-operation (`Poseidon2::precompute_rep3(num_poseidon, ...)`), now derived by the compiler for the whole
-circuit instead.
+`Public`- or `Shared`-bank slot range - see "Bytecode and the slot machine") - there is no positional
+list for a caller to get out of order, and no injection point a caller supplies a provider through.
+Codegen groups sites into `PrecomputeBatch`es; `Machine::run_batch` runs an all-public batch through
+the matching plain `vm::gadgets` implementation, while a shared batch calls the driver's matching
+`VmDriver::*_traces` method once. The latter is exactly the batching merces performs by hand per
+protocol operation (`Poseidon2::precompute_rep3(num_poseidon, ...)`), now derived by the compiler for
+the whole circuit instead.
 
-**Batches are keyed `(kind, stage)`, not `kind` alone** - the sites in a batch must be mutually
-independent to be serviceable by one call, which is what a shared stage guarantees (see "The event axis").
-Batching still does the work it exists to do: on `transfer_arity4_batch8`, **950 sites collapse into 24
-driver calls**. `Graph::mpc_summary` reports `precompute_sites` and `precompute_batches` side by side so
-that claim is falsifiable rather than asserted, and `tests/merces.rs` asserts the ratio on the real
-circuits rather than an exact count, so the test tracks the claim and not today's scheduling arithmetic.
+**Batches are keyed `(kind, stage, domain)`, not `kind` alone.** For shared sites, a common stage
+proves mutual independence (see "The event axis"); the domain split keeps deterministic public
+execution separate from MPC execution. Public dependencies do not advance the network stage, so
+the anchor/deadline rule splits one key whenever combining a later site would place the service
+after an earlier site's first consumer. The same rule remains a defensive split for any differently
+ordered shared graph. Batching still does the work it exists to do: on `transfer_arity4_batch8`,
+**950 sites collapse into 24 batch services**.
+`Graph::mpc_summary` uses the same planner as codegen and reports `precompute_sites` and
+`precompute_batches` side by side, so that claim is falsifiable rather than asserted;
+`tests/merces.rs` asserts the ratio rather than an exact count.
 
-A site input may live in the `Public` bank, not only `Shared`: a circuit can pass a literal to a gadget, as
-`circuits/merces/oblivious_vector/hash.circom` does
+A site input may live in the `Public` bank, not only `Shared`: a circuit can pass a literal to a
+gadget, as `circuits/merces/oblivious_vector/hash.circom` does
 (`TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()])` - two of those four fold to
-`Op::Constant`). `PrecomputeBatch::input_slots` therefore carries `SiteInput { bank, slot }` and
-`run_batch` promotes a `Public` slot before handing the batch to the driver.
+`Op::Constant`). `PrecomputeBatch::input_slots` therefore carries `SiteInput { bank, slot }`. If all
+inputs are public, the outputs and intermediates are deterministic public values, remain in the
+`Public` bank, and can feed downstream public multiplication without a reshare. If any input is
+shared, the batch is `Shared` and `run_batch` promotes just its public input slots before handing the
+batch to the driver. A `Local` site input is rejected.
 
 `vm::gadgets` (plain unconditionally, rep3 behind the `rep3` feature) implements all five kinds, all of
 them this compiler's own field arithmetic: `aliascheck` generalizes merces'
@@ -766,10 +794,11 @@ them this compiler's own field arithmetic: `aliascheck` generalizes merces'
 merces zero-pads (see "Sites are typed, not opaque" above); `isequal` delegates to `iszero`; and
 `poseidon2` derives its trace from the vendored circuit - see below.
 
-A batch's per-site result count may be **shorter** than the site's reserved capacity - `Machine::
-precompute` writes only a prefix of each site's slots (per site, not a flat prefix of the whole
-batch, which would spill one site's results into the next site's region) and leaves the rest at
-their zero default, mirroring the real co-snarks VM's own behavior.
+A batch's per-site result count may be **shorter** than the site's reserved capacity -
+`Machine::run_batch` writes only a prefix of each site's slots (per site, not a flat prefix of the
+whole batch, which would spill one site's results into the next site's region) and leaves the rest
+at its bank's zero default, mirroring the real co-snarks VM's own behavior. A zero-length result is
+valid too (`Num2Bits(0)`), so it is handled as an empty write rather than chunking by zero.
 
 Sites are numbered in the order encountered during inlining (deterministic single-threaded
 traversal); this ordering has no runtime significance beyond being a stable, arbitrary key for
@@ -929,9 +958,9 @@ absent, so `cargo test` stays green on a fresh clone before either script has ru
 
 ## Known gaps
 
-- **Batches that are provably independent still run as sequential driver calls, and so does a
-  same-level reshare round alongside them.** Two `(kind, stage)` batches at the same stage but
-  different kinds (a Poseidon2 `t=4` batch and a `t=16` batch, say) are exactly the case "The event
+- **Shared batches that are provably independent still run as sequential driver calls, and so does
+  a same-level reshare round alongside them.** Two `(kind, stage, Shared)` batches at the same stage
+  but different kinds (a Poseidon2 `t=4` batch and a `t=16` batch, say) are exactly the case "The event
   axis" proves mutually independent, and a same-level reshare round is independent of both by the
   same argument - yet `Machine::run` issues each as its own `VmDriver` call, one after another,
   paying the sum of their round counts where the max would do. `VmDriver` is fully synchronous
@@ -1047,13 +1076,13 @@ inputs.** `transfer_arity4_batch1` and `transfer_arity4_batch8` go all the way t
 agreeing, and - with the ceremony zkey present - producing a co-groth16 proof against circom's own
 R1CS (`--O2`, the pinned fork) that verifies (`tests/merces.rs`). Shape, for scale:
 
-| | rounds | reshare elements | widest round | sites | driver calls | instructions | witness |
+| | rounds | reshare elements | widest round | sites | batch services | instructions | witness |
 |---|---|---|---|---|---|---|---|
 | `transfer_arity4_batch1` | 26 | 642 | 280 | 119 | 19 | 1 943 | 17 545 |
 | `transfer_arity4_batch8` | 96 | 5 136 | 2 240 | 950 | 24 | 15 363 | 139 229 |
 
 Two things worth reading off that table. Precomputation batching is doing real work - 950 sites into 24
-driver calls. And `batch8` is 8x the transactions of `batch1` for only ~3.7x the rounds, which is round
+batch services. And `batch8` is 8x the transactions of `batch1` for only ~3.7x the rounds, which is round
 batching: independent products across the 8 slots merge instead of serializing. `benches/witness_extension.rs`
 measures both against `PlainDriver`, where rep3 throughput *improves* from batch1 to batch8 for the same
 reason.

@@ -193,3 +193,37 @@ fn independent_same_kind_sites_share_one_batch() {
     assert_eq!(summary.precompute_sites, 1);
     assert_eq!(summary.precompute_batches, 1);
 }
+
+#[test]
+fn num2bits_zero_returns_an_empty_trace_without_panicking() {
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_num2bits_zero_test"),
+        config(),
+    )
+    .unwrap();
+    let values = [Fr::from(0u64)];
+    let inputs = program.classify_inputs(&values, |v| v);
+    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    assert!(witness[1..].iter().all(ark_ff::Zero::is_zero));
+}
+
+#[test]
+fn all_public_gadgets_stay_public_through_downstream_multiplication() {
+    let mut cfg = config();
+    cfg.opt_level = circom_mpc_compiler::OptLevel::O2;
+    let graph = CoCircomCompiler::<Bn254>::parse(circuit_path("precomputation_public_test"), cfg.clone())
+        .unwrap();
+    let summary = graph.mpc_summary();
+    assert_eq!(summary.rounds, 0, "{summary:?}");
+    assert_eq!(summary.local_muls, 0, "{summary:?}");
+    assert_eq!(summary.public_muls, 1, "{summary:?}");
+
+    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
+        .unwrap();
+    assert_eq!(program.precompute_batches.len(), 1);
+    assert_eq!(program.precompute_batches[0].result_bank, circom_mpc_compiler::vm::program::Bank::Public);
+    let values = [Fr::from(0u64), Fr::from(9u64)];
+    let inputs = program.classify_inputs(&values, |v| v);
+    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    assert_eq!(witness[1], Fr::from(0u64));
+}

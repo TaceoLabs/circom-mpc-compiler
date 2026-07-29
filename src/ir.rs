@@ -52,8 +52,7 @@ impl PrecomputeId {
     }
 }
 
-/// Identifies one entry in [`Graph::rounds`]: one rep3 network round (currently always a reshare -
-/// see [`RoundKind`]).
+/// Identifies one batched rep3 network round (currently always a reshare).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RoundId(u32);
 
@@ -117,20 +116,20 @@ pub struct MpcSummary {
     pub local_muls: usize,
     pub public_muls: usize,
     pub precompute_sites: usize,
-    /// How many driver calls those sites actually cost - one per `(kind, stage)` group, *not* one
-    /// per site (see `passes::mpc::level`). `precompute_batches < precompute_sites` is what makes
-    /// the batching claim falsifiable rather than asserted; equality means every site sits in a
-    /// group of its own, which happens only when they are all genuinely sequentially dependent or
-    /// all of different kinds.
+    /// How many batch services those sites actually cost - normally one per
+    /// `(kind, stage, domain)` group, with an additional split when an early consumer closes a
+    /// batch's placement window. Public services run locally; shared services call the MPC driver.
+    /// `precompute_batches < precompute_sites` makes the batching claim falsifiable rather than
+    /// asserted.
     pub precompute_batches: usize,
 }
 
 /// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the instantiated
 /// template's name in `frontend/build.rs::handle_create_cmp_bucket`. See `docs/ARCHITECTURE.md`,
 /// "Precomputation", for what each variant computes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrecomputeKind {
-    /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 16}`).
+    /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 8, 12, 16}`).
     Poseidon2 { t: usize },
     /// Bit decomposition of one field element into `n` bits.
     Num2Bits { n: usize },
@@ -254,7 +253,7 @@ pub enum Op<F: PrimeField> {
     Mul,
     /// Invokes an externally-supplied precomputation site (see [`PrecomputeSite`]), used for
     /// `TACEO_PRECOMPUTATION_*`-wrapped components. Arity equals the referenced site's
-    /// `num_inputs` (checked by [`Graph::verify`], not [`Node::new`] - see [`Arity::SiteInputs`]).
+    /// `num_inputs`, which is validated when the graph invariants are checked.
     /// This node's own value is never read directly, only through [`Op::PrecomputeResult`] nodes
     /// that reference it.
     Precompute(PrecomputeId),
@@ -267,10 +266,10 @@ pub enum Op<F: PrimeField> {
     /// sharing (see `docs/ARCHITECTURE.md`, "MPC lowering", for why that's still sound to add/
     /// scale) until reshared via the [`Op::Round`] it feeds.
     MulLocal,
-    /// One batched network round (see [`RoundDesc`]/[`Graph::rounds`]): arity equals the round's
-    /// `len` (checked by [`Graph::verify`], not [`Node::new`] - see [`Arity::RoundLen`]), one input
-    /// per [`Op::MulLocal`] value being reshared together. This node's own value is never read
-    /// directly, only through the [`Op::RoundResult`] nodes that reference it.
+    /// One batched network round: arity equals the round's recorded length, which is validated when
+    /// the graph invariants are checked, with one input per [`Op::MulLocal`] value being reshared
+    /// together. This node's own value is never read directly, only through the
+    /// [`Op::RoundResult`] nodes that reference it.
     Round(RoundId),
     /// Reads one slot of the [`Op::Round`] node that is this node's sole input - the reshared
     /// (`Shared`-domain) result of that slot's local product.
@@ -319,7 +318,7 @@ impl<F: PrimeField> Op<F> {
 }
 
 /// A single node in the graph. `inputs` references other nodes by [`ValueId`]; every reference
-/// must point strictly earlier in the graph (enforced by [`Graph::verify`]).
+/// must point strictly earlier in the graph, as enforced by graph verification.
 #[derive(Debug, Clone)]
 pub struct Node<F: PrimeField> {
     pub op: Op<F>,
@@ -500,17 +499,9 @@ impl<F: PrimeField> Graph<F> {
             .iter()
             .filter(|n| matches!(n.op, Op::Mul))
             .count();
-        // Distinct (kind, stage) pairs - the same key `vm::codegen` groups batches by.
-        let mut batch_keys: Vec<(PrecomputeKind, usize)> = Vec::new();
-        if !self.precompute_sites.is_empty() {
-            let stages = crate::passes::mpc::level::site_stages(self);
-            for (site_id, site) in self.precompute_sites.iter().enumerate() {
-                let key = (site.kind, stages[site_id]);
-                if !batch_keys.contains(&key) {
-                    batch_keys.push(key);
-                }
-            }
-        }
+        let domains = crate::passes::mpc::domain::compute_domains(self);
+        let precompute_batches =
+            crate::passes::mpc::precompute_schedule::plan_precompute_batches(self, &domains).len();
         MpcSummary {
             rounds: self.rounds.len(),
             reshare_elements,
@@ -519,7 +510,7 @@ impl<F: PrimeField> Graph<F> {
             local_muls,
             public_muls,
             precompute_sites: self.precompute_sites.len(),
-            precompute_batches: batch_keys.len(),
+            precompute_batches,
         }
     }
 
