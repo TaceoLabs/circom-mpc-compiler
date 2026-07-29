@@ -26,6 +26,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 rustc-hash = "2"
 mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0", optional = true }
 mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.5.0", features = ["local"], optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+rand = { version = "0.8.5", optional = true }
+toml = { version = "0.8", optional = true }
 
 [features]
 default = ["rep3", "round-counting"]
@@ -34,6 +37,15 @@ rep3 = ["dep:mpc-core", "dep:mpc-net"]
 # Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
 # wrapper is a thin delegating decorator, two relaxed atomics per send/recv.
 round-counting = ["rep3"]
+# The `merces-net` binary: real rep3 witness extension across three processes over a genuine TCP
+# network, as opposed to every other rep3 test/example/bench, which uses the in-process
+# `mpc_net::local::LocalNetwork`. Non-default: pulls in mpc-net's `tcp` backend plus
+# clap/rand/toml, none of which the library itself needs.
+net = ["round-counting", "mpc-net/tcp", "dep:clap", "dep:rand", "dep:toml"]
+
+[[bin]]
+name = "merces-net"
+required-features = ["net"]
 
 [dev-dependencies]
 rand = "0.8.5"
