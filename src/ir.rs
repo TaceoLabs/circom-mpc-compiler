@@ -2,10 +2,7 @@
 //!
 //! A [`Graph`] is a flat, topologically ordered list of [`Node`]s. There is no separate "wire"
 //! address space: a node's position in the graph *is* the identifier of the single value it
-//! produces (its [`ValueId`]). This replaces the old model where every node additionally
-//! allocated one or more `Wire` indices into a side-array, which required a whole family of
-//! passes (`dead_code`, `load_elimination`, `reduce_wire_indices`) just to keep that side-array
-//! dense and alias-free. See `docs/ARCHITECTURE.md` for the full rationale.
+//! produces (its [`ValueId`]). See `docs/ARCHITECTURE.md` for the full rationale.
 
 use ark_ff::PrimeField;
 
@@ -128,12 +125,9 @@ pub struct MpcSummary {
     pub precompute_batches: usize,
 }
 
-/// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the wrapped template's
-/// name at inlining time (`frontend/inline.rs`) - an unrecognized `TACEO_PRECOMPUTATION_*` name is
-/// a typed `Unsupported::PrecomputeGadget` error there, not an opaque site nothing can service.
-/// See `docs/ARCHITECTURE.md`, "Precomputation", for what each variant computes and why this
-/// replaces the co-snarks `ComponentAcceleratorOutput` byte-compatibility contract this crate used
-/// to keep.
+/// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the instantiated
+/// template's name in `frontend/build.rs::handle_create_cmp_bucket`. See `docs/ARCHITECTURE.md`,
+/// "Precomputation", for what each variant computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrecomputeKind {
     /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 16}`).
@@ -151,18 +145,11 @@ pub enum PrecomputeKind {
 }
 
 impl PrecomputeKind {
-    /// How many result slots (`num_outputs + num_intermediates`) this gadget produces, where that
-    /// count has a closed form independent of the gadget's own implementation - `Graph::verify`
-    /// and `frontend/inline.rs` cross-check it against the circom-derived count from
+    /// How many result slots (`num_outputs + num_intermediates`) this gadget produces. Every kind
+    /// has a closed form independent of its own implementation - `Graph::verify` and
+    /// `frontend/inline.rs` cross-check it against the circom-derived count from
     /// `frontend/mod.rs::compute_signal_spans`, so a trace-layout mistake is a compile-time error
     /// instead of a silently wrong witness.
-    ///
-    /// Every kind has a closed form. [`PrecomputeKind::Poseidon2`]'s used to be `None`, on the
-    /// grounds that its intermediate count was an implementation detail of whichever hasher produced
-    /// the trace; once the trace is derived from `circuits/libs/taceo/poseidon2.circom`'s own signal
-    /// layout instead (see `vm::gadgets::poseidon2`), it is a function of `t` like everything else -
-    /// and having it here means `frontend/inline.rs`'s cross-check turns a mis-derived width into a
-    /// compile-time panic naming both numbers rather than a silently wrong witness.
     pub fn expected_results(self) -> Option<usize> {
         match self {
             // Mirrors the template structure of `circuits/libs/taceo/poseidon2.circom`:
@@ -235,15 +222,14 @@ impl PrecomputeKind {
     }
 }
 
-/// One `TACEO_PRECOMPUTATION_*`-wrapped component: the shape the runtime must supply a trace for.
-/// See `docs/ARCHITECTURE.md`, "Precomputation".
+/// One recognized-gadget component instance: the shape the runtime must supply a trace for. See
+/// `docs/ARCHITECTURE.md`, "Precomputation".
 #[derive(Debug, Clone)]
 pub struct PrecomputeSite {
     /// Which gadget this site runs, and (for the parameterized ones) its width.
     pub kind: PrecomputeKind,
-    /// The wrapped (inner) template's name, e.g. `"Poseidon2"`, `"Num2Bits"`, `"IsZero"`.
-    pub name: String,
-    /// The wrapped template's concrete header (parameterized name), diagnostics only.
+    /// The gadget template's concrete header (parameterized name), e.g. `"Poseidon2_3"` -
+    /// diagnostics only.
     pub header: String,
     pub num_inputs: usize,
     pub num_outputs: usize,
@@ -256,7 +242,7 @@ pub struct PrecomputeSite {
 /// Everything else circom can express (`/`, `\`, `**`, shifts, bitwise ops, comparisons, ...) is
 /// either rejected outright or, where all its operands are compile-time constants, folded away
 /// before it ever reaches this enum (`frontend::fold`). See `docs/ARCHITECTURE.md` for why, and for
-/// the MPC share-kind specialization this enum used to also carry (removed, see "Non-goals").
+/// why MPC share-kind is not a set of `Op` variants (see "Non-goals").
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Op<F: PrimeField> {
     /// Reads a circuit input signal.
@@ -539,10 +525,6 @@ impl<F: PrimeField> Graph<F> {
 
     /// Marks every node reachable from `outputs`, drops the rest, and compacts `ValueId`s so the
     /// graph is dense again. Returns the old-to-new id mapping (`None` for dropped nodes).
-    ///
-    /// This one function replaces the old `dead_code_elimination` + `reduce_wire_indices` passes:
-    /// those existed only to clean up after a sparse wire-index space, which the value-graph
-    /// model does not have in the first place.
     pub(crate) fn gc(&mut self) -> Vec<Option<ValueId>> {
         let mut keep = vec![false; self.nodes.len()];
         for &(_, root) in &self.outputs {
@@ -869,7 +851,6 @@ mod tests {
     fn iszero_site() -> PrecomputeSite {
         PrecomputeSite {
             kind: PrecomputeKind::IsZero,
-            name: "IsZero".to_owned(),
             header: "IsZero_0".to_owned(),
             num_inputs: 1,
             num_outputs: 1,

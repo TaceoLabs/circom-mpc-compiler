@@ -32,8 +32,8 @@ impl<F: PrimeField> Pass<F> for RoundSchedule {
         // `vm::codegen` and `Graph::mpc_summary` need the identical numbers. Crucially this charges a
         // level for crossing a *precomputation site* as well as a round: a site's results are not
         // available at the same instant as its inputs (every rep3 `VmDriver::*_traces` gadget
-        // communicates), and pretending otherwise made the depth-bucketed rebuild below emit a
-        // forward reference whenever a site's inputs were computed rather than bare `Op::Input`s.
+        // communicates), which the depth-bucketed rebuild below relies on to avoid a forward
+        // reference whenever a site's inputs are computed rather than bare `Op::Input`s.
         let depth = super::level::network_levels(graph);
 
         // Every singleton round mul_split created, grouped by depth, in original creation order -
@@ -179,13 +179,12 @@ mod tests {
         assert_eq!(graph.rounds()[0].len, 2);
     }
 
-    /// Regression for a genuine panic (`round_schedule: input not yet placed`, an `expect` so it
-    /// fired in release too). A precomputation site whose inputs are *computed* rather than bare
-    /// `Op::Input`s used to be pinned to level 0 while its inputs sat deeper, so the rebuild below
-    /// visited the site before the values it reads. This is the shape
-    /// `circuits/merces/merces/dependencies/merkle_root_4.circom` has - `Arity4CMux` multiplies
-    /// secret selector bits, feeds a Poseidon2 site, and that site's result feeds the next level -
-    /// so it blocked every merces circuit before `level::network_levels` charged for a site.
+    /// A precomputation site whose inputs are *computed* rather than bare `Op::Input`s must be
+    /// placed strictly after the level that produces those inputs, or the rebuild below would visit
+    /// the site before the values it reads (a real panic: `round_schedule: input not yet placed`).
+    /// This is the shape `circuits/merces/merces/dependencies/merkle_root_4.circom` has -
+    /// `Arity4CMux` multiplies secret selector bits, feeds a Poseidon2 site, and that site's result
+    /// feeds the next level.
     #[test]
     fn site_between_two_products_does_not_panic() {
         use super::super::mul_split::MulSplit;
@@ -205,7 +204,6 @@ mod tests {
             ValueId::new(5),
             vec![PrecomputeSite {
                 kind: PrecomputeKind::IsZero,
-                name: "IsZero".to_owned(),
                 header: "IsZero_0".to_owned(),
                 num_inputs: 1,
                 num_outputs: 1,

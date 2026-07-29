@@ -730,7 +730,6 @@ mod tests {
     fn iszero_site() -> PrecomputeSite {
         PrecomputeSite {
             kind: PrecomputeKind::IsZero,
-            name: "IsZero".to_owned(),
             header: "IsZero_0".to_owned(),
             num_inputs: 1,
             num_outputs: 1,

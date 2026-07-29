@@ -65,12 +65,9 @@ fn non_constant_bitwise_operator_is_a_typed_error() {
 
 /// `Graph::input_list` must be 0-based over the circuit's inputs, not in circom's witness numbering
 /// (where the first input sits at `1 + num_outputs`, after the reserved constant and main's outputs).
-///
-/// Regression test: those two numberings used to be compared directly, so
-/// `passes::mpc::domain::signal_domain`'s range check could never match and a declared-public input
-/// was always classified `Shared`. No golden-witness KAT caught it, because *that* direction only
-/// costs an optimization - but with more than one main output the same offset lands inside an
-/// unrelated input's range and misclassifies a secret input as public, which `Machine::run` rejects.
+/// Comparing the two numberings directly would misclassify a declared-public input as `Shared`
+/// with one main output, or a secret input as public with more than one - which `Machine::run`
+/// rejects.
 #[test]
 fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
     let graph = CoCircomCompiler::<Bn254>::parse(circuit_path("multiplier2_public"), config())

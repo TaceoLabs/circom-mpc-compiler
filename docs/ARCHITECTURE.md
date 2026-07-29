@@ -17,8 +17,9 @@ circom source in, a procedure that computes the full witness (public and secret)
 circom source
   -> circom's own parser + type checker + constraint generation + simplification   (frontend/mod.rs, upstream circom crates)
   -> per-template lowering to TemplateGraph, recursing into subcomponents lazily    (frontend/build.rs)
-     (unless TACEO_PRECOMPUTATION_*-wrapped - see "Precomputation"), unrolling
-     loops eagerly, folding removed operators at compile time                      (frontend/unroll.rs, frontend/fold.rs)
+     (unless it instantiates a recognized precomputation gadget - see
+     "Precomputation"), unrolling loops eagerly, folding removed operators at
+     compile time                                                                  (frontend/unroll.rs, frontend/fold.rs)
   -> recursive inlining: flatten the TemplateGraph tree into one ir::Graph          (frontend/inline.rs)
   -> ir::Graph::verify(), then PassManager::for_opt_level(config.opt_level).run():
        classical passes to a fixpoint, then MPC lowering, unconditionally          (ir.rs, passes/, called from lib.rs)
@@ -31,12 +32,9 @@ circom source
 `CoCircomCompiler::<P>::parse(file, config)` in `lib.rs` runs everything up to and including the
 `PassManager`, and returns the `ir::Graph` - **always MPC-lowered** (see "MPC lowering" below); there
 is no plaintext-only end state. `CoCircomCompiler::<P>::compile` runs `parse` and then
-`vm::codegen::compile`, returning the final `vm::Program`. An earlier version of this crate had a
-real MPC execution path (rep3, a plaintext stand-in `PlainExecutor`, an `mpc_ir`
-share-kind-specialized mirror IR) that was deleted before the lowering described below existed - see
-"Deliberate non-goals" for why that shape was wrong and where to find it again if the reasoning ever
-needs re-deriving. The bytecode VM described in "Bytecode and the slot machine" below is not a
-repeat of that mistake: see that section, and "Non-goals", for why.
+`vm::codegen::compile`, returning the final `vm::Program`. See "Deliberate non-goals" for why share
+kind is an external analysis rather than a set of `ir::Op` variants, and "Bytecode and the slot
+machine" for why MPC execution is a bytecode VM rather than a tree-walking interpreter.
 
 ## The IR (`src/ir.rs`)
 
@@ -53,11 +51,8 @@ pub struct Graph<F> {
 ```
 
 There is **no separate wire/address space**. Every node produces exactly one value, and that
-value's identity is the node's position in `nodes`. This replaced a model where every node
-additionally allocated one or more `Wire = usize` indices into a side array (bump-allocated,
-independent of node position), which required three passes just to keep that side array dense and
-alias-free after rewrites (`dead_code`, `load_elimination`, `reduce_wire_indices` — all deleted, see
-"What this replaced" below).
+value's identity is the node's position in `nodes`. Nothing needs a pass to keep some parallel
+address space dense and alias-free after a rewrite, because there is no such space to begin with.
 
 ### Invariants (checked by `Graph::verify`)
 
@@ -81,22 +76,19 @@ compile-time folding lives" below) and only error if that fails; everything else
 `Unsupported::Operator`.
 
 This exists to keep the compiler's runtime core - and the pass infrastructure and bytecode codegen
-being built on top of it - small enough to reason about exhaustively before growing back out. It
-also happens to retire the MPC-specific reason this enum used to be kept generic (share-kind
-specialization deferred to a later analysis pass, so every IR-level pass wasn't written 9× per
-binary op) - that reasoning no longer applies since share-kind specialization now happens at
-bytecode codegen time (`vm::codegen`, see "Bytecode and the slot machine"), not in this enum at all
-(see "Non-goals"). If/when the operator surface grows back, keep specializing at bytecode codegen time
-rather than in this enum, for the same "write every pass once" reason.
+built on top of it - small enough to reason about exhaustively. Share-kind specialization
+(public/shared/local) happens at bytecode codegen time (`vm::codegen`, see "Bytecode and the slot
+machine"), never in this enum - see "Non-goals" for why. If/when the operator surface grows back,
+keep specializing at bytecode codegen time rather than in this enum, for the same "write every pass
+once" reason.
 
 ### Where compile-time folding lives
 
-Losing `ShiftR`/`BitAnd` etc. as runtime ops would have silently regressed `constants_test` (which
-only reaches them via a fully compile-time-constant table lookup, not a genuine circuit input) if
-nothing replaced them. `frontend/fold.rs::fold_binary` evaluates the eight removed operators when
-both operands are already `Op::Constant`, using the exact same arithmetic the old interpreter used
-to apply at runtime (lifted verbatim, not reimplemented, so `constants_test`'s witness doesn't
-silently change). This is deliberately narrow - it does not fold `Add`/`Sub`/`Mul` (that's a
+`constants_test` reaches `ShiftR`/`BitAnd`/etc. only via a fully compile-time-constant table lookup,
+never a genuine circuit input, so those operators still need to fold to a concrete value even though
+they have no runtime `Op` variant. `frontend/fold.rs::fold_binary` evaluates the eight removed
+operators when both operands are already `Op::Constant`. This is deliberately narrow - it does not
+fold `Add`/`Sub`/`Mul` (that's a
 separate, larger, semantics-preserving optimization that belongs under `passes/` once that
 infrastructure exists, not bundled into this correctness fix) and it only fires inside
 `handle_compute_bucket`, before a node is ever pushed - it is not a graph-rewrite pass.
@@ -112,12 +104,7 @@ without turning into a general constant-folding pass over the graph.
 
 ### `Op::Load`, `Op::LoadSubCmp`, `Op::StoreSubCmp` do not exist
 
-In the old model these were real ops: `Load` was an identity copy (a variable read that allocated
-a fresh wire pointing at an existing one), and `LoadSubCmp`/`StoreSubCmp` were placeholders for a
-subcomponent's input/output ports, resolved by a later pass that chased through the placeholder
-chain and deleted them (`load_elimination`).
-
-In the value-graph model these are pure aliasing and don't need a node at all:
+A variable read or a subcomponent port reference is pure aliasing and doesn't need a node at all:
 - **Variable reads** are a `HashMap` lookup (`var_to_value` in `frontend/build.rs`) — the read
   returns the `ValueId` that was last stored, no new node.
 - **Subcomponent ports** are resolved once, at inlining time, by `frontend/inline.rs` (see below) —
@@ -126,12 +113,10 @@ In the value-graph model these are pure aliasing and don't need a node at all:
 ## Frontend (`src/frontend/`)
 
 `build.rs` walks one template's circom bucket instructions (`Instruction::{Value,Load,Store,
-Compute,...}`) and produces a `TemplateGraph` — a **not-yet-inlined** per-template graph. The
-biggest structural change from the old `GraphCompiler`: `handle_inst` and its callees **return**
-the `ValueId` an instruction produces, instead of pushing a node and having the caller peek at
-"whatever was pushed most recently" (the old code's `peek_wire()` convention). Returning values
-directly is what let `Op::Load` disappear — a variable read just returns the stored `ValueId`,
-no node needed.
+Compute,...}`) and produces a `TemplateGraph` — a **not-yet-inlined** per-template graph.
+`handle_inst` and its callees **return** the `ValueId` an instruction produces, rather than pushing
+a node and having the caller peek at "whatever was pushed most recently" - a variable read just
+returns the stored `ValueId` directly, so `Op::Load` never needs to exist.
 
 A `TemplateGraph` node's op is `TemplateOp`, a superset of `ir::Op` with four placeholder variants
 that only make sense before inlining:
@@ -148,16 +133,8 @@ per-template pass (not a separate graph-level pass — see "Non-goals" below for
 ### Inlining (`frontend/inline.rs`)
 
 `inline_template` recursively flattens the `TemplateGraph` tree (main, plus every subcomponent it
-instantiates, transitively) into one `ir::Graph`. It replaces `CircomAST::inline_subgraph` from the
-old `circom_ir/types.rs`.
-
-The old version shifted raw `Wire` numbers by a running `outer_offset` as subgraphs were spliced
-into a shared flat array, with a placeholder `Op::Load` node standing in for every cross-template
-reference until `load_elimination` chased through it later. That two-phase approach (materialize a
-placeholder now, resolve it in a separate pass later) is unnecessary once there's no placeholder
-op to materialize in the first place: this version resolves every cross-template reference
-*at inlining time*, via a handful of maps that carry already-resolved `ValueId`s across the
-recursion:
+instantiates, transitively) into one `ir::Graph`, resolving every cross-template reference *at
+inlining time*, via a handful of maps that carry already-resolved `ValueId`s across the recursion:
 
 - `sub_cmp_inputs[instance][port]` — the value stored into a subcomponent instance's input port,
   filled in as `SubCmpInput` nodes are processed at the *caller's* level.
@@ -168,25 +145,18 @@ recursion:
 - `local_remap[local_node_index]` — the resolved outer `ValueId` for each of this template's own
   nodes, so `Real` ops can translate their locally-indexed inputs into globally-valid ones.
 
-**A correctness improvement found during the port:** the old code only resolved "read my own
-already-written signal" correctly for `main`, because its flat node list happened to interleave
-writes before reads at runtime by construction. A *nested* subcomponent reading back its own output
-signal would panic in the old code (`input_mapping` only ever held entries for input ports, not a
-subcomponent's own output writes). This version checks `local_writes` first, uniformly, regardless
-of nesting level, so both cases work the same way. This was verified by re-enabling `mux1_1`,
-`binsum_test`, `binsub_test`, `lessthan`, `sum_test`, and `constants_test` in `tests/circom_ir.rs`
-— all exercise real sub-component nesting and were never runnable before (they were commented out).
+A template's own signal reads resolve through `local_writes` first, uniformly regardless of nesting
+level - so a *nested* subcomponent reading back its own already-written output signal (not just
+`main`) resolves the same way.
 
-**A second correctness gap found and fixed while adding precomputation support:** a subcomponent
-whose outputs are never read via `SubCmpOutput` was never inlined at all — nothing in
-`inline_template` visited it unless some `SubCmpOutput` reference forced it, so none of its signals
-ever reached `outputs`, silently leaving them `0` in the witness. This blocks any subcomponent that
-declares no outputs (`TACEO_PRECOMPUTATION_AliasCheck` is exactly this shape) but is otherwise
-latent for any pure-constraint subcomponent. Fixed by a trailing pass at the end of
-`inline_template`: after the main node loop, every `sub_graphs` entry still `Some` (i.e. never
-claimed by the `SubCmpOutput` arm) is inlined anyway. This is topologically sound because every such
-subcomponent's inputs were necessarily already resolved earlier in the same loop (by the
-`SubCmpInput` arm) - nothing about *reading* its outputs was required to *write* its inputs.
+A subcomponent whose outputs are never read via `SubCmpOutput` still needs inlining - nothing else
+in `inline_template` would visit it, and its signals would otherwise never reach `outputs`, silently
+leaving them `0` in the witness. This matters for any subcomponent declaring no outputs at all
+(`AliasCheck` is exactly this shape) as well as any pure-constraint subcomponent nothing reads from.
+A trailing pass at the end of `inline_template` inlines every `sub_graphs` entry still `Some` after
+the main node loop (i.e. never claimed by the `SubCmpOutput` arm). This is topologically sound
+because every such subcomponent's inputs were necessarily already resolved earlier in the same loop
+(by the `SubCmpInput` arm) - nothing about *reading* its outputs was required to *write* its inputs.
 
 ## Pass infrastructure (`src/passes/`)
 
@@ -211,9 +181,9 @@ first consumer, splitting a secret `Mul` into its local part, a singleton round,
 result); `rewrite` owns the old-to-new remap and fixes up `outputs`, so a pass can never accidentally
 produce a forward reference - the exact bug class that would otherwise be easy to introduce in this
 IR, since a node's `ValueId` doubles as its position and deleting or replacing any node shifts every
-later reference. `Graph::gc` (dead code elimination) predates `rewrite` and keeps its own
-hand-written reverse-liveness sweep instead - it's a liveness walk, not a node-for-node rewrite, so
-the same abstraction doesn't fit it - but its remap type is shared. Two later passes hit the same
+later reference. `Graph::gc` (dead code elimination) keeps its own hand-written reverse-liveness
+sweep rather than going through `rewrite` - it's a liveness walk, not a node-for-node rewrite, so
+the same abstraction doesn't fit it - but its remap type is shared. Two other passes hit the same
 "doesn't fit `rewrite`" wall for a different reason (merging several existing nodes into one, or
 eliding a node whose need isn't known until later, both change *which* original ids get a new
 counterpart at all, not just what each one looks like) and follow `gc`'s precedent instead of
@@ -226,9 +196,9 @@ real `Graph::rewrite` consumer: it folds `Add`/`Sub`/`Mul` when both operands ar
 `0`). This is a different, broader fold from the two pre-existing ones and doesn't replace either:
 `frontend/fold.rs::fold_binary` folds the *removed* operators (`Div`, `ShiftR`, ...) at lowering
 time, before a node ever exists, and `GraphCompiler::eval_constant_node` only folds in
-array/signal/component *address* position. Both predate the pass infrastructure and still exist for
-the reasons documented under "Where compile-time folding lives" above; `const_fold` is the first
-pass that folds `Add`/`Sub`/`Mul` themselves, anywhere in the graph.
+array/signal/component *address* position. Both exist for the reasons documented under "Where
+compile-time folding lives" above; `const_fold` is the first pass that folds `Add`/`Sub`/`Mul`
+themselves, anywhere in the graph.
 
 Three more classical passes round out `O2`, all in the family of "what a flat, control-flow-free
 dataflow DAG over a field actually admits" - LICM, SROA, CFG passes, and vectorization don't apply
@@ -264,8 +234,8 @@ already subsumes vectorization's win - see "Deliberate non-goals"):
 
 `CoCircomCompiler::parse` always returns an MPC-lowered graph - this is not gated by any config
 knob, and there is no plaintext-only end state. This section is the design record for why the
-lowering looks the way it does; see "Non-goals" (below) for why an earlier, deleted version of MPC
-support in this crate had the wrong shape, and why this one doesn't repeat that mistake.
+lowering looks the way it does; see "Non-goals" (below) for why share kind is modeled as an
+external analysis rather than baked into `ir::Op`.
 
 ### The domain lattice
 
@@ -377,16 +347,11 @@ source-compatible by pre-declaring it.
 
 ### The event axis: `passes/mpc/level.rs`
 
-An earlier version of `round_schedule` computed "multiplicative depth" inline, with
-`Op::Precompute`/`Op::PrecomputeResult` **pinned to 0** on the theory that the runtime computed every
-`TACEO_PRECOMPUTATION_*` trace up front, before witness extension started. That assumption was
-recorded here as a risk ("a site whose inputs depended on witness-extension results would violate
-that"). It is not a hypothetical: it is what the merces circuits do as their *main* case, and it was a
-release-mode panic (`round_schedule: input not yet placed`), because a depth-0 node with depth-1 inputs
-makes the depth-bucketed rebuild emit a forward reference.
-
-`passes::mpc::level::network_levels` replaces it. A value's **level** is *how many network events must
-complete before it exists*, an event being either a reshare round or one precomputation batch service:
+`passes::mpc::level::network_levels` computes a value's **level**: *how many network events must
+complete before it exists*, an event being either a reshare round or one precomputation batch
+service. A site's inputs may depend on values produced only partway through witness extension -
+this is what the merces circuits' chained Poseidon2 sites do as their main case - so a site's
+results must sit strictly above its inputs' level, never at the same level:
 
 | Op | Level |
 |---|---|
@@ -394,8 +359,8 @@ complete before it exists*, an event being either a reshare round or one precomp
 | `Add`/`Sub`/`Mul`/`MulLocal`, `Round`, `Precompute` | `max(inputs)` |
 | `RoundResult`, `PrecomputeResult` | `level(input) + 1` |
 
-Charging for a site is simply truthful - all four rep3 `VmDriver::*_traces` gadgets take a `&Network`
-and genuinely communicate, so a site's results are *not* available at the same instant as its inputs.
+Charging for a site is simply truthful - every rep3 `VmDriver::*_traces` gadget takes a `&Network`
+and genuinely communicates, so a site's results are *not* available at the same instant as its inputs.
 
 **One axis, not two.** Rounds and batch services share a counter rather than getting a `(depth, stage)`
 pair, for two reasons that matter more than the one thing it costs:
@@ -434,8 +399,8 @@ one `Opcode::Reshare` that writes straight into the result slots - there is no `
 matching how `Op::PrecomputeResult` also vanishes from the instruction stream (see "Precomputation").
 `vm::Machine::run` executes those against whichever `VmDriver` it's given -
 `vm::driver::plain::PlainDriver` (`Local`/`Share` both `F`; `reshare` is the identity, since nothing
-distinguishes "local" from "shared" once there's only one party - same convention the deleted
-`Interpreter` used) or a real `vm::driver::rep3::Rep3Driver` (behind the `rep3` feature: `Share =
+distinguishes "local" from "shared" once there's only one party) or a real
+`vm::driver::rep3::Rep3Driver` (behind the `rep3` feature: `Share =
 Rep3PrimeFieldShare<F>`, `Local = F`, `reshare` a genuine `rep3::arithmetic::reshare_vec` network
 round). Since `CoCircomCompiler::compile` always lowers, this makes every existing golden-witness KAT
 (`tests/circom_ir.rs`) a correctness test for the lowering and codegen both, not just the frontend and
@@ -462,16 +427,14 @@ This is also the point where this crate first gains a real dependency on `mpc-co
 a default-on `rep3` Cargo feature (`vm::driver::rep3`, `vm::gadgets`' rep3-side functions). Disabling
 it (`--no-default-features`) drops `mpc-core`/`mpc-net` (and the `swanky`/`fancy-garbling` dependency
 tree they pull in for OT-related gadgets this crate never uses) entirely, leaving a fast-building,
-plain-only compiler in which **all five precompute gadgets work** - every plain path is this crate's own
-field arithmetic. That was not true while `vm::gadgets::poseidon2` wrapped mpc-core's hasher (a
-`TACEO_PRECOMPUTATION_Poseidon2` site was then a runtime error naming the missing feature); deriving the
-trace from the circuit instead removed the last plain-path dependency, and `mpc_core::gadgets` is now
-unreferenced crate-wide. `tests/rep3_vm.rs` and `tests/proving.rs` are `#![cfg(feature = ...)]`-gated so
-the plain-only configuration builds its whole test suite too, not just the library.
+plain-only compiler in which **all five precompute gadgets work** - every plain path is this crate's
+own field arithmetic, with no dependency on `mpc_core::gadgets` at all. `tests/rep3_vm.rs` and
+`tests/proving.rs` are `#![cfg(feature = ...)]`-gated so the plain-only configuration builds its
+whole test suite too, not just the library.
 
 A third feature, non-default `proving`, adds `co-circom-types` for `vm::witness` - see "Proving" below.
 
-### Three banks, not the doc's original "public/arithmetic-share/binary-share" guess
+### Three banks: `Public`, `Shared`, `Local`
 
 | Bank | Domain | `PlainDriver` | `Rep3Driver` |
 |---|---|---|---|
@@ -569,12 +532,12 @@ correct on any topological order, so that early return stays safe and needed no 
 *propose* the grouping; the check disposes of a bad one with a real error - the same posture as the
 `Local`-escape assertion above. Analysis proposes, check disposes.
 
-This replaces a much blunter rule: codegen used to require every value feeding an `Op::Precompute` to be
-a bare `Op::Input`/`Op::Constant`, because the precompute phase ran once, up front. That rejected an
-entire *class of circuit shape*; the anchor check can only fire on a graph whose node order contradicts
-its own level structure - i.e. a compiler bug or a hand-built graph. Two narrower errors remain: a site
-reading a `Local` (un-reshared `MulLocal`) value, which `Graph::verify` also rejects structurally; and
-nothing else - a `Public`-bank site input is now legal (see "Precomputation").
+A value feeding an `Op::Precompute` may be any node the graph's level structure places before the
+batch's anchor - not only a bare `Op::Input`/`Op::Constant` - so a site's inputs can themselves be
+computed. The anchor check can only fire on a graph whose node order contradicts its own level
+structure, i.e. a compiler bug or a hand-built graph. Two narrower errors remain: a site reading a
+`Local` (un-reshared `MulLocal`) value, which `Graph::verify` also rejects structurally; and nothing
+else - a `Public`-bank site input is legal (see "Precomputation").
 
 ### `Machine::run` (`vm/machine.rs`)
 
@@ -586,9 +549,8 @@ inputs into their banks, executes the instruction stream (a plain `match` over `
 linear ops straight to the driver, `Reshare` to `program.rounds[instr.a]`'s operand/result slot ranges,
 and `Precompute` to `run_batch` for `program.precompute_batches[instr.a]` - **interleaved**, at each
 batch's own point in the stream rather than in an up-front phase), then builds the final signal array
-(index 0
-= the reserved constant-`1` signal, matching the deleted `Interpreter`'s convention; every genuine
-`SignalIdx` `s` lands at `s + 1`) from `stores` plus - since a circuit's own top-level inputs are
+(index 0 = the reserved constant-`1` signal; every genuine `SignalIdx` `s` lands at `s + 1`) from
+`stores` plus - since a circuit's own top-level inputs are
 never `graph.outputs()` entries (see "Precomputation" for why: only a *nested* subcomponent's own
 input signal is) - directly from the caller-supplied `inputs`, and returns
 `signal_to_witness.iter().map(|&i| signals[i])`.
@@ -599,8 +561,8 @@ input signal is) - directly from the caller-supplied `inputs`, and returns
 **uniformly** shared, one entry per witness position in circom's order, position 0 the reserved constant
 `1`. co-snarks' `SharedWitness { public_inputs, witness }` instead splits that into a cleartext prefix and
 a secret-shared remainder, so the conversion is one batched open of the prefix and a move of the rest.
-Not the plain `From` impl this section once anticipated: opening is a real network operation, which is why
-`VmDriver` gained an `open` method (identity for `PlainDriver`, `rep3::arithmetic::open_vec` for
+Opening is a real network operation, which is why `VmDriver` has an `open` method (identity for
+`PlainDriver`, `rep3::arithmetic::open_vec` for
 `Rep3Driver`). It is the only `VmDriver` method `Machine::run` never calls - witness extension has nothing
 to reveal.
 
@@ -638,51 +600,32 @@ fixed 16-byte record per instruction (`u8` opcode + 3 bytes padding + three `u32
 one genuinely *staged* (two same-kind batches at different levels, so the format change below is covered
 by more than a single-batch program).
 
-`VERSION` is **2**. Staged precomputation was not a backwards-compatible addition: a v1 program carries a
-batch table but no `Opcode::Precompute` instruction, because v1's semantics were "the machine runs every
-batch up front". A current `Machine::run` reading a v1 program would silently service zero batches and
-return a plausible-looking wrong witness, so the version check in `read` is the only thing between an old
-artifact and a bad answer - which is why the constant moved in the same commit as the opcode. Site inputs
+`VERSION` is **2**. A version-1 program carries a batch table but no `Opcode::Precompute`
+instruction - it assumes a machine that services every batch up front, which the current
+`Machine::run` does not do. Reading a version-1 program under today's interleaved semantics would
+silently service zero batches and return a plausible-looking wrong witness, so the version check in
+`read` is the only thing between an old artifact and a bad answer. Site inputs
 are also now encoded `(bank, slot)` like `stores`, since a site input may be a `Public` slot.
 
-## Precomputation (`TACEO_PRECOMPUTATION_*`)
+## Precomputation
 
-Circuits can wrap a gadget in a template named `TACEO_PRECOMPUTATION_<Name>` (see
-`circuits/libs/taceo/precomputations.circom` for the four merces uses: `Poseidon2`, `Num2Bits`,
-`IsZero`, `AliasCheck`) to mark it as a site the *runtime* computes out-of-band and injects, rather
-than something this compiler has to execute. This cuts a subtree this compiler cannot compile at
-all - `poseidon2_constants.circom`'s round-constant-table functions (`Instruction::Call`), `IsZero`'s
-field inversion (`Div`), and `Num2Bits`' bit extraction (`ShiftR`/`BitAnd`) are all *inside* wrapped
+`frontend/build.rs::handle_create_cmp_bucket` recognizes five gadget templates by name -
+`Poseidon2`, `Num2Bits`, `IsZero`, `IsEqual`, `AliasCheck` - wherever one is instantiated, and cuts
+it into a site the *runtime* computes out-of-band and injects, rather than compiling its body. This
+is unconditional: it fires on the instantiated template's name regardless of what wraps it, and an
+unrecognized name simply compiles as an ordinary template. `circuits/libs/taceo/precomputations.circom`
+defines `TACEO_PRECOMPUTATION_<Name>` wrapper templates purely as a circom-side naming convention for
+callers who want one - the compiler itself has no notion of a "wrapper"; a wrapper's body
+(`out <== Gadget(...)(in);`) instantiates the gadget just like a bare call would, and recognition
+fires the same way either time.
+
+Recognizing these five gadgets cuts a subtree this compiler cannot compile at all -
+`poseidon2_constants.circom`'s round-constant-table functions (`Instruction::Call`), `IsZero`'s
+field inversion (`Div`), and `Num2Bits`' bit extraction (`ShiftR`/`BitAnd`) are all *inside* these
 components, so cutting the subtree makes them irrelevant rather than blocking, without implementing
-function calls or re-adding removed operators.
-
-### Two config knobs, because a wrapper and a gadget don't always come as a pair
-
-Real circuits do not line up neatly with the set of gadgets a compiler happens to implement, in either
-direction. `CompilerConfig` has one knob per direction, **both defaulting to today's behaviour** so no
-existing caller changes meaning, and both set explicitly by `tests/merces.rs`, `examples/merces.rs` and
-the benches - which documents in each of those exactly which leniency the merces circuits depend on.
-
-- **`UnknownPrecomputeGadget`** (default `Error`) - a wrapper naming a gadget with no implementation
-  behind it. `Warn` logs which gadget/wrapper/line, then compiles the wrapped body like any ordinary
-  template. The insight is that a wrapper marks an *opportunity* to accelerate, not a requirement: a
-  compiler with no gadget for it can still emit a correct circuit and lose only speed, which the warning
-  surfaces. `merkle_root_4.circom`'s `TACEO_PRECOMPUTATION_Arity4CMux` is exactly this - and its body is
-  pure `Add`/`Sub`/`Mul`, so compiling it is *better* than a bespoke gadget would be, because
-  `round_schedule` then batches its multiplications automatically.
-- **`BareGadgetDetection`** (default `Off`) - the mirror: a recognized gadget instantiated with *no*
-  wrapper. `On` cuts it into a site anyway. Needed because `merkle_root_4.circom` calls `IsEqual()` bare,
-  and `IsEqual` reduces to `IsZero`, which needs field inversion, `!=`, and a branch on a secret
-  condition - none expressible in an `Add`/`Sub`/`Mul`-only `ir::Op`, so there is no "compile it instead"
-  fallback available. Off by default because this is a **semantic** change, not just a performance one: a
-  gadget the circuit author wanted constrained in-circuit becomes serviced out-of-band.
-
-Both triggers share one resolution path in `handle_create_cmp_bucket`, checked wrapper-first so a wrapped
-gadget never also takes the bare arm and creates the site twice.
-
-**The point of both: no vendored circuit is patched.** `circuits/merces/` and `circuits/libs/` are
-byte-identical to upstream, which is what keeps them a meaningful compile target rather than a fork that
-drifts.
+function calls or re-adding removed operators. **No vendored circuit is patched** -
+`circuits/merces/` and `circuits/libs/` are byte-identical to upstream, which is what keeps them a
+meaningful compile target rather than a fork that drifts.
 
 The co-snarks MPC witness-extension VM has its own version of this convention
 (`circom-mpc-vm/src/mpc_vm.rs`: once a component whose name starts with `TACEO_PRECOMPUTATION` has
@@ -691,19 +634,14 @@ all its inputs bound, its wrapped component's body is never run - a caller-suppl
 and merces (`~/repos/merces`, `crates/merces-core/src/circom_proof/cosnark.rs`) computes those traces
 by hand, one MPC protocol operation at a time, specifically so witness extension doesn't pay a network
 round per Poseidon2 call. **This crate's own VM does not keep that contract** - see "Sites are typed,
-not opaque" below for what replaced it and why.
+not opaque" below for what it does instead and why.
 
 ### Sites are typed, not opaque
 
-`ir::PrecomputeKind` (`Poseidon2 { t }`, `Num2Bits { n }`, `IsZero`, `IsEqual`, `AliasCheck`) replaces an
-earlier design where `PrecomputeSite` only carried the wrapped template's plain `name: String` - the
-runtime had no way to know what a site actually computes beyond a caller-supplied provider function
-(`interpreter::PrecomputeProvider`, since deleted along with the interpreter). `frontend/build.rs::
-handle_create_cmp_bucket` resolves the kind once, from the wrapped template's name and arity, at the
-same point it already peeks `templates` for `name`/`header`/`number_of_inputs`/`number_of_outputs`;
-an unrecognized name is a typed `Unsupported::PrecomputeGadget` error there, naming the gadget, rather
-than an opaque site nothing downstream could ever service (or a warning and a fall-through - see the two
-config knobs above).
+`ir::PrecomputeKind` (`Poseidon2 { t }`, `Num2Bits { n }`, `IsZero`, `IsEqual`, `AliasCheck`) tells the
+runtime what a site actually computes. `frontend/build.rs::handle_create_cmp_bucket` resolves the kind
+once, from the instantiated template's name and arity, at the same point it already peeks `templates`
+for `name`/`header`/`number_of_inputs`/`number_of_outputs`.
 
 `IsEqual` is a thin wrapper over the `IsZero` gadget rather than a separate implementation, because
 circomlib's `IsEqual` literally is one (`in[1] - in[0] ==> isz.in`). The subtraction is a free local op,
@@ -736,26 +674,26 @@ signal_span_matches_independent_total`) doesn't let it skip. `IsEqual` is exactl
 (`[out, isz.out, isz.in, isz.inv]` - its own output plus the whole `IsZero` subtree, skipping the site's
 two inputs).
 
-**`Poseidon2` now has a closed form too**, which it did not while the trace came from a vendored index
-table - see "Poseidon2 traces" below. That matters beyond tidiness: `frontend/inline.rs`'s cross-check
-turns a mis-derived width into a compile-time panic naming both numbers, instead of a silently wrong
-witness.
+`Poseidon2` also has a closed form, derived from `circuits/libs/taceo/poseidon2.circom`'s own signal
+layout - see "Poseidon2 traces" below. `frontend/inline.rs`'s cross-check turns a mis-derived width
+into a compile-time panic naming both numbers, instead of a silently wrong witness.
 
 ### Result slots: a compile-time-resolved destination, not a positional list
 
-The wrapped *inner* component (e.g. `Poseidon2`, not the wrapper `TACEO_PRECOMPUTATION_Poseidon2`) is
-still the site, at signal offset `o` with `num_inputs`/`num_outputs`/`num_intermediates`, and circom's
-own layout is still `[outputs at o][inputs at o+num_outputs][intermediates + subtree at
-o+num_outputs+num_inputs]` - inputs are bound normally by the wrapper, slots `0..num_outputs` map to
-signals `o..o+num_outputs`, slots `num_outputs..` to signals `o+num_outputs+num_inputs..`. What
-changed is *how* a slot gets its value: co-snarks' VM takes a `Vec<ComponentAcceleratorOutput>` the
-caller supplies **in site order**, one entry per site, and writes `result.intermediate.len()` values
-starting at each site's intermediate region (not necessarily the region's full remaining span - see
-"Known gaps" for what this leniency turned out to matter for). This compiler's codegen resolves every
-site's destination once, at compile time (`site_result_base[site] + slot`, a fixed, non-recycled
+The recognized gadget component (e.g. `Poseidon2`, whether or not something wraps it) is the site, at
+signal offset `o` with `num_inputs`/`num_outputs`/`num_intermediates`, and circom's own layout is
+`[outputs at o][inputs at o+num_outputs][intermediates + subtree at o+num_outputs+num_inputs]` -
+inputs are bound normally by whatever calls the gadget, slots `0..num_outputs` map to signals
+`o..o+num_outputs`, slots `num_outputs..` to signals `o+num_outputs+num_inputs..`. Contrast with
+co-snarks' VM, which takes a `Vec<ComponentAcceleratorOutput>` the caller supplies **in site
+order**, one entry per site, and writes `result.intermediate.len()` values starting at each site's
+intermediate region (not necessarily the region's full remaining span - see "Known gaps" for what
+this leniency turned out to matter for). This compiler's codegen instead resolves every site's
+destination once, at compile time (`site_result_base[site] + slot`, a fixed, non-recycled
 `Shared`-bank slot range - see "Bytecode and the slot machine") - there is no positional list for a
-caller to get out of order, and no `PrecomputeProvider`-style injection point: codegen groups sites into
-`PrecomputeBatch`es and `Machine::run_batch` calls the *driver's* matching gadget method
+caller to get out of order, and no injection point a caller supplies a provider through: codegen
+groups sites into `PrecomputeBatch`es and `Machine::run_batch` calls the *driver's* matching gadget
+method
 (`VmDriver::poseidon2_traces`/`num2bits_traces`/`is_zero_traces`/`is_equal_traces`/`alias_check_traces`,
 `vm/driver/mod.rs`) once per batch. This is exactly the batching merces performs by hand per protocol
 operation (`Poseidon2::precompute_rep3(num_poseidon, ...)`), now derived by the compiler for the whole
@@ -772,8 +710,7 @@ A site input may live in the `Public` bank, not only `Shared`: a circuit can pas
 `circuits/merces/oblivious_vector/hash.circom` does
 (`TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()])` - two of those four fold to
 `Op::Constant`). `PrecomputeBatch::input_slots` therefore carries `SiteInput { bank, slot }` and
-`run_batch` promotes a `Public` slot before handing the batch to the driver. Codegen once rejected this
-outright, which blocked `Commit1` and so every merces circuit, independently of staging.
+`run_batch` promotes a `Public` slot before handing the batch to the driver.
 
 `vm::gadgets` (plain unconditionally, rep3 behind the `rep3` feature) implements all five kinds, all of
 them this compiler's own field arithmetic: `aliascheck` generalizes merces'
@@ -784,22 +721,17 @@ merces zero-pads (see "Sites are typed, not opaque" above); `isequal` delegates 
 A batch's per-site result count may be **shorter** than the site's reserved capacity - `Machine::
 precompute` writes only a prefix of each site's slots (per site, not a flat prefix of the whole
 batch, which would spill one site's results into the next site's region) and leaves the rest at
-their zero default, mirroring the real co-snarks VM behavior discovered while chasing the Poseidon2
-mismatch above.
+their zero default, mirroring the real co-snarks VM's own behavior.
 
 Sites are numbered in the order encountered during inlining (deterministic single-threaded
-traversal); this ordering has no runtime significance any more (unlike the deleted positional-list
-contract) beyond being a stable, arbitrary key for grouping into batches.
+traversal); this ordering has no runtime significance beyond being a stable, arbitrary key for
+grouping into batches.
 
 ### Poseidon2 traces: derived from the circuit, not from an index table
 
-`vm::gadgets::poseidon2` computes the signals `circuits/libs/taceo/poseidon2.circom` actually declares.
-It previously wrapped mpc-core's `CircomTracePlainHasher`/`CircomTraceBatchedHasher`, whose
-`WITNESS_INDICES_T{2,3,4,16}` tables target a witness layout this vendored circuit does not produce at any
-simplification level this compiler can run. The symptom was diagnostic: the permuted state matched a real
-circom witness byte for byte while every trailing trace value diverged - correct Poseidon2 math, wrong
-layout. That was a long-standing known gap; it is now fixed and `precomputation_poseidon2_test` passes in
-both `tests/circom_ir.rs` and `tests/rep3_vm.rs`.
+`vm::gadgets::poseidon2` computes the signals `circuits/libs/taceo/poseidon2.circom` actually declares,
+for every width the circuit defines (`t ∈ {2,3,4,8,12,16}`), with no dependency on any vendored index
+table. `precomputation_poseidon2_test` passes in both `tests/circom_ir.rs` and `tests/rep3_vm.rs`.
 
 **The layout rule, which is the load-bearing discovery.** circom lays out each component as
 `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and
@@ -836,10 +768,6 @@ unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp` 
 mpc-core only ever needed `x⁵`. Total per batch: `3 + (8 + partial_rounds(t))` rounds - 67 for
 `t ∈ {2,3,4}`, 68 for `t ∈ {8,12,16}` - **independent of the number of sites**.
 
-Two wins beyond the bug fix: it supports `t ∈ {2,3,4,8,12,16}` (every width the circuit defines, where the
-table covered only `{2,3,4,16}`), and it removed the last `mpc-core` dependency from any gadget's plain
-path.
-
 The 22 constant tables in `vm/gadgets/poseidon2_constants.rs` are transcribed verbatim from
 `poseidon2_constants.circom`, and a unit test re-extracts the hex from that circuit file at test time and
 asserts equality - so they cannot silently drift from the circuit they describe.
@@ -868,39 +796,32 @@ silently dropping a "dead" site would desynchronize every later same-kind site's
 
 ### Frontend (`frontend/build.rs`, `frontend/inline.rs`)
 
-The prefix marks the *wrapper* template, not the component a `CreateCmpBucket` instantiates - each
-wrapper's body is exactly one line (`out <== Gadget(...)(in);`), so `GraphCompiler::
-handle_create_cmp_bucket` checks `self.code.name` (the template currently being compiled) against
-the prefix, not the newly-instantiated symbol's name. When it matches (and
-`CompilerConfig::precomputation` is `Extract`, the default), the wrapped component's body is never
-compiled: its `TemplateCodeInfo` is only *peeked* (never removed from the shared `templates` map,
-unlike a normally-compiled template - a precomputed template is never inserted into
-`compiled_graphs` either, precisely so every repeated instantiation keeps going through this same
-peek instead of the removed-on-first-compile path) for its `name`/`header`/`number_of_inputs`/
-`number_of_outputs`. `name` is resolved to a `PrecomputeKind` right here (`Poseidon2 { t: num_inputs
-}`, `Num2Bits { n: num_outputs }`, `IsZero`, `AliasCheck`, or the typed `Unsupported::
-PrecomputeGadget` error for anything else - see "Sites are typed, not opaque" above), and a
+`GraphCompiler::handle_create_cmp_bucket` checks the *instantiated* template's name - the symbol a
+`CreateCmpBucket` creates, never the enclosing template - against the five recognized gadget names.
+When it matches, the component's body is never compiled: its `TemplateCodeInfo` is only *peeked*
+(never removed from the shared `templates` map, unlike a normally-compiled template - a recognized
+gadget's template is never inserted into `compiled_graphs` either, precisely so every repeated
+instantiation keeps going through this same peek instead of the removed-on-first-compile path) for
+its `name`/`header`/`number_of_inputs`/`number_of_outputs`. `name` is resolved to a `PrecomputeKind`
+right here (`Poseidon2 { t: num_inputs }`, `Num2Bits { n: num_outputs }`, `IsZero`, `IsEqual`,
+`AliasCheck`, or `None` for anything else, which falls through to the normal compile path), and a
 `SubGraphInstance::Precomputed` carrying it is pushed instead of a compiled one.
 `frontend/inline.rs::inline_precomputed` then does the three things "IR shape" above describes, plus
 one more: it cross-checks `kind.expected_results()` against the real `num_outputs +
 num_intermediates` for every kind with a closed form (a mismatch is a compile-time panic, not a
 silently wrong witness).
 
-`PrecomputationMode::Inline` (config knob, default `Extract`) disables all of this, compiling the
-wrapped body like any other template - useful for plaintext comparison, and expected to fail with
-the same typed errors the gadget would hit unwrapped.
-
 One indexing subtlety worth recording: `TemplateOp::SubCmpInput`/`SubCmpOutput`'s `port` is the
-wrapped component's own *local signal index*, which - like every template - numbers outputs first,
+gadget component's own *local signal index*, which - like every template - numbers outputs first,
 then inputs (matching `TemplateOp::LocalSignal`/`LocalSignalWrite`). So input `k` of the site lives
 at local signal `num_outputs + k`, not at `k` directly; only the output side is directly `0..
-num_outputs`. This is easy to get backwards (it was, once, while landing this) since the two look
-symmetric until you check where the actual bucket-level indices land.
+num_outputs`. This is easy to get backwards since the two look symmetric until you check where the
+actual bucket-level indices land.
 
 ### The signal-span problem (`frontend/mod.rs::compute_signal_spans`)
 
-`num_intermediates` (the wrapped component's own locally-declared signals *plus* every signal
-belonging to everything it transitively instantiates) is the one quantity not sitting in a
+`num_intermediates` (a recognized gadget component's own locally-declared signals *plus* every
+signal belonging to everything it transitively instantiates) is the one quantity not sitting in a
 directly-usable field anywhere reachable from this crate. circom itself computes exactly this
 (`constraint_generation::execution_data::executed_program::produce_dags_stats`, over its internal
 `DAG`), but `circom_constraint_generation::build_circuit`'s public return type only exposes a
@@ -945,6 +866,8 @@ witness compaction on this fork. This is *not* the same level the rest of `tests
 (`O2(usize::MAX)`, unaffected since those circuits have no precomputation sites whose layout is
 compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comment.
 
+## Known gaps
+
 - **Only `Add`/`Sub`/`Mul` are supported at runtime.** Every other circom operator is a typed
   `Unsupported::Operator`/`NonConstantOperator` error (see "`Op<F>` is deliberately narrow" above).
   This is a large, deliberate step back in coverage, made to keep the runtime core small while pass
@@ -953,48 +876,38 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
   `binsum_test`, `binsub_test`, `lessthan`, `sum_test`, and most of `circuits/`) cannot be saved by
   any amount of compile-time folding.
 
-  **`tests/circom_ir.rs` wires up only the circuits that actually pass.** An earlier revision listed
-  every unsupported fixture as a deliberately-red test, on the theory that the failure list was a
-  self-maintaining worklist; that made `cargo test` permanently red, which cost more than the
-  worklist was worth. The fixtures themselves all remain in `circuits/` and `kats/` - re-enabling one
-  is a single macro line once its blocker is gone - and *this* section is the worklist. Re-adding
+  **`tests/circom_ir.rs` wires up only the circuits that actually pass.** The fixtures themselves
+  all remain in `circuits/` and `kats/` - re-enabling one is a single macro line once its blocker is
+  gone - and *this* section is the worklist. Re-adding
   `Div`/`IntDiv`/`Pow`/`ShiftL`/`ShiftR`/`BitOr`/`BitAnd`/`BitXor` as real ops is the most-requested
   next step; see "Real-world target circuits" below for why the merces circuits themselves no longer
-  block on it (`CompilerConfig::precomputation` routes around it for every wrapped gadget call).
+  block on it (precomputation recognition routes around it for every recognized gadget call).
 - **The two-level-subcomponent-nesting wrong-witness gap is currently masked, not fixed.**
-  `greaterthan`, `greatereqthan`, `lesseqthan`, `mux2_1`, `mux3_1`, `mux4_1` used to compile and run
-  to a wrong witness (nesting a subcomponent inside another nested subcomponent, e.g.
-  `GreaterThan -> LessThan -> Num2Bits`); they now fail earlier, on `Num2Bits`'s `BITAND`, before
-  ever reaching whatever produced the wrong witness. **This is very likely the same underlying bug
-  as the whole-array-copy bug fixed below** (both are about multi-signal data crossing a
-  subcomponent boundary) - re-test these six once shift/bitand return, before assuming the nesting
-  bug is still open.
-- **Two frontend bugs found and fixed while porting real-world circuits (see below):**
-  - `handle_store_bucket`/`handle_load_bucket` used to ignore `StoreBucket`/`LoadBucket`'s
-    `context.size` entirely and always transfer exactly one scalar. A whole-array copy into a
-    subcomponent's input port (`inner.in <== a;`, or any anonymous-component call with an array
-    argument - circom desugars both the same way) silently wrote only the first element, surfacing
-    later as `inline.rs`'s "subcomponent input signal read before it was provided" panic. Fixed:
-    `handle_store_bucket` now branches on `context.size` and does `size` element-wise
-    reads/writes at consecutive addresses (`GraphCompiler::{read,write}_value_at`,
-    `handle_bulk_store_bucket`) when it's greater than one. `SizeOption::Multiple` (a bulk copy
-    spanning more than one component instance) is deliberately still an error, not silently
-    mishandled - not needed by any circuit exercised so far.
-  - `get_constant_value` (used for array/signal/component address computation, not signal values)
-    only recognized the dedicated `MulAddress`/`AddAddress`/`ToAddress` operators plus a directly-
-    resolved `Op::Constant`. Two related gaps surfaced through real circuits: (a) circom sometimes
-    routes address arithmetic through the *plain* `Add`/`Sub`/`Mod` operators instead of the
-    dedicated `*Address` ones - e.g. reverse indexing (`arr[N-1-i]`) and modular round-table
-    indexing (`arr[i % n]`) - now handled by dedicated arms alongside the `*Address` ones; (b) a
-    variable holding a value built via `var = var + 1` (observed as a circom-internal loop-shadow
-    counter kept in lockstep with, but stored separately from, the loop's own induction variable -
+  `greaterthan`, `greatereqthan`, `lesseqthan`, `mux2_1`, `mux3_1`, `mux4_1` (nesting a subcomponent
+  inside another nested subcomponent, e.g. `GreaterThan -> LessThan -> Num2Bits`) fail on
+  `Num2Bits`'s `BITAND`, before reaching whatever else might be wrong two levels down. **This is very
+  likely the same underlying bug as the bulk-copy handling below** (both are about multi-signal data
+  crossing a subcomponent boundary) - re-test these six once shift/bitand return, rather than
+  assuming the nesting bug is closed just because `BITAND` blocks first.
+- **`SizeOption::Multiple`** (a bulk array copy spanning more than one component instance) is a
+  typed `Unsupported::Instruction` error, not silently mishandled - not needed by any circuit
+  exercised so far. `handle_store_bucket`/`handle_load_bucket` do handle a single-instance bulk copy
+  (`inner.in <== a;`, or any anonymous-component call with an array argument), branching on
+  `context.size` to do `size` element-wise reads/writes at consecutive addresses
+  (`GraphCompiler::{read,write}_value_at`, `handle_bulk_store_bucket`).
+- `get_constant_value` (used for array/signal/component address computation, not signal values)
+  resolves the dedicated `MulAddress`/`AddAddress`/`ToAddress` operators, a directly-resolved
+  `Op::Constant`, plain `Add`/`Sub`/`Mod` chains (circom sometimes routes address arithmetic through
+  these instead of the dedicated `*Address` ones - reverse indexing `arr[N-1-i]`, modular
+  round-table indexing `arr[i % n]`), and a variable built via `var = var + 1` (a circom-internal
+  loop-shadow counter kept in lockstep with, but stored separately from, the loop's own induction
+  variable -
     the latter is canonicalized to a fresh `Op::Constant` every iteration by
-    `unroll.rs::add_induction_variable_node`, the former isn't) resolved to a genuine `Op::Add` node
-    rather than a constant, and correctly *is* one at every iteration - `get_constant_value` just
-    never tried to evaluate it. Fixed by `GraphCompiler::eval_constant_node` (see "Where
-    compile-time folding lives" above). Confirmed by direct probing: this unblocked
+    `unroll.rs::add_induction_variable_node`, the former isn't) resolves to a genuine `Op::Add` node
+    that is nonetheless a compile-time constant at every iteration. `GraphCompiler::eval_constant_node`
+    (see "Where compile-time folding lives" above) evaluates it. This is what lets
     `ExternalMatMulT`/`Sbox`/`FullRound`/`PartialRound` (from `@taceo/circom-lib`'s Poseidon2) and
-    both merces server-side mains, which now fail only on the function-call gap below.
+    both merces server-side mains compile at all - they fail only on the function-call gap below.
 - **`Instruction::Branch` is supported only for compile-time-constant conditions.**
   `frontend/build.rs::handle_branch_bucket` folds the condition and lowers just the taken arm, so the
   untaken arm's contents are irrelevant. Real circom needs this constantly: `merkle_root_4.circom`'s
@@ -1009,8 +922,8 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
   A **non**-constant condition remains a clean `Unsupported::Instruction` error, and structurally has
   to: `ir::Op` is only `Add`/`Sub`/`Mul`, so there is no select/mux op to arithmetize a secret-dependent
   branch into. Supporting it means re-adding the operator surface, not extending that function. This is
-  what `IsZero`'s `inv <-- in!=0 ? 1/in : 0` hits, and why `BareGadgetDetection` (see "Precomputation")
-  rather than branch support is what unblocked merces' bare `IsEqual`.
+  what `IsZero`'s `inv <-- in!=0 ? 1/in : 0` hits, and why unconditional gadget recognition (see
+  "Precomputation") rather than branch support is what lets merces' bare `IsEqual` compile.
   `tests/frontend.rs::non_constant_branch_condition_is_a_typed_error` pins the error path;
   `control_flow` in `tests/circom_ir.rs` pins the folded path against a golden witness.
 - `Instruction::Call`/`Return` (unconstrained functions) remain entirely unimplemented - a clean
@@ -1019,7 +932,7 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
 - **`SimplificationLevel::O1` panics on this crate's pinned circom fork** (`rev 1cc17fb`):
   `constraint_list::constraint_simplification` hits `attempt to subtract with overflow` on every
   circuit tried at `O1` so far, including trivial ones (`bench_chain.circom`, and every
-  `TACEO_PRECOMPUTATION_*` test circuit) - an upstream bug, not something fixable from this crate.
+  precomputation-gadget test circuit) - an upstream bug, not something fixable from this crate.
   Every test in this repo therefore runs at `O0` or `O2(usize::MAX)`, never `O1` (circom's own
   default), including `tests/mpc_lowering.rs` and the golden-KAT tests below.
 - **Only Poseidon2 `t=3`'s trace *ordering* is verified against a real circom witness**, because that is
@@ -1027,8 +940,7 @@ compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comme
   widths, and plain-vs-rep3 agreement is checked for all six - but merces uses `t=4` and `t=16`, so
   `t=16` is on the critical path resting on an inferred ordering. See "Poseidon2 traces" for exactly
   which inference, and generate `precomputation_poseidon2_t{4,16}_test` fixtures before trusting a
-  `transfer_arity4_batch8` proof. (The *earlier* gap here - mpc-core's index table targeting a layout
-  this circuit doesn't produce - is fixed; see that section.)
+  `transfer_arity4_batch8` proof.
 - **The merces end-to-end proof has not been run against a real zkey.** `tests/proving.rs` proves and
   verifies for real on `multiplier2` with a checked-in 2.5 KB zkey, so the whole path
   (`vm::witness` -> `Rep3CoGroth16::prove` -> `Groth16::verify`) is genuinely covered. But
@@ -1060,16 +972,14 @@ batching: independent products across the 8 slots merge instead of serializing. 
 measures both against `PlainDriver`, where rep3 throughput *improves* from batch1 to batch8 for the same
 reason.
 
-Getting here needed six distinct fixes, four of them recorded above and two of them in this compiler's own
-handling of what a wrapper means:
+Features these circuits are load-bearing for:
 
-1. `round_schedule`'s depth formula (a release-mode panic) - see "The event axis".
-2. Staged precomputation, because these circuits' Poseidon2 sites chain through secret multiplications -
-   see "Precomputation". This is the one the architecture doc previously listed as a *hypothetical* risk.
-3. `Bank::Public` site inputs, for `hash.circom`'s literal gadget arguments.
-4. Constant-condition `Instruction::Branch` - see "Known gaps".
-5. `UnknownPrecomputeGadget::Warn`, for the unrecognized `Arity4CMux` wrapper.
-6. `BareGadgetDetection::On`, for the unwrapped `IsEqual`.
+1. The event axis (`passes/mpc/level.rs`), because these circuits' Poseidon2 sites chain through
+   secret multiplications - see "Precomputation".
+2. `Bank::Public` site inputs, for `hash.circom`'s literal gadget arguments.
+3. Constant-condition `Instruction::Branch` - see "Known gaps".
+4. Unconditional precomputation recognition, for `merkle_root_4.circom`'s unwrapped `IsEqual` call
+   (`Arity4CMux`, unrecognized, compiles as an ordinary template and gets round-batched instead).
 
 Inputs come from `fixtures::merces_server_inputs`: **placeholders**, but ones that satisfy the circuit's
 `===` constraints, which a proof needs even though witness extension does not. See that module's doc for
@@ -1078,8 +988,8 @@ until `scripts/gen-merces-artifacts.sh` has been run - see "Known gaps" for what
 
 ### `transfer_client_compressed` is still out of reach
 
-Unlike the server mains, the client main's blockers are the *deliberately removed operator surface*, which
-no config knob routes around:
+Unlike the server mains, the client main's blockers are the *deliberately removed operator surface*,
+which precomputation recognition cannot route around:
 
 - a bare `IsZero` at `circuits/libs/escalarmulany.circom:143`, reached via `encryption.circom`'s
   `BabyJubJubScalarMulBits` -> `EscalarMulAny(251)`;
@@ -1087,8 +997,9 @@ no config knob routes around:
 - genuine non-constant field `Div` in `circuits/libs/montgomery.circom` (five sites), reached through
   `EscalarMulAny`/`EscalarMulFix`.
 
-`BareGadgetDetection::On` does cut the two `Num2Bits` sites, so the gap is narrower than it was, but
-`montgomery.circom`'s divisions need `Op::Div` to exist. `tests/merces.rs::client_main_is_still_unsupported`
+Unconditional recognition does cut the two `Num2Bits` sites, so the gap is narrower than the operator
+list above suggests, but `montgomery.circom`'s divisions still need `Op::Div` to exist.
+`tests/merces.rs::client_main_is_still_unsupported`
 holds the line: it must fail with a *typed* error, never a panic, and it panics loudly if the circuit ever
 starts compiling so that the test gets promoted rather than quietly rotting.
 
@@ -1100,8 +1011,8 @@ starts compiling so that the test gets promoted rather than quietly rotting.
    compiler-internal small-key map.
 2. **Determinism.** `std::HashMap` is randomly seeded per-process; iterating it produces a
    different order on every run. `FxHashMap` is seedless, so a given input circuit always produces
-   byte-identical compiler output. This matters more than usual here because iteration order over
-   these maps was, in the old code, occasionally used to build the final node sequence.
+   byte-identical compiler output - important here because nothing in this compiler may let a map's
+   iteration order leak into the final node sequence undetected.
 
 Dense, small-integer-keyed tables (share kinds by `ValueId`, future slot assignments) should stay
 plain `Vec`s — a direct index beats hashing, and a map isn't buying anything there.
@@ -1116,88 +1027,39 @@ plain `Vec`s — a direct index beats hashing, and a map isn't buying anything t
   stack-machine VM (`circom-mpc-vm`, see below) pays a real runtime cost for.
 - **No workspace split.** Single crate, restructured modules. Split into crates only once module
   boundaries have stopped moving.
-- **The plain interpreter (`interpreter.rs`, deleted) was a debugging tool, not the product - now
-  that the bytecode VM it was a placeholder for exists, `vm::driver::plain::PlainDriver` (paired with
-  `vm::Machine`) is its replacement and the current KAT oracle.** Same non-goal, same reasoning,
-  different code: don't over-invest in `PlainDriver` either; it exists to be correct and to validate
-  changes, not to be a second product alongside the rep3 driver.
-- **Share kind is an external analysis, never a set of per-op variants - the lesson from the deleted
-  `mpc_ir::Op`, still honored by the ops added in "MPC lowering" above.** An earlier version of this
-  crate had `MpcInterpreter`, `mpc_ir::Op` (a 37-variant share-specialized *mirror* of `ir::Op` -
-  every binary op repeated once per combination of public/arithmetic-share/binary-share operands),
-  `passes/mpc_ir_translation.rs` (the pass that monomorphized one into the other), and the rep3/plain
-  executor abstractions underneath (`mpc/`); all deleted (find them again at commit `5cdc695` if the
-  design needs re-deriving). They were a node-traverser, not a step toward the bytecode VM this
-  compiler is building toward, and kept every IR change synchronized against a 37-variant enum and a
-  9-way share-kind match the eventual VM would never use. **This is not the same shape as
-  `Op::MulLocal`/`Op::Round`/`Op::RoundResult`** (see "MPC lowering" above): those three model round
-  *structure* - a batched network round is inherently multi-output, which this IR forbids regardless
-  of MPC, the same reason `Op::Precompute`/`Op::PrecomputeResult` exist - not share kind. Domain
-  (`Public`/`Shared`/`Local`) stays exactly what the deleted design got right and this one keeps: an
-  external analysis (`passes/mpc/domain.rs`) consulted by a lowering pass, never baked into which `Op`
-  variant a node uses. Reintroducing a `MulSecretPublic`/`AddSecretSecret`-style variant explosion
-  would be repeating the mistake; adding a new *structural* op for a genuinely new multi-output shape
-  (as `Precompute` already established the precedent for) is not.
+- **`vm::driver::plain::PlainDriver` (paired with `vm::Machine`) is the KAT oracle, not a product.**
+  Don't over-invest in it beyond being correct and validating changes; it is not a second product
+  alongside the rep3 driver.
+- **Share kind is an external analysis, never a set of per-op variants.** A 37-variant
+  share-specialized mirror of `ir::Op` (one variant per binary op × per combination of
+  public/arithmetic-share/binary-share operands) is a real trap: it is a node-traverser, not a step
+  toward a bytecode VM, and it keeps every IR change synchronized against both the variant count and
+  a share-kind match the VM never uses. Domain (`Public`/`Shared`/`Local`) is instead an external
+  analysis (`passes/mpc/domain.rs`) consulted by a lowering pass, never baked into which `Op` variant
+  a node uses. **This is not the same shape as `Op::MulLocal`/`Op::Round`/`Op::RoundResult`** (see
+  "MPC lowering" above): those three model round *structure* - a batched network round is inherently
+  multi-output, which this IR forbids regardless of MPC, the same reason `Op::Precompute`/
+  `Op::PrecomputeResult` exist - not share kind. Reintroducing a
+  `MulSecretPublic`/`AddSecretSecret`-style variant explosion would repeat the mirror-enum mistake;
+  adding a new *structural* op for a genuinely new multi-output shape (as `Precompute` already
+  established the precedent for) would not. (An earlier revision of this crate built exactly this
+  mirror-enum shape - `mpc_ir::Op`, `MpcInterpreter`, `passes/mpc_ir_translation.rs` - find it at
+  commit `5cdc695` if this reasoning ever needs re-deriving from the code itself.)
 
 ## Where this is headed (not yet built)
 
-Planned steps, in order (see the original design conversation / PR history for the full writeup if
-this section goes stale):
-
-1. **(done)** Value-graph IR, recursive inliner, `gc`/`verify` replacing the three old cleanup
-   passes.
-2. **(done)** Pass infrastructure: a `Pass` trait, a `PassManager`, an opt-level config
-   (`OptLevel`, `src/passes/mod.rs`) distinct from the existing `SimplificationLevel` (which
-   configures upstream circom constraint simplification, a different knob). See "Pass
-   infrastructure" below.
-3. **(done)** Share-kind specialization as an external analysis over this one IR
-   (`passes/mpc/domain.rs`'s `Domain` lattice), consulted by lowering passes rather than baked into
-   extra `ir::Op` variants - see "MPC lowering" above, and "Non-goals" for why the three ops that
-   *were* added (`MulLocal`/`Round`/`RoundResult`) aren't a reversal of this. A generic
-   `insert_conversions` pass (for `B2A`/`A2B`) is still future work - see "MPC lowering", "Rep3-
-   specific passes" below - since there's no `Binary` domain or conversion op yet to insert.
-   Whatever eventually needs bytecode-codegen-time share-kind dispatch owes it to itself to re-derive
-   the `amount_public_inputs`/wire-bank sizing bugs the old `mpc_interpreter.rs` had (hardcoded
-   `amount_public_inputs = 0`, three full-length wire banks) rather than reintroduce them.
-4. **(done)** Bytecode + the flat-slot-machine VM (`src/vm/`), with linear-scan slot allocation over
-   liveness so VM memory tracks live width, not total node count. See "Bytecode and the slot
-   machine" above.
-5. **(done)** General optimization passes: constant folding (`passes/const_fold.rs`), CSE/GVN
-   (`passes/cse.rs`, a single hash-cons pass as expected), algebraic simplification
-   (`passes/algebraic.rs`, `passes/normalize.rs` + `passes/poly.rs`) - see "Pass infrastructure"
-   above for what each one covers and why a degree-2 extension to `normalize` was rejected rather
-   than built. The narrow, address-position-only fold that predates this (`frontend/fold.rs`,
-   `GraphCompiler::eval_constant_node` - see "Where compile-time folding lives" above) still exists
-   alongside it; see "Pass infrastructure" for why both stay.
-6. Rep3-specific passes, the actual point of all of the above:
-   - **(done)** Round scheduling - `passes/mpc/round_schedule.rs`, batching independent secret
-     multiplications at the same depth into one round. See "MPC lowering" above.
-   - **(done, trivial)** Linear fusion (free ops never cost a round) - not a separate pass; it falls
-     directly out of the domain lattice (`Local`/`Shared` both support free linear ops), so nothing
-     beyond `mul_split`'s domain check was needed to get it.
-   - **Not yet built:** conversion minimization (cancel `B2A(A2B(x))`, sink conversions past free
-     linear ops) and open sinking. Both need `Div`, comparisons, or bitwise ops to exist first - none
-     do (see "Known gaps") - so there's nothing to convert or sink yet; `RoundKind::Open` and a
-     future `Binary` domain are the extension points, deliberately not stubbed out ahead of a real
-     producer. See "MPC lowering" above.
-7. **(done)** Staged precomputation: sites carry a dependency level and batches are serviced *inside* the
-   instruction stream (`Opcode::Precompute`), one driver call per `(kind, stage)`. This is what let the
-   merces server mains compile - their Poseidon2 sites chain through secret multiplications, which the
-   old run-everything-up-front contract could not express. See "The event axis" and "Precomputation".
-8. **(done, partially)** `Instruction::Branch` for compile-time-constant conditions. A non-constant
-   condition still needs the operator surface below; see "Known gaps".
-9. **(done)** Poseidon2 traces derived from the vendored circuit's own signal layout rather than a
-   vendored index table - see "Poseidon2 traces". Also removed the last `mpc-core` dependency from any
-   gadget's plain path.
-10. **(done)** Proving: `vm::witness` converts this VM's native witness into co-snarks'
-    `SharedWitness`, so `co-groth16` can prove over it. See "Proving".
-11. Re-add the operator surface removed in this cut (`Div`, `IntDiv`, `Pow`, `ShiftL`/`ShiftR`,
-    `BitOr`/`BitAnd`/`BitXor`) as real `ir::Op` variants, and implement `Instruction::Call`/`Return` plus
-    non-constant `Branch`. **This is no longer what blocks the merces server mains** - they compile
-    without it, via precomputation plus the two config knobs in "Precomputation". It is what blocks
-    `transfer_client_compressed` (`montgomery.circom`'s non-constant `Div`) and most of the `circuits/`
-    KAT fixtures. Non-constant `Branch` additionally needs a select/mux op to arithmetize into, which
-    does not exist and is a design decision in its own right.
-12. Generate `precomputation_poseidon2_t{4,16}_test` golden KATs with the pinned circom fork, to close the
-    last unverified assumption in the Poseidon2 layout - see "Known gaps". `t=16` is on merces' critical
-    path.
+1. Re-add the operator surface removed in this cut (`Div`, `IntDiv`, `Pow`, `ShiftL`/`ShiftR`,
+   `BitOr`/`BitAnd`/`BitXor`) as real `ir::Op` variants, and implement `Instruction::Call`/`Return`
+   plus non-constant `Branch`. This is not what blocks the merces server mains - they compile without
+   it, via unconditional precomputation recognition (see "Precomputation"). It is what blocks
+   `transfer_client_compressed` (`montgomery.circom`'s non-constant `Div`) and most of the `circuits/`
+   KAT fixtures. Non-constant `Branch` additionally needs a select/mux op to arithmetize into, which
+   does not exist and is a design decision in its own right.
+2. Conversion minimization (cancel `B2A(A2B(x))`, sink conversions past free linear ops) and open
+   sinking. Both need `Div`, comparisons, or bitwise ops to exist first - none do (see "Known
+   gaps") - so there's nothing to convert or sink yet; `RoundKind::Open` and a future `Binary` domain
+   are the extension points, deliberately not stubbed out ahead of a real producer. See "MPC
+   lowering" above.
+3. Generate `precomputation_poseidon2_t{4,16}_test` golden KATs with the pinned circom fork, to close
+   the last unverified assumption in the Poseidon2 layout - see "Known gaps". `t=16` is on merces'
+   critical path.

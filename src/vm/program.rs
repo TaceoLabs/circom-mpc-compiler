@@ -120,9 +120,8 @@ pub struct PrecomputeBatch {
 pub struct InputBinding {
     pub bank: Bank,
     pub slot: u32,
-    /// The circuit's own flat input index (`0..num_inputs`) - the same numbering the deleted
-    /// `Interpreter` took `input_signals` in - not a per-bank ordinal, so a caller doesn't need to
-    /// know how many of the circuit's inputs are public vs secret ahead of time.
+    /// The circuit's own flat input index (`0..num_inputs`) - not a per-bank ordinal, so a caller
+    /// doesn't need to know how many of the circuit's inputs are public vs secret ahead of time.
     pub input_index: u32,
 }
 
@@ -169,10 +168,9 @@ pub struct Program<F: PrimeField> {
     pub num_inputs: usize,
     /// Circuit input `k` lives at signal index `num_outputs + k` (matching
     /// `passes::mpc::domain::signal_domain`'s own convention) - `Machine::run` needs this to copy
-    /// each raw input value into the final signals array directly, the same way the deleted
-    /// `Interpreter` pre-filled its `signals` array from `input_signals` at construction time,
-    /// rather than through a live `Op::Input` node (which may not exist: a circuit input `gc`
-    /// dropped as dead is still a genuine witness entry, just one nothing in the graph reads).
+    /// each raw input value into the final signals array directly, rather than through a live
+    /// `Op::Input` node (which may not exist: a circuit input `gc` dropped as dead is still a
+    /// genuine witness entry, just one nothing in the graph reads).
     pub num_outputs: usize,
     pub num_signals: usize,
     pub slots: SlotCounts,

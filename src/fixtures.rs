@@ -120,9 +120,8 @@ pub fn merces_server_inputs<F: PrimeField>(n: usize, max_depth: usize, seed: u64
 /// Orders `inputs` into the flat `&[F]` `Program::classify_inputs` expects, using the circuit's own
 /// `Graph::input_list` (`(name, start, size)` per input signal) rather than any assumed ordering.
 ///
-/// Errors if a name the circuit declares is missing, or its length disagrees - which is exactly the
-/// failure mode that has bitten `~/repos/merces` itself, where the Rust input maps still emit
-/// snake_case names after the circuits were renamed to camelCase.
+/// Errors if a name the circuit declares is missing, or its length disagrees with what the circuit
+/// expects.
 pub fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -> eyre::Result<Vec<F>> {
     let total = input_list.iter().map(|(_, _, size)| size).sum();
     let mut flat = vec![F::zero(); total];

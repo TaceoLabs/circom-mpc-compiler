@@ -1,29 +1,16 @@
 //! Recursive sub-component inlining: flattens a [`TemplateGraph`] tree (main plus every
 //! subcomponent it instantiates, transitively) into one flat [`ir::Graph`].
 //!
-//! This replaces `CircomAST::inline_subgraph` from `circom_ir/types.rs`. The old version worked
-//! by shifting raw `Wire` numbers by a running `outer_offset` as subgraphs were spliced into a
-//! shared flat array — a placeholder `Op::Load` node stood in for every cross-template reference
-//! (a subcomponent's input port, a subcomponent's output port) until a later `load_elimination`
-//! pass chased through the placeholders and deleted them.
-//!
-//! The value-graph model has no placeholder op to spare (there is no `Op::Load` at all), so this
-//! version resolves every cross-template reference *at inlining time*: a handful of maps carry
+//! Every cross-template reference is resolved *at inlining time*: a handful of maps carry
 //! already-resolved `ValueId`s across the recursion, and nothing is ever pushed to the graph that
-//! isn't a genuine, permanent node. Two small maps are shared with the old code's structure:
-//! `sub_cmp_inputs` (which value was stored into a subcomponent's input port) and the returned
-//! `port_outputs` (which value a subcomponent's output port resolves to, handed back to whichever
-//! caller reads it via `SubCmpOutput`).
+//! isn't a genuine, permanent node (there is no `Op::Load` placeholder to chase through
+//! afterwards). `sub_cmp_inputs` tracks which value was stored into a subcomponent's input port;
+//! the returned `port_outputs` tracks which value a subcomponent's output port resolves to, handed
+//! back to whichever caller reads it via `SubCmpOutput`.
 //!
-//! One correctness note versus the old code: this version also resolves a template's *own*
-//! signal reads (`TemplateOp::LocalSignal`) against its own writes first (`local_writes`),
-//! regardless of nesting level. The old code only did this for nested subcomponents implicitly
-//! (by construction, a nested `Op::Input` always went through `input_mapping`); a template reading
-//! back its own already-computed output signal only worked for `main` because the old flat
-//! node list happened to interleave the write before the read at runtime. Resolving through
-//! `local_writes` directly is simpler and correct at every nesting level, including a case the old
-//! code could never handle at all: a nested subcomponent reading back its own output signal
-//! (`input_mapping` only ever contained *input*-port entries, so that lookup would panic).
+//! A template's own signal reads (`TemplateOp::LocalSignal`) resolve against its own writes first
+//! (`local_writes`), regardless of nesting level - so a subcomponent reading back its own output
+//! signal resolves the same way a top-level circuit does.
 
 use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
@@ -35,9 +22,9 @@ use crate::ir::{self, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalId
 /// signal space) into `nodes`/`outputs`. `input_mapping` carries the values the *caller* stored
 /// into this template's own input ports (empty for main, which has no caller).
 ///
-/// `precompute_sites` accumulates one entry per `TACEO_PRECOMPUTATION_*`-wrapped component
-/// encountered anywhere in the recursion, in encounter order - that order is the contract the
-/// runtime's supplied traces must follow (see `docs/ARCHITECTURE.md`, "Precomputation").
+/// `precompute_sites` accumulates one entry per recognized gadget instance encountered anywhere in
+/// the recursion, in encounter order - that order is the contract the runtime's supplied traces
+/// must follow (see `docs/ARCHITECTURE.md`, "Precomputation").
 ///
 /// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
 /// can resolve it once this call returns.
@@ -133,8 +120,8 @@ pub(crate) fn inline_template<F: PrimeField>(
     }
 
     // Any subcomponent instance whose outputs are never read (declares none at all, like
-    // TACEO_PRECOMPUTATION_AliasCheck, or simply has no caller interested in them) is otherwise
-    // never inlined by the SubCmpOutput arm above - none of its signals would reach `outputs`,
+    // AliasCheck, or simply has no caller interested in them) is otherwise never inlined by the
+    // SubCmpOutput arm above - none of its signals would reach `outputs`,
     // silently leaving them as zero in the witness. Its inputs are already fully resolved by this
     // point (every SubCmpInput targeting it was processed in the loop above), so inlining it now
     // is still topologically sound.
@@ -150,8 +137,8 @@ pub(crate) fn inline_template<F: PrimeField>(
 }
 
 /// Dispatches one subcomponent instance to whichever inlining strategy applies: recurse into a
-/// compiled body, or (for a `TACEO_PRECOMPUTATION_*` wrapper) turn it into a precomputation site
-/// instead of compiling anything - see [`inline_precomputed`].
+/// compiled body, or (for a recognized gadget) turn it into a precomputation site instead of
+/// compiling anything - see [`inline_precomputed`].
 fn inline_sub_graph_instance<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
@@ -173,7 +160,6 @@ fn inline_sub_graph_instance<F: PrimeField>(
         ),
         SubGraphInstance::Precomputed {
             kind,
-            name,
             header,
             signal_offset,
             num_inputs,
@@ -184,7 +170,6 @@ fn inline_sub_graph_instance<F: PrimeField>(
             outputs,
             precompute_sites,
             kind,
-            name,
             header,
             signal_offset,
             num_inputs,
@@ -195,10 +180,10 @@ fn inline_sub_graph_instance<F: PrimeField>(
     }
 }
 
-/// Turns one `TACEO_PRECOMPUTATION_*`-wrapped component instance into an `Op::Precompute` node
-/// plus one `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body.
-/// Implements the layout documented in `docs/ARCHITECTURE.md`, "Precomputation": result slots
-/// `0..num_outputs` are the wrapped component's own outputs (signals `signal_offset ..`), slots
+/// Turns one recognized gadget instance into an `Op::Precompute` node plus one
+/// `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body. Implements
+/// the layout documented in `docs/ARCHITECTURE.md`, "Precomputation": result slots
+/// `0..num_outputs` are the gadget's own outputs (signals `signal_offset ..`), slots
 /// `num_outputs..` are its subtree's intermediate signals in flat order (signals
 /// `signal_offset + num_outputs + num_inputs ..`).
 #[allow(clippy::too_many_arguments)]
@@ -207,7 +192,6 @@ fn inline_precomputed<F: PrimeField>(
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
     kind: PrecomputeKind,
-    name: String,
     header: String,
     signal_offset: usize,
     num_inputs: usize,
@@ -232,7 +216,6 @@ fn inline_precomputed<F: PrimeField>(
     let site_id = PrecomputeId::new(precompute_sites.len());
     precompute_sites.push(PrecomputeSite {
         kind,
-        name,
         header,
         num_inputs,
         num_outputs,

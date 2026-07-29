@@ -1,7 +1,6 @@
 //! Loop unrolling: circom loops with a statically known trip count are fully unrolled during
 //! per-template lowering (not a separate pass — see `docs/ARCHITECTURE.md` for why loops are not
-//! modeled as graph nodes at all). Ported from `circom_ir/loop_unrolling.rs` with no semantic
-//! changes: same supported step/condition combinations, same panics for anything else.
+//! modeled as graph nodes at all).
 
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;

@@ -21,10 +21,7 @@ use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{
-    BareGadgetDetection, CoCircomCompiler, CompilerConfig, SimplificationLevel,
-    UnknownPrecomputeGadget,
-};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
@@ -45,7 +42,7 @@ struct Case {
     /// `Some(n)` for a merces server main with batch size `n`; `None` for a simple circuit whose
     /// inputs are just sequential values.
     merces_batch: Option<usize>,
-    /// Needs the merces link libraries and leniency knobs.
+    /// Needs the merces link libraries.
     merces_config: bool,
 }
 
@@ -90,9 +87,6 @@ fn config(case: &Case) -> CompilerConfig {
         config
             .link_library
             .push(format!("{}/circuits/merces/", manifest_dir()).into());
-        // See tests/merces.rs for why these two are needed.
-        config.unknown_precompute_gadget = UnknownPrecomputeGadget::Warn;
-        config.bare_gadget_detection = BareGadgetDetection::On;
     }
     config
 }

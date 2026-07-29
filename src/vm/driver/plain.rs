@@ -1,6 +1,6 @@
-//! `PlainDriver`: single-party execution in the clear - the KAT oracle that replaces the deleted
-//! `Interpreter`. `Share = Local = F`: there is nothing to mask or reshare with only one party, so
-//! `reshare` is the identity and `mul_local` is a plain product.
+//! `PlainDriver`: single-party execution in the clear - the KAT oracle. `Share = Local = F`: there
+//! is nothing to mask or reshare with only one party, so `reshare` is the identity and `mul_local`
+//! is a plain product.
 
 use ark_ff::PrimeField;
 
@@ -53,8 +53,7 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
 
     fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<F>> {
         // Nothing distinguishes "local" from "shared" for a single party - a round's k-th input
-        // already *is* its k-th result (the same convention the deleted `Interpreter` used for
-        // `Op::RoundResult`). See docs/ARCHITECTURE.md, "MPC lowering".
+        // already *is* its k-th result. See docs/ARCHITECTURE.md, "MPC lowering".
         Ok(locals.to_vec())
     }
 

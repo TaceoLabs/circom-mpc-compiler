@@ -1,13 +1,12 @@
-//! Shared KAT (known-answer-test) fixture loading, used by both `circom_ir.rs` and `mpc_ir.rs`.
-//! Was copy-pasted between the two files before; consolidated here as part of the IR rewrite.
+//! Shared KAT (known-answer-test) fixture loading, used by `circom_ir.rs` and `rep3_vm.rs`.
 //!
 //! Lives under `tests/common/mod.rs` (not `tests/common.rs`) so cargo does not also compile it as
 //! its own (empty) integration test binary — only files directly under `tests/` get that
 //! treatment.
 
 // Each integration test binary compiles this module separately, so any binary using only part of
-// it (e.g. `frontend_errors.rs`, which needs the path helpers but not the KAT loader) would
-// otherwise warn on the rest.
+// it (e.g. `frontend.rs`, which needs the path helpers but not the KAT loader) would otherwise
+// warn on the rest.
 #![allow(dead_code)]
 
 use std::{

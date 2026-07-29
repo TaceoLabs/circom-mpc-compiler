@@ -1,7 +1,6 @@
-//! Executes a `Program` against a `VmDriver` - the replacement for the deleted plaintext
-//! `Interpreter`: the same bytecode runs against `PlainDriver` (the KAT oracle) or a real rep3
-//! driver, the only difference being which `VmDriver` is passed in. See `docs/ARCHITECTURE.md`,
-//! "Bytecode and the slot machine".
+//! Executes a `Program` against a `VmDriver`: the same bytecode runs against `PlainDriver` (the
+//! KAT oracle) or a real rep3 driver, the only difference being which `VmDriver` is passed in. See
+//! `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
 
 use ark_ff::PrimeField;
 
@@ -21,9 +20,9 @@ pub enum InputValue<F, S> {
 }
 
 impl<F: PrimeField> Program<F> {
-    /// Builds `Machine::run`'s `inputs` array from a flat `&[F]` in circuit signal order (the same
-    /// convention the deleted `Interpreter` took `input_signals` in), consulting
-    /// `Program::input_domains` to wrap each value as `Public` or `Secret` automatically. `share`
+    /// Builds `Machine::run`'s `inputs` array from a flat `&[F]` in circuit signal order,
+    /// consulting `Program::input_domains` to wrap each value as `Public` or `Secret`
+    /// automatically. `share`
     /// is only invoked for `Secret`-destined values - e.g. `|v| v` for a driver whose `Share = F`
     /// (`PlainDriver`), or an actual secret-sharing routine for a real MPC driver (see
     /// `tests/rep3_vm.rs`).
@@ -156,8 +155,8 @@ impl Machine {
         }
 
         // Signal 0 is the reserved always-true constant; every genuine `SignalIdx` `s` lands at
-        // `s + 1` (the same convention the deleted `Interpreter` used) - `Program::signal_to_witness`
-        // already indexes into this same, offset-by-one array.
+        // `s + 1` - `Program::signal_to_witness` already indexes into this same, offset-by-one
+        // array.
         let mut signals: Vec<D::Share> = vec![D::Share::default(); program.num_signals];
         signals[0] = driver.promote(F::one());
         for store in &program.stores {
@@ -170,10 +169,9 @@ impl Machine {
         // Main's own circuit inputs are never `graph.outputs()` entries (only a *nested*
         // subcomponent's input signal is - see `frontend/inline.rs::inline_template`'s
         // `TemplateOp::LocalSignal` arm), so they'd otherwise never reach `signals` at all - copy
-        // each one in directly from the caller-supplied `inputs`, exactly like the deleted
-        // `Interpreter` pre-filled its own `signals` array from `input_signals` up front. Uses the
-        // original `inputs` argument (not a P/S-bank slot) so this covers an input whose
-        // `Op::Input` node `gc` dropped as dead too - still a genuine witness entry.
+        // each one in directly from the caller-supplied `inputs`. Uses the original `inputs`
+        // argument (not a P/S-bank slot) so this covers an input whose `Op::Input` node `gc`
+        // dropped as dead too - still a genuine witness entry.
         for (input_index, value) in inputs.iter().enumerate() {
             let signal = program.num_outputs + input_index;
             signals[signal + 1] = match value {

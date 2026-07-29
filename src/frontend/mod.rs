@@ -1,4 +1,4 @@
-//! Circom -> value-graph frontend. Replaces the old `circom_ir` module.
+//! Circom -> value-graph frontend.
 //!
 //! Pipeline: parse circom source into a `ProgramArchive`, run circom's own constraint generation
 //! and simplification to get a bucket-code `Circuit`, lower each template's bucket instructions
@@ -29,20 +29,13 @@ use rustc_hash::FxHashMap;
 use crate::ir;
 use crate::{CompilerConfig, SimplificationLevel};
 
-use build::{GraphCompiler, PrecomputeOptions};
+use build::GraphCompiler;
 
 /// A list of circuit inputs: (name, witness offset, size).
 pub(crate) type InputList = ir::InputList;
 
 /// Maps an output signal's name to (offset, size) in the witness.
 pub type OutputMapping = HashMap<String, (usize, usize)>;
-
-/// Every source template named with this prefix is treated as a first-class precomputation
-/// wrapper (`TACEO_PRECOMPUTATION_Poseidon2`, `TACEO_PRECOMPUTATION_Num2Bits`, ...): its wrapped
-/// (inner) component is never compiled or run - `build::GraphCompiler::handle_create_cmp_bucket`
-/// turns it into an `ir::Op::Precompute` site instead. See `docs/ARCHITECTURE.md`,
-/// "Precomputation".
-pub(crate) const PRECOMPUTATION_PREFIX: &str = "TACEO_PRECOMPUTATION_";
 
 /// A template header's total flat signal count: its own declared signals (inputs + outputs +
 /// intermediates) plus every signal belonging to every subcomponent it transitively instantiates -
@@ -202,12 +195,10 @@ pub(crate) fn build_graph<P: Pairing>(
     // actually uses (`passes::mpc::domain::signal_domain` derives its index as `signal - num_outputs`,
     // and `fixtures::flatten` indexes a `num_inputs`-long vector).
     //
-    // Rebasing here rather than at each consumer is what keeps them consistent. Before this the two
-    // numberings were silently compared, so `signal_domain`'s range check could never match and every
-    // declared-public input was conservatively classified `Shared`. That direction is safe (see its
-    // own doc comment), which is why no golden-witness KAT caught it - but with more than one main
-    // output the offset instead lands inside an unrelated input's range and misclassifies a genuinely
-    // secret input as public, which `Machine::run` then rejects outright.
+    // Rebasing here rather than at each consumer is what keeps them consistent: comparing the two
+    // numberings directly (witness offset vs 0-based input index) would misclassify a public input
+    // as `Shared` with one main output, or a secret input as public with more than one - which
+    // `Machine::run` then rejects outright.
     let input_base = 1 + main_outputs;
     let input_list = circuit
         .c_producer
@@ -237,7 +228,6 @@ pub(crate) fn build_graph<P: Pairing>(
         &mut templates,
         &mut compiled_graphs,
         &constant_table,
-        PrecomputeOptions::from(&config),
         &signal_spans,
     );
     let main_template_graph = main_graph_compiler.parse()?;

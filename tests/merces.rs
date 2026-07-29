@@ -7,16 +7,11 @@
 //! (`circuits/merces/`). **No vendored circuit is patched** - the compiler adapts to the circuits as
 //! merces ships them, which is the property that keeps this a meaningful compile target.
 //!
-//! The two server mains (`transfer_arity4_batch{1,8}`) compile and run. Getting there needed two
-//! config knobs, both non-default and both set explicitly in [`merces_config`] so it is visible which
-//! leniency these circuits depend on:
-//!
-//! - `UnknownPrecomputeGadget::Warn`, because `merkle_root_4.circom` wraps an `Arity4CMux` this
-//!   compiler has no gadget for. Its body is pure `Add`/`Sub`/`Mul`, so compiling it is not a
-//!   fallback: `passes::mpc::round_schedule` then batches its multiplications automatically.
-//! - `BareGadgetDetection::On`, because the same file calls `IsEqual()` *unwrapped*, and `IsEqual`
-//!   reduces to `IsZero`, which needs field inversion and a branch on a secret condition - neither
-//!   expressible in an `Add`/`Sub`/`Mul`-only `ir::Op`.
+//! The two server mains (`transfer_arity4_batch{1,8}`) compile and run: `merkle_root_4.circom`'s
+//! `Arity4CMux` compiles like any ordinary template (its body is pure `Add`/`Sub`/`Mul`, so
+//! `passes::mpc::round_schedule` batches its multiplications automatically), and its bare
+//! `IsEqual()` call is recognized as a precomputation site the same way a
+//! `TACEO_PRECOMPUTATION_IsEqual` wrapper would be.
 //!
 //! `transfer_client_compressed` still does not compile; see [`client_main_is_still_unsupported`].
 //!
@@ -46,10 +41,7 @@ use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{
-    BareGadgetDetection, CoCircomCompiler, CompilerConfig, SimplificationLevel,
-    UnknownPrecomputeGadget,
-};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{
     combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
@@ -75,9 +67,6 @@ fn merces_config() -> CompilerConfig {
     // The vendored circuits are `pragma circom 2.2.2` verbatim.
     config.version = "2.2.2".to_owned();
     config.simplification = SimplificationLevel::O2(usize::MAX);
-    // See the module doc for why each of these two is needed.
-    config.unknown_precompute_gadget = UnknownPrecomputeGadget::Warn;
-    config.bare_gadget_detection = BareGadgetDetection::On;
     // Two link libraries, mirroring how merces itself compiles these (`-l circom/node_modules
     // -l circom`): `circuits/libs/` resolves circomlib + the vendored `taceo/` subtree,
     // `circuits/merces/` the `merces/`/`oblivious_vector/` cross-references.

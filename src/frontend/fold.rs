@@ -1,14 +1,10 @@
-//! Compile-time folding for the circom operators `ir::Op` no longer has a runtime variant for.
+//! Compile-time folding for the circom operators `ir::Op` has no runtime variant for.
 //!
 //! `ir::Op` only carries `Add`/`Sub`/`Mul` as runtime ops (see `docs/ARCHITECTURE.md`). Circom
 //! source can still use `/`, `\`, `**`, shifts, and bitwise ops, but only where every operand is a
 //! compile-time constant - the moment one operand is a genuine circuit value, lowering it becomes
 //! an `Unsupported::NonConstantOperator` error (`build.rs::handle_compute_bucket`) instead of
 //! reaching this module.
-//!
-//! This is the same arithmetic `Interpreter::run` used to apply to these ops at runtime, before the
-//! `Op` strip - lifted here verbatim (not reimplemented) so `constants_test`'s witness, which
-//! depends on it exactly, doesn't silently change.
 
 use ark_ff::PrimeField;
 use num_bigint::BigUint;
@@ -35,8 +31,8 @@ fn to_usize<F: PrimeField>(f: F) -> usize {
         .expect("does not fit into usize")
 }
 
-/// Evaluates `op(lhs, rhs)` at compile time, for the operators that no longer have a runtime `Op`
-/// variant. Returns `None` if `op` has no compile-time-constant semantics at all (comparisons,
+/// Evaluates `op(lhs, rhs)` at compile time, for the operators that have no runtime `Op` variant.
+/// Returns `None` if `op` has no compile-time-constant semantics at all (comparisons,
 /// booleans, `Mod`, ...) - those are always errors, folded or not.
 pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Option<F> {
     match op {

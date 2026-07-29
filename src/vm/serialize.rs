@@ -20,11 +20,11 @@ use super::program::{
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
-/// Bumped to 2 for staged precomputation. This is **not** a backwards-compatible addition: a v1
-/// program carries a batch table but no `Opcode::Precompute` instruction, because v1's semantics
-/// were "the machine runs every batch up front". A current `Machine::run` reading a v1 program would
-/// silently service zero batches and return a wrong witness, so the version check in `read` is the
-/// only thing standing between an old artifact and a plausible-looking bad answer.
+/// A version-1 program carries a batch table but no `Opcode::Precompute` instruction - it assumes a
+/// machine that services every batch up front, which `Machine::run` does not do. Reading a
+/// version-1 program under the current, interleaved semantics would silently service zero batches
+/// and return a wrong witness, so the version check in `read` is the only thing standing between an
+/// old artifact and a plausible-looking bad answer.
 const VERSION: u32 = 2;
 
 impl Opcode {

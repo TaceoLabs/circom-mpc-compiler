@@ -1,13 +1,5 @@
 //! Poseidon2 permutation traces for `circuits/libs/taceo/poseidon2.circom`, computed from **that
-//! template's own signal layout** rather than from a vendored index table.
-//!
-//! This replaces a thin wrapper over mpc-core's `CircomTracePlainHasher`/`CircomTraceBatchedHasher`.
-//! Those produce a correct *permutation* but fill a witness layout the vendored circuit does not
-//! have, so the permuted state matched a real circom witness while every trailing trace value
-//! diverged - `precomputation_poseidon2_test` was red for exactly that reason. Deriving the layout
-//! from the circuit instead fixes it, supports every width the circuit defines (`{2,3,4,8,12,16}`,
-//! where the table only covered `{2,3,4,16}`), and drops this gadget's dependency on `mpc-core`'s
-//! plain path entirely.
+//! template's own signal layout**, for every width the circuit defines (`t ∈ {2,3,4,8,12,16}`).
 //!
 //! # The layout rule
 //!

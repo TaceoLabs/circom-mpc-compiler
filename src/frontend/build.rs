@@ -1,13 +1,7 @@
 //! Per-template lowering: walks one circom template's bucket instructions and builds a
-//! [`TemplateGraph`] — the not-yet-inlined value graph for that single template.
-//!
-//! This is the direct replacement for the old `GraphCompiler` in `circom_ir/translate.rs`. The
-//! key structural change from the old code: `handle_inst` and its callees now *return* the
-//! `ValueId` of the value an instruction produces, instead of pushing a node and having the
-//! caller peek at "whatever wire was most recently allocated". Reading a variable
-//! (`AddressType::Variable`) is a direct `ValueId` lookup, not a node of its own — there is no
-//! `Op::Load` in this IR at all, which is what let `load_elimination` (and the wire-index
-//! bookkeeping it existed to clean up after) disappear entirely.
+//! [`TemplateGraph`] — the not-yet-inlined value graph for that single template. Reading a
+//! variable (`AddressType::Variable`) is a direct `ValueId` lookup, not a node of its own — there
+//! is no `Op::Load` in this IR.
 
 use std::collections::HashMap;
 
@@ -23,31 +17,9 @@ use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
 use crate::ir::{Arity, Op, PrecomputeKind, ValueId};
-use crate::{BareGadgetDetection, CompilerConfig, PrecomputationMode, UnknownPrecomputeGadget};
 
 use super::error::Unsupported;
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
-use super::PRECOMPUTATION_PREFIX;
-
-/// The three `CompilerConfig` knobs that govern `TACEO_PRECOMPUTATION_*` handling, bundled so the
-/// recursive `GraphCompiler` constructor stays readable (it already takes five other arguments) and
-/// so adding a fourth knob doesn't touch every call site.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PrecomputeOptions {
-    pub(crate) mode: PrecomputationMode,
-    pub(crate) unknown_gadget: UnknownPrecomputeGadget,
-    pub(crate) bare_detection: BareGadgetDetection,
-}
-
-impl From<&CompilerConfig> for PrecomputeOptions {
-    fn from(config: &CompilerConfig) -> Self {
-        Self {
-            mode: config.precomputation,
-            unknown_gadget: config.unknown_precompute_gadget,
-            bare_detection: config.bare_gadget_detection,
-        }
-    }
-}
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -111,19 +83,16 @@ pub(crate) enum SubGraphInstance<F: PrimeField> {
         template: TemplateGraph<F>,
         signal_offset: usize,
     },
-    /// A `TACEO_PRECOMPUTATION_*`-wrapped component (`PrecomputationMode::Extract`): the wrapped
-    /// (inner) component's body is never compiled at all - `frontend/inline.rs` turns this into
-    /// an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
+    /// A recognized gadget template: its body is never compiled - `frontend/inline.rs` turns this
+    /// into an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
     /// "Precomputation".
     Precomputed {
-        /// Which gadget this site runs - resolved from `name`/`num_inputs`/`num_outputs` in
-        /// `handle_create_cmp_bucket`, once, rather than re-derived every time this instance is
-        /// inlined.
+        /// Which gadget this site runs - resolved from the template's `name`/`num_inputs`/
+        /// `num_outputs` in `handle_create_cmp_bucket`, once, rather than re-derived every time
+        /// this instance is inlined.
         kind: PrecomputeKind,
-        /// The wrapped template's plain name, e.g. `"Poseidon2"` (`TemplateCodeInfo::name`).
-        name: String,
-        /// The wrapped template's specialized header, e.g. `"Poseidon2_12"`
-        /// (`TemplateCodeInfo::header`) - the key `precompute_spans` is looked up by.
+        /// The template's specialized header, e.g. `"Poseidon2_12"` (`TemplateCodeInfo::header`) -
+        /// the key `precompute_spans` is looked up by.
         header: String,
         signal_offset: usize,
         num_inputs: usize,
@@ -149,22 +118,19 @@ pub(crate) struct GraphCompiler<'a, P: Pairing> {
     pub(crate) templates: &'a mut HashMap<String, TemplateCode>,
     pub(crate) compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
     pub(crate) constant_table: &'a [P::ScalarField],
-    pub(crate) precompute: PrecomputeOptions,
     /// Every template header's total flat signal count (own signals + everything transitively
     /// instantiated), keyed the same way `templates` is - see
-    /// `frontend/mod.rs::compute_signal_spans`. Only consulted for `TACEO_PRECOMPUTATION_*`
-    /// wrappers, to size their site's `num_intermediates`.
+    /// `frontend/mod.rs::compute_signal_spans`. Only consulted for recognized gadget templates, to
+    /// size their site's `num_intermediates`.
     pub(crate) precompute_spans: &'a FxHashMap<String, usize>,
 }
 
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         code: TemplateCode,
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
         constant_table: &'a [P::ScalarField],
-        precompute: PrecomputeOptions,
         precompute_spans: &'a FxHashMap<String, usize>,
     ) -> Self {
         Self {
@@ -174,7 +140,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             templates,
             compiled_graphs,
             constant_table,
-            precompute,
             precompute_spans,
             var_to_value: FxHashMap::default(),
         }
@@ -287,8 +252,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.write_value_at(&store_bucket.dest_address_type, index, value);
             }
             LocationRule::Mapped { .. } => {
-                // Previously silently ignored the store entirely, which is worse than an error -
-                // it would silently produce a wrong witness rather than fail loudly.
                 return Err(Unsupported::MappedLocation {
                     template: self.code.header.clone(),
                     line: store_bucket.line,
@@ -301,15 +264,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 
     /// Handles a whole-array (or array-slice) copy into a destination, represented by circom as
     /// one [`StoreBucket`] whose `context.size` spans multiple contiguous signals rather than one
-    /// scalar store per element.
-    ///
-    /// Previously `handle_store_bucket` ignored `context.size` entirely and always did exactly one
-    /// scalar transfer, so a bulk copy like `inner.in <== a;` (both `signal[2]`) only ever wrote
-    /// the first of the two ports - the second was silently left unwritten, surfacing later as
-    /// `inline.rs`'s "subcomponent input signal read before it was provided" panic. This reads and
-    /// writes all `size` contiguous elements, addressed as `base + i` on both sides (circom lays
-    /// an array's elements out contiguously, so the base resolved once plus a stride of 1 per
-    /// element is exactly what a real per-element store/load pair would have computed).
+    /// scalar store per element. Reads and writes all `size` contiguous elements, addressed as
+    /// `base + i` on both sides (circom lays an array's elements out contiguously, so the base
+    /// resolved once plus a stride of 1 per element is exactly what a real per-element store/load
+    /// pair would compute).
     fn handle_bulk_store_bucket(&mut self, store_bucket: &StoreBucket, size: usize) -> Result<()> {
         let Instruction::Load(src_load) = store_bucket.src.as_ref() else {
             return Err(self.err_bulk_copy_shape(store_bucket));
@@ -357,6 +315,21 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         .into()
     }
 
+    /// Pushes one [`SubGraphInstance`] per repetition of `create_cmp_bucket`, at consecutive
+    /// signal offsets - the shape every `SubGraphInstance` arm is instantiated with.
+    fn push_instances(
+        &mut self,
+        create_cmp_bucket: &CreateCmpBucket,
+        mut make: impl FnMut(usize) -> SubGraphInstance<P::ScalarField>,
+    ) {
+        let mut offset = create_cmp_bucket.signal_offset;
+        let offset_jump = create_cmp_bucket.signal_offset_jump;
+        for _ in 0..create_cmp_bucket.number_of_cmp {
+            self.sub_graphs.push(make(offset));
+            offset += offset_jump;
+        }
+    }
+
     fn handle_create_cmp_bucket(&mut self, create_cmp_bucket: &CreateCmpBucket) -> Result<()> {
         tracing::debug!(
             "we need to create {} {} times",
@@ -365,125 +338,60 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         );
         let symbol = create_cmp_bucket.symbol.clone();
 
-        // Fast path: already compiled - definitely not a TACEO_PRECOMPUTATION_* wrapper (those
-        // are never inserted into compiled_graphs, precisely so every repeated instantiation
-        // keeps going through the peek below instead). Handling this first, before touching
+        // Fast path: already compiled. A precomputed gadget's entry is never inserted into
+        // `compiled_graphs` (see below), so every repeated instantiation of one keeps going
+        // through the peek further down instead. Handling this first, before touching
         // `self.templates` at all, matters: a regular template's entry there is removed the first
         // time it's compiled (below), so a naive peek-first order would panic on a *second*
         // instantiation of any repeated regular template.
         if let Some(sub_cmp) = self.compiled_graphs.get(&symbol) {
             let sub_cmp = sub_cmp.clone();
-            let mut offset = create_cmp_bucket.signal_offset;
-            let offset_jump = create_cmp_bucket.signal_offset_jump;
-            for _ in 0..create_cmp_bucket.number_of_cmp {
-                self.sub_graphs.push(SubGraphInstance::Compiled {
-                    template: sub_cmp.clone(),
-                    signal_offset: offset,
-                });
-                offset += offset_jump;
-            }
+            self.push_instances(create_cmp_bucket, |signal_offset| SubGraphInstance::Compiled {
+                template: sub_cmp.clone(),
+                signal_offset,
+            });
             return Ok(());
         }
 
-        // Two independent triggers put this bucket's component on the precomputation path, both
-        // resolving the kind from the *instantiated* template (never the enclosing one):
+        // A gadget this compiler services out-of-band is always cut into a precomputation site:
+        // its body is never compiled, and `vm::gadgets` supplies its trace instead. Resolved from
+        // the *instantiated* template's name, so this fires the same way whether or not the
+        // enclosing template wraps it.
         //
-        //  1. A `TACEO_PRECOMPUTATION_*` wrapper. The prefix marks the *wrapper* - the template
-        //     currently being compiled (`self.code`) - not the component this bucket instantiates
-        //     (e.g. plain `Poseidon2`), which never carries the prefix. Every wrapper's body is
-        //     exactly one line (`out <== Gadget(...)(in);`), so it creates exactly one subcomponent;
-        //     that's the one this intercepts.
-        //  2. `BareGadgetDetection::On` plus a recognized gadget instantiated with no wrapper at all.
-        //
-        // Checked in this order so a wrapped gadget never takes the second arm too, which would
-        // create the site twice.
-        let wrapped = self.code.name.starts_with(PRECOMPUTATION_PREFIX);
-        if self.precompute.mode == PrecomputationMode::Extract {
-            // Peek, never remove: on the precomputation path the wrapped component's body is never
-            // compiled at all (see SubGraphInstance::Precomputed), so its entry in `templates` must
-            // stay put for every repeated instantiation to find it too. The fall-through below
-            // deliberately leaves it in place as well, so the normal remove-on-first-compile path
-            // further down still finds it.
-            let template_code = self.templates.get(&symbol).expect("must be here");
-            let name = template_code.name.clone();
-            let header = template_code.header.clone();
-            let num_inputs = template_code.number_of_inputs;
-            let num_outputs = template_code.number_of_outputs;
+        // Peek, never remove: the wrapped component's body is never compiled at all (see
+        // `SubGraphInstance::Precomputed`), so its entry in `templates` must stay put for every
+        // repeated instantiation to find it too.
+        let template_code = self.templates.get(&symbol).expect("must be here");
+        let header = template_code.header.clone();
+        let num_inputs = template_code.number_of_inputs;
+        let num_outputs = template_code.number_of_outputs;
 
-            let kind = match name.as_str() {
-                "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
-                "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
-                "IsZero" => Some(PrecomputeKind::IsZero),
-                "AliasCheck" => Some(PrecomputeKind::AliasCheck),
-                "IsEqual" => Some(PrecomputeKind::IsEqual),
-                _ => None,
-            };
+        let kind = match template_code.name.as_str() {
+            "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
+            "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
+            "IsZero" => Some(PrecomputeKind::IsZero),
+            "IsEqual" => Some(PrecomputeKind::IsEqual),
+            "AliasCheck" => Some(PrecomputeKind::AliasCheck),
+            _ => None,
+        };
 
-            let extract = match (wrapped, kind) {
-                // A wrapper naming a gadget this compiler can service.
-                (true, Some(kind)) => Some(kind),
-                // A wrapper naming one it can't. A wrapper marks an *opportunity* to accelerate, so
-                // the lenient path compiles the body instead and only loses speed - see
-                // `UnknownPrecomputeGadget`.
-                (true, None) => match self.precompute.unknown_gadget {
-                    UnknownPrecomputeGadget::Error => {
-                        return Err(Unsupported::PrecomputeGadget {
-                            gadget: name,
-                            template: self.code.header.clone(),
-                            line: create_cmp_bucket.line,
-                        }
-                        .into())
-                    }
-                    UnknownPrecomputeGadget::Warn => {
-                        tracing::warn!(
-                            "`{}` (line {}) wraps `{name}`, which this compiler has no \
-                             precomputation gadget for - compiling its body instead of accelerating \
-                             it. The circuit stays correct, but loses whatever speedup the wrapper \
-                             was added for. Set CompilerConfig::unknown_precompute_gadget = Error to \
-                             make this fatal.",
-                            self.code.header,
-                            create_cmp_bucket.line,
-                        );
-                        None
-                    }
-                },
-                // An unwrapped gadget, cut into a site only when explicitly asked - see
-                // `BareGadgetDetection`.
-                (false, Some(kind)) if self.precompute.bare_detection == BareGadgetDetection::On => {
-                    tracing::debug!(
-                        "`{}` (line {}) instantiates `{name}` without a {PRECOMPUTATION_PREFIX}* \
-                         wrapper; cutting it into a precomputation site anyway \
-                         (BareGadgetDetection::On)",
-                        self.code.header,
-                        create_cmp_bucket.line,
-                    );
-                    Some(kind)
+        if let Some(kind) = kind {
+            let span = *self.precompute_spans.get(&header).unwrap_or_else(|| {
+                panic!("no signal-span entry for precomputed template `{header}`")
+            });
+            let num_intermediates = span - num_inputs - num_outputs;
+
+            self.push_instances(create_cmp_bucket, |signal_offset| {
+                SubGraphInstance::Precomputed {
+                    kind,
+                    header: header.clone(),
+                    signal_offset,
+                    num_inputs,
+                    num_outputs,
+                    num_intermediates,
                 }
-                _ => None,
-            };
-
-            if let Some(kind) = extract {
-                let span = *self.precompute_spans.get(&header).unwrap_or_else(|| {
-                    panic!("no signal-span entry for precomputed template `{header}`")
-                });
-                let num_intermediates = span - num_inputs - num_outputs;
-
-                let mut offset = create_cmp_bucket.signal_offset;
-                let offset_jump = create_cmp_bucket.signal_offset_jump;
-                for _ in 0..create_cmp_bucket.number_of_cmp {
-                    self.sub_graphs.push(SubGraphInstance::Precomputed {
-                        kind,
-                        name: name.clone(),
-                        header: header.clone(),
-                        signal_offset: offset,
-                        num_inputs,
-                        num_outputs,
-                        num_intermediates,
-                    });
-                    offset += offset_jump;
-                }
-                return Ok(());
-            }
+            });
+            return Ok(());
         }
 
         // First instantiation of a regular (non-precomputed) template: compile it now and cache
@@ -495,21 +403,15 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             self.templates,
             self.compiled_graphs,
             self.constant_table,
-            self.precompute,
             self.precompute_spans,
         );
         let sub_cmp = sub_cmp_compiler.parse()?;
         self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
 
-        let mut offset = create_cmp_bucket.signal_offset;
-        let offset_jump = create_cmp_bucket.signal_offset_jump;
-        for _ in 0..create_cmp_bucket.number_of_cmp {
-            self.sub_graphs.push(SubGraphInstance::Compiled {
-                template: sub_cmp.clone(),
-                signal_offset: offset,
-            });
-            offset += offset_jump;
-        }
+        self.push_instances(create_cmp_bucket, |signal_offset| SubGraphInstance::Compiled {
+            template: sub_cmp.clone(),
+            signal_offset,
+        });
         Ok(())
     }
 
@@ -896,5 +798,4 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 }
 
-// loop unrolling lives in `super::unroll` as an `impl` block on `GraphCompiler`, mirroring the
-// old `circom_ir::loop_unrolling` module.
+// loop unrolling lives in `super::unroll` as an `impl` block on `GraphCompiler`.

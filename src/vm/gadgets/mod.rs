@@ -1,6 +1,5 @@
-//! The four `TACEO_PRECOMPUTATION_*` gadgets this compiler's precompute phase knows how to run,
-//! plain (used unconditionally) and batched-MPC (`rep3`, behind the `rep3` feature). See
-//! `docs/ARCHITECTURE.md`, "Precomputation".
+//! The five precomputation gadgets this compiler knows how to run, plain (used unconditionally) and
+//! batched-MPC (`rep3`, behind the `rep3` feature). See `docs/ARCHITECTURE.md`, "Precomputation".
 
 pub mod aliascheck;
 pub mod isequal;

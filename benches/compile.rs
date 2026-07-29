@@ -12,10 +12,7 @@ use ark_bn254::Bn254;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use circom_mpc_compiler::vm::codegen;
-use circom_mpc_compiler::{
-    BareGadgetDetection, CoCircomCompiler, CompilerConfig, OptLevel, SimplificationLevel,
-    UnknownPrecomputeGadget,
-};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, OptLevel, SimplificationLevel};
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -59,8 +56,6 @@ fn config(case: &Case) -> CompilerConfig {
         config
             .link_library
             .push(format!("{}/circuits/merces/", manifest_dir()).into());
-        config.unknown_precompute_gadget = UnknownPrecomputeGadget::Warn;
-        config.bare_gadget_detection = BareGadgetDetection::On;
     }
     config
 }

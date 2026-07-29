@@ -7,10 +7,6 @@
 //! cargo run --release --example merces -- transfer_arity4_batch8
 //! cargo run --release --example merces -- circuits/multiplier2.circom   # any other circuit
 //! ```
-//!
-//! Replaces the old `src/bin/run.rs`, which only called `parse` and - because it pushed just
-//! `circuits/libs/` as a link library - could not load a merces circuit at all (`P1014: the file
-//! merces/server.circom to be included has not been found`).
 
 use std::time::Instant;
 
@@ -20,10 +16,7 @@ use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{
-    BareGadgetDetection, CoCircomCompiler, CompilerConfig, SimplificationLevel,
-    UnknownPrecomputeGadget,
-};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, SimplificationLevel};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{
     combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
@@ -71,12 +64,6 @@ fn main() -> eyre::Result<()> {
 
     let batch = merces_batch_size(&arg);
     let path = if batch.is_some() {
-        // The two knobs these circuits need, set explicitly rather than defaulted, because each one
-        // changes what gets constrained in-circuit. See tests/merces.rs for the full reasoning:
-        // `Arity4CMux` is a wrapper with no gadget behind it, and `IsEqual` is a gadget with no
-        // wrapper in front of it.
-        config.unknown_precompute_gadget = UnknownPrecomputeGadget::Warn;
-        config.bare_gadget_detection = BareGadgetDetection::On;
         format!("{root}/circuits/merces/main/{arg}.circom")
     } else {
         arg.clone()

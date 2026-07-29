@@ -2,15 +2,13 @@
 //! an event is either a reshare round ([`Op::Round`]) or one precomputation batch service
 //! ([`Op::Precompute`]). See `docs/ARCHITECTURE.md`, "MPC lowering" and "Precomputation".
 //!
-//! This replaces what used to be an inline "multiplicative depth" formula in [`super::
-//! round_schedule`]. The rename is not cosmetic: the old formula pinned [`Op::Precompute`] and
-//! [`Op::PrecomputeResult`] to depth 0, which asserted that a site's *results* are available at the
-//! same instant as its *inputs*. That is false for every rep3 gadget (all four `VmDriver::*_traces`
-//! methods take a `&Network` and genuinely communicate), and it made `round_schedule`'s
-//! depth-bucketed reconstruction produce a forward reference - a real panic on any circuit whose
-//! site inputs are computed rather than bare `Op::Input`s, which is exactly what the vendored merces
-//! circuits do (`circuits/merces/merces/dependencies/merkle_root_4.circom` chains `MAX_DEPTH`
-//! Poseidon2 sites through secret multiplications).
+//! A site's *results* ([`Op::PrecomputeResult`]) sit one level above its *inputs*
+//! ([`Op::Precompute`]), never the same level: every `VmDriver::*_traces` method takes a `&Network`
+//! and genuinely communicates, so a site's results are not available at the same instant as its
+//! inputs. This matters for real circuits whose site inputs are themselves computed rather than
+//! bare `Op::Input`s (`circuits/merces/merces/dependencies/merkle_root_4.circom` chains
+//! `MAX_DEPTH` Poseidon2 sites through secret multiplications) - `round_schedule`'s depth-bucketed
+//! reconstruction requires every value's dependencies to sit at a strictly earlier level.
 //!
 //! **One axis, not two.** Rounds and batch services share a single counter rather than getting a
 //! `(depth, stage)` pair. Two consequences make this the right trade:
@@ -110,7 +108,6 @@ mod tests {
     fn site(kind: PrecomputeKind, num_inputs: usize, num_outputs: usize) -> PrecomputeSite {
         PrecomputeSite {
             kind,
-            name: "Gadget".to_owned(),
             header: "Gadget_0".to_owned(),
             num_inputs,
             num_outputs,
@@ -134,8 +131,7 @@ mod tests {
         graph
     }
 
-    /// A site's results are one level above its inputs - the whole point of the change. Under the
-    /// old formula both were 0, which is what let `round_schedule` build a forward reference.
+    /// A site's results sit one level above its inputs, never the same level.
     #[test]
     fn site_results_are_one_level_above_their_inputs() {
         let nodes = vec![
