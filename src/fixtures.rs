@@ -8,8 +8,10 @@
 //!
 //! `inputs/<main>_<scenario>.json` are real merces protocol values (not placeholders), one file per
 //! scenario, baked into the binary with `include_str!` so no test can silently skip because a file
-//! moved. [`MERCES_SCENARIOS`] is the index; [`Scenario::values`] turns one into the flat `&[F]`
-//! `Program::classify_inputs` expects, via [`flatten`] against the circuit's own `Graph::input_list`.
+//! moved. Copied verbatim from merces' own `circom/main/inputs/`; regenerate from there, not from
+//! anything in this crate. [`MERCES_SCENARIOS`] is the index; [`Scenario::values`] turns one into the
+//! flat `&[F]` `Program::classify_inputs` expects, via [`flatten`] against the circuit's own
+//! `Graph::input_list`.
 //!
 //! # The `===` constraints these values satisfy
 //!
@@ -216,14 +218,14 @@ pub const MERCES_SCENARIOS: &[Scenario] = &[
         main: "transfer_arity4_batch8",
         name: "partial_batch",
         batch: 8,
-        note: "one active slot, the rest deposits",
+        note: "one deposit, one transfer, one withdraw, the rest idle zero-amount transfers",
         json: include_str!("../inputs/transfer_arity4_batch8_partial_batch.json"),
     },
     Scenario {
         main: "transfer_arity4_batch8",
         name: "multi_withdraw",
         batch: 8,
-        note: "several withdraw slots in one batch",
+        note: "one deposit and three withdraw slots, the rest idle zero-amount transfers",
         json: include_str!("../inputs/transfer_arity4_batch8_multi_withdraw.json"),
     },
     Scenario {

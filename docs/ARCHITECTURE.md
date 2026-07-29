@@ -1072,8 +1072,10 @@ Features these circuits are load-bearing for:
 Inputs come from `inputs/<main>_<scenario>.json` - real merces protocol values, not placeholders: 4
 scenarios per server main (`deposit`/`withdraw`/`invalid_withdraw`/`transfer` for `batch1`;
 `full_batch`/`partial_batch`/`multi_withdraw`/`invalid_slot` for `batch8`), baked into the binary via
-`include_str!` in `src/fixtures.rs` (`MERCES_SCENARIOS`). Circom-style named JSON, decimal strings,
-nested arrays flattened row-major (circom's own multi-dimensional signal numbering) by
+`include_str!` in `src/fixtures.rs` (`MERCES_SCENARIOS`). Copied verbatim from merces' own
+`circom/main/inputs/`; regenerate from there, not from anything in this crate. Circom-style named
+JSON, decimal strings, nested arrays flattened row-major (circom's own multi-dimensional signal
+numbering) by
 `fixtures::from_input_json`. See that module's doc for the `===` constraint families these values
 satisfy - including the root-linking constraint (`server.circom:159`) that only a `transfer`/mixed-batch
 scenario with a genuine Merkle setup can satisfy, which no placeholder generator ever could.
