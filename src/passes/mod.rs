@@ -1,4 +1,4 @@
-//! Pass infrastructure: a [`Pass`] trait, a [`PassManager`] that drives passes to a fixpoint, and
+//! Pass infrastructure: a `Pass` trait, a `PassManager` that drives passes to a fixpoint, and
 //! the [`OptLevel`] config knob that selects which passes run. See `docs/ARCHITECTURE.md`, "Pass
 //! infrastructure", for why this exists and how `Graph::rewrite` (`src/ir.rs`) is what makes each
 //! pass a small, self-contained node rewrite instead of hand-rolled `ValueId` bookkeeping.
@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::Graph;
 
-/// Whether a [`Pass::run`] call actually modified the graph. Drives the [`PassManager`]'s
-/// fixpoint loop: passes keep re-running while any one of them reports `true`.
+/// Whether a pass invocation actually modified the graph. Drives the pass manager's fixpoint loop:
+/// passes keep re-running while any one of them reports `true`.
 pub type Changed = bool;
 
-/// Which *classical* passes [`PassManager::for_opt_level`] runs, in its fixpoint stage.
+/// Which *classical* passes the pass manager runs in its fixpoint stage.
 /// Deliberately distinct from upstream circom's own constraint simplification (always run at full
 /// `--O2`, see `src/frontend/mod.rs`), which this crate's own IR passes have no bearing on.
 /// Independent of MPC lowering (`passes::mpc`), which always runs regardless of opt level - see

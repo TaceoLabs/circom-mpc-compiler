@@ -18,9 +18,19 @@ use rustc_hash::FxHashMap;
 use super::build::{SubGraphInstance, TemplateGraph, TemplateOp};
 use crate::ir::{self, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
 
+/// Whether the template being inlined is the main template or one of its descendants. Absolute
+/// signal offsets cannot encode this: when main declares no signals, its first child legitimately
+/// starts at offset zero too.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub(super) enum TemplatePosition {
+    Root,
+    Nested,
+}
+
 /// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
-/// signal space) into `nodes`/`outputs`. `input_mapping` carries the values the *caller* stored
-/// into this template's own input ports (empty for main, which has no caller).
+/// signal space) into `nodes`/`outputs`. `position` identifies main independently of that numeric
+/// offset. `input_mapping` carries the values the *caller* stored into this template's own input
+/// ports (empty for main, which has no caller).
 ///
 /// `precompute_sites` accumulates one entry per recognized gadget instance encountered anywhere in
 /// the recursion, in encounter order - that order is the contract the runtime's supplied traces
@@ -28,12 +38,13 @@ use crate::ir::{self, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalId
 ///
 /// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
 /// can resolve it once this call returns.
-pub(crate) fn inline_template<F: PrimeField>(
+pub(super) fn inline_template<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
     template: TemplateGraph<F>,
     signal_offset: usize,
+    position: TemplatePosition,
     input_mapping: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
     let mut port_outputs = FxHashMap::default();
@@ -67,7 +78,7 @@ pub(crate) fn inline_template<F: PrimeField>(
             TemplateOp::LocalSignal(signal) => {
                 let resolved = if let Some(&v) = local_writes.get(&signal) {
                     v
-                } else if signal_offset != 0 {
+                } else if position == TemplatePosition::Nested {
                     *input_mapping.get(&signal).unwrap_or_else(|| {
                         panic!("subcomponent input signal {signal} read before it was provided")
                     })
@@ -77,7 +88,7 @@ pub(crate) fn inline_template<F: PrimeField>(
                     nodes.push(ir::Node::new(Op::Input(SignalIdx::new(signal)), vec![]));
                     new_id
                 };
-                if signal_offset != 0 {
+                if position == TemplatePosition::Nested {
                     // this subcomponent's own input signal is still part of the circuit's flat
                     // signal space and must be addressable by signal_to_witness
                     outputs.push((SignalIdx::new(signal + signal_offset), resolved));
@@ -88,7 +99,7 @@ pub(crate) fn inline_template<F: PrimeField>(
                 let value =
                     local_remap[node.inputs[0].index()].expect("value used before it was resolved");
                 local_writes.insert(signal, value);
-                if signal_offset != 0 {
+                if position == TemplatePosition::Nested {
                     port_outputs.insert(signal, value);
                 }
                 outputs.push((SignalIdx::new(signal + signal_offset), value));
@@ -169,6 +180,7 @@ fn inline_sub_graph_instance<F: PrimeField>(
             precompute_sites,
             template,
             parent_offset + signal_offset,
+            TemplatePosition::Nested,
             sub_cmp_inputs,
         ),
         SubGraphInstance::Precomputed {

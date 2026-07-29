@@ -20,12 +20,11 @@ use super::program::{
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
-/// A version-1 program carries a batch table but no `Opcode::Precompute` instruction - it assumes a
-/// machine that services every batch up front, which `Machine::run` does not do. Reading a
-/// version-1 program under the current, interleaved semantics would silently service zero batches
-/// and return a wrong witness, so the version check in `read` is the only thing standing between an
-/// old artifact and a plausible-looking bad answer.
-const VERSION: u32 = 2;
+/// Version 1 had no interleaved `Opcode::Precompute`; version 2 always stored precompute results in
+/// the shared bank. Version 3 records each batch's result bank so all-public gadgets can remain
+/// public. `Machine::run` deliberately has no compatibility shim: accepting either older layout
+/// could produce a plausible-looking wrong witness.
+const VERSION: u32 = 3;
 
 impl Opcode {
     fn to_u8(self) -> u8 {
@@ -177,6 +176,7 @@ impl<F: PrimeField> Program<F> {
         for batch in &self.precompute_batches {
             batch.kind.write(w)?;
             w.write_u64::<LittleEndian>(batch.sites as u64)?;
+            w.write_u8(batch.result_bank.to_u8())?;
             // Banked, like `stores` - a site input may be a `Public` slot (a literal the circuit
             // passed to the gadget), not only a share. See `SiteInput`.
             w.write_u64::<LittleEndian>(batch.input_slots.len() as u64)?;
@@ -275,6 +275,11 @@ impl<F: PrimeField> Program<F> {
         for _ in 0..batch_count {
             let kind = PrecomputeKind::read(r)?;
             let sites = r.read_u64::<LittleEndian>()? as usize;
+            let result_bank = Bank::from_u8(r.read_u8()?)?;
+            eyre::ensure!(
+                result_bank != Bank::Local,
+                "precompute batch result bank cannot be Local"
+            );
             let input_count = r.read_u64::<LittleEndian>()?;
             let mut input_slots = Vec::with_capacity(input_count as usize);
             for _ in 0..input_count {
@@ -286,6 +291,7 @@ impl<F: PrimeField> Program<F> {
             batches.push(PrecomputeBatch {
                 kind,
                 sites,
+                result_bank,
                 input_slots,
                 result_slots,
             });
@@ -381,6 +387,28 @@ mod tests {
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
 
         let inputs = [Fr::from(0u64)];
+        assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
+    }
+
+    #[test]
+    fn round_trips_a_public_precompute_batch() {
+        let original = program("precomputation_public_test");
+        assert!(
+            original
+                .precompute_batches
+                .iter()
+                .all(|batch| batch.result_bank == super::Bank::Public)
+        );
+        let mut bytes = Vec::new();
+        original.write(&mut bytes).unwrap();
+        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        assert!(
+            read_back
+                .precompute_batches
+                .iter()
+                .all(|batch| batch.result_bank == super::Bank::Public)
+        );
+        let inputs = [Fr::from(0u64), Fr::from(9u64)];
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
     }
 

@@ -1,5 +1,6 @@
 //! Poseidon2 permutation traces for `circuits/libs/taceo/poseidon2.circom`, computed from **that
-//! template's own signal layout**, for every width the circuit defines (`t ∈ {2,3,4,8,12,16}`).
+//! template's own signal layout**, for every width the circuit defines
+//! (`t ∈ {2, 3, 4, 8, 12, 16}`).
 //!
 //! # The layout rule
 //!
@@ -30,17 +31,18 @@
 //! Three separated concerns, so the layout exists in exactly one place (unlike `super::aliascheck`,
 //! which duplicates its much smaller layout between the plain and rep3 paths):
 //!
-//! - [`Ops`] - the arithmetic backend, implemented once for plain field elements and once for rep3
-//!   shares. Only [`Ops::sbox_layer`] ever communicates.
-//! - [`walk`] - the permutation itself, **layer-major across every site in lock-step**, so all of a
+//! - `Ops` - the arithmetic backend, implemented once for plain field elements and once for rep3
+//!   shares. Only `Ops::sbox_layer` ever communicates.
+//! - `walk` - the permutation itself, **layer-major across every site in lock-step**, so all of a
 //!   batch's s-boxes at one round go into a single `sbox_layer` call.
-//! - [`emit_site`] - the layout emitter, the one place the ordering above is encoded.
+//! - `emit_site` - the layout emitter, the one place the ordering above is encoded.
 
 use ark_ff::PrimeField;
 
 use super::poseidon2_constants::{partial_rounds, RoundConstants};
 
-/// The widths `circuits/libs/taceo/poseidon2.circom` defines constants for.
+/// The widths `circuits/libs/taceo/poseidon2.circom` defines constants for:
+/// `{2, 3, 4, 8, 12, 16}`.
 pub const SUPPORTED_WIDTHS: [usize; 6] = [2, 3, 4, 8, 12, 16];
 
 // --- Signal counts, mirroring the circuit's own template structure ---

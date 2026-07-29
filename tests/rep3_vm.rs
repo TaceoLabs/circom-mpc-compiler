@@ -108,3 +108,39 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
         assert_eq!(run_rep3(&program, &values), plain, "inputs {values:?}");
     }
 }
+
+#[test]
+fn wide_round_vector_products_match_the_plain_driver() {
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let program =
+        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    assert_eq!(program.rounds.len(), 1);
+    assert_eq!(program.rounds[0].len, 4);
+    let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
+    let plain = {
+        let inputs = program.classify_inputs(&values, |v| v);
+        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+    };
+    assert_eq!(run_rep3(&program, &values), plain);
+}
+
+#[test]
+fn all_public_precomputation_uses_the_plain_path_under_rep3() {
+    use circom_mpc_compiler::OptLevel;
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let mut cfg = config();
+    cfg.opt_level = OptLevel::O2;
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_public_test"),
+        cfg,
+    )
+    .unwrap();
+    let values = [Fr::from(0u64), Fr::from(9u64)];
+    let plain = {
+        let inputs = program.classify_inputs(&values, |v| v);
+        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+    };
+    assert_eq!(run_rep3(&program, &values), plain);
+}

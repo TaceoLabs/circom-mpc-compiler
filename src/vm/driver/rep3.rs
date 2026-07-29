@@ -63,10 +63,11 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, N> {
     }
 
     fn mul_local(&mut self, a: &Self::Share, b: &Self::Share) -> F {
-        // local_mul_vec squeezes the round's fresh mask from the correlated RNG - a round's slot
-        // count must equal its product count (see docs/ARCHITECTURE.md, "MPC lowering"), which is
-        // exactly what calling it once per MulLocal, one slice element at a time, guarantees.
         rep3::arithmetic::local_mul_vec(std::slice::from_ref(a), std::slice::from_ref(b), self.state)[0]
+    }
+
+    fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<F> {
+        rep3::arithmetic::local_mul_vec(a, b, self.state)
     }
 
     fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<Self::Share>> {

@@ -36,6 +36,15 @@ pub trait VmDriver<F: PrimeField> {
     /// The free local half of a secret x secret product (`a*b + mask`, rep3's `local_mul_vec`) -
     /// not a valid share on its own, only after `reshare`.
     fn mul_local(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Local;
+    /// Vector form used once per scheduled round. The default preserves compatibility for simple
+    /// drivers; rep3 overrides it so mask allocation and Rayon dispatch happen once per round.
+    fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<Self::Local> {
+        assert_eq!(a.len(), b.len(), "local product vectors must have equal length");
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| self.mul_local(a, b))
+            .collect()
+    }
     /// One batched network round: reshares every `Local` value together in a single message.
     fn reshare(&mut self, locals: &[Self::Local]) -> eyre::Result<Vec<Self::Share>>;
 

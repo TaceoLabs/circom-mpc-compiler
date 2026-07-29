@@ -93,24 +93,25 @@ pub struct SiteInput {
     pub slot: u32,
 }
 
-/// Every `TACEO_PRECOMPUTATION_*` site of one [`PrecomputeKind`] **at one stage**, batched into a
-/// single driver call. Codegen groups a circuit's sites by `(kind, stage)` (see
-/// `docs/ARCHITECTURE.md`, "Precomputation", and `passes::mpc::level` for what a stage is) - this is
-/// the whole point of dropping the co-snarks byte-compatibility contract: the runtime derives this
-/// batching itself instead of a caller hand-rolling it per protocol operation.
+/// Compatible `TACEO_PRECOMPUTATION_*` sites of one [`PrecomputeKind`], domain, and stage, batched
+/// into a single service. Codegen first keys sites by `(kind, stage, domain)`, then splits a group
+/// when an early consumer closes its anchor/deadline placement window. See
+/// `docs/ARCHITECTURE.md`, "Precomputation".
 ///
-/// Never one batch per site: sites sharing a stage are provably mutually independent, so N same-kind
-/// sites at one stage stay a single entry with `sites == N`. Staging only splits a batch when a
-/// genuine data dependency forces it.
+/// Independent compatible sites normally collapse into one entry. A site may remain alone when its
+/// kind, stage, or domain differs, or when combining it would cross an earlier result deadline.
 #[derive(Debug, Clone)]
 pub struct PrecomputeBatch {
     pub kind: PrecomputeKind,
     pub sites: usize,
+    /// Public batches execute the deterministic plain gadget and write clear values; shared
+    /// batches execute the driver's MPC gadget. `Local` is never valid here.
+    pub result_bank: Bank,
     /// `sites * (this kind's per-site input count)` entries, one site's inputs contiguous, in site
     /// order.
     pub input_slots: Vec<SiteInput>,
-    /// `sites * (this kind's per-site result count)` `Shared`-bank slots, one site's results
-    /// contiguous, in site order. `u32::MAX` = discard.
+    /// `sites * (this kind's per-site result count)` slots in [`Self::result_bank`], one site's
+    /// results contiguous, in site order. `u32::MAX` = discard.
     pub result_slots: Vec<u32>,
 }
 
