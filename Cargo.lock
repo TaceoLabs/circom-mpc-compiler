@@ -840,6 +840,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "rustc-hash",
+ "rustls",
  "serde",
  "serde_json",
  "taceo-circom-types",

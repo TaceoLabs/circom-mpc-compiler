@@ -26,5 +26,6 @@ pipeline and a bytecode VM.
 ```
 cargo test                              # prove/verify correctness tests (checked against circom itself)
 cargo run --release --example merces    # full pipeline on a real production circuit, proof included
-scripts/run-merces-net.sh --runs 5      # rep3 witness extension over a genuine 3-process TCP network
+scripts/run-merces-net.sh --runs 5      # rep3 witness extension over a genuine 3-process TLS network
+                                         # (needs configs/ + data/ supplied - see the script)
 ```

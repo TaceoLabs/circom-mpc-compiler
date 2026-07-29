@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Smoke-runs `merces-net` as three real processes on loopback, over a genuine TCP network - builds
-# the binary, then launches all three parties against the checked-in `netcfg/` (loopback
-# addresses, regenerate with `gen-config --hosts <real hostnames>` for an actual deployment).
+# Smoke-runs `merces-net` as three real processes on loopback, over a genuine TLS network - builds
+# the binary, then launches all three parties against party configs (TOML + TLS key/cert material)
+# produced outside this repo. Run this from wherever those configs' relative cert paths resolve.
 #
 # Usage:
-#   scripts/run-merces-net.sh [merces-net run args, e.g. --runs 5 --opt 2 --check]
+#   scripts/run-merces-net.sh [merces-net args, e.g. --runs 5 --opt 2 --check]
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-netcfg="${MERCES_NET_NETCFG:-$root/netcfg}"
+configs="${MERCES_NET_CONFIGS:-$root/configs}"
 
 cargo build --release --features net --bin merces-net --manifest-path "$root/Cargo.toml"
 bin="$root/target/release/merces-net"
 
-if [ ! -f "$netcfg/party0.toml" ]; then
-  "$bin" gen-config --out-dir "$netcfg" --hosts 127.0.0.1:10000 127.0.0.1:10001 127.0.0.1:10002
-fi
+for i in 1 2 3; do
+  if [ ! -f "$configs/party$i.toml" ]; then
+    echo "missing $configs/party$i.toml - supply party1.toml/party2.toml/party3.toml" \
+         "(my_id 0/1/2) plus their TLS key/cert material, or set MERCES_NET_CONFIGS" >&2
+    exit 1
+  fi
+done
 
-RUST_LOG="${RUST_LOG:-warn}" "$bin" run --config "$netcfg/party1.toml" "$@" &
-RUST_LOG="${RUST_LOG:-warn}" "$bin" run --config "$netcfg/party2.toml" "$@" &
-"$bin" run --config "$netcfg/party0.toml" "$@"
+RUST_LOG="${RUST_LOG:-warn}" "$bin" --config "$configs/party2.toml" "$@" &
+RUST_LOG="${RUST_LOG:-warn}" "$bin" --config "$configs/party3.toml" "$@" &
+"$bin" --config "$configs/party1.toml" "$@"
 wait

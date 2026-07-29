@@ -1,27 +1,37 @@
-//! Runs rep3 witness extension over a genuine TCP network - one process per party, started
+//! Runs rep3 witness extension over a genuine TLS network - one process per party, started
 //! separately (potentially on different machines). Unlike `examples/merces.rs`, which runs all
 //! three parties in one process over an in-process `LocalNetwork`, this binary is the tool for
 //! measuring real network behavior: connection and correlated-randomness setup happen once and are
 //! excluded from every timed run, so `--runs` reports witness-extension time alone.
 //!
 //! ```text
-//! # one-time: generate a party TOML for each node
-//! cargo run --release --features net --bin merces-net -- gen-config \
-//!     --out-dir netcfg --hosts node0:10000 node1:10000 node2:10000
-//!
-//! # on each node (party N gets netcfg/partyN.toml)
-//! cargo run --release --features net --bin merces-net -- run \
-//!     --config netcfg/party0.toml --opt 1 --runs 5 --check
+//! # on each node (party N gets its own party config, e.g. configs/partyN.toml)
+//! cargo run --release --features net --bin merces-net -- \
+//!     --config configs/party0.toml --opt 1 --runs 5 --check
 //! ```
 //!
-//! See `scripts/run-merces-net.sh` for a local 3-process smoke run on loopback. `netcfg/` in this
-//! repo is checked in with loopback addresses so a fresh clone can run the smoke script with no
-//! setup; regenerate it with real hostnames for an actual multi-machine deployment.
+//! The party config TOML and the TLS material it points at (a PKCS#8 private key and one
+//! certificate per party, indexed by id) are produced outside this repo - see
+//! `scripts/run-merces-net.sh` for the shape it expects. `dns_name` in `[[network.parties]]`
+//! doubles as the TLS server name (`ServerName::try_from` in `mpc_net::tls`), so a config that
+//! addresses parties by bare IP needs certs with a matching IP SAN. Example TOML:
 //!
-//! Plain TCP, deliberately: this binary is for local network-shape/timing experiments, not a
-//! trust boundary, so TLS's certificate distribution wasn't worth the setup cost. Swapping in
-//! `mpc_net::tls::TlsNetwork` behind the `--config` TOML's own `[network.tls]` table is enough to
-//! add TLS back if that changes.
+//! ```toml
+//! [network]
+//! my_id = 0
+//! bind_addr = "0.0.0.0:10000"
+//! timeout = "30min"
+//! connect_timeout = "60s"
+//!
+//! [network.tls]
+//! key = "./data/key0.der"
+//! certs = ["./data/cert0.der", "./data/cert1.der", "./data/cert2.der"]
+//!
+//! [[network.parties]]
+//! id = 0
+//! dns_name = "127.0.0.1:10000"
+//! # ... id = 1, id = 2
+//! ```
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -29,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use ark_bn254::{Bn254, Fr};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use circom_mpc_compiler::vm::counting_net::CountingNet;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
@@ -42,7 +52,7 @@ use mpc_core::protocols::rep3::{
 };
 use mpc_net::bytes::Bytes;
 use mpc_net::config::{NetworkConfig, NetworkConfigFile};
-use mpc_net::tcp::TcpNetwork;
+use mpc_net::tls::TlsNetwork;
 use mpc_net::Network;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -51,20 +61,6 @@ use serde::Deserialize;
 #[derive(Parser)]
 #[command(about = "Real-network rep3 witness extension, one process per party")]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Connect to the other two parties over TCP and run rep3 witness extension.
-    Run(RunArgs),
-    /// Generate a party TOML per node.
-    GenConfig(GenConfigArgs),
-}
-
-#[derive(Parser)]
-struct RunArgs {
     /// Path to this party's network config TOML (its `my_id` says which party it is).
     #[arg(long)]
     config: PathBuf,
@@ -89,22 +85,6 @@ struct RunArgs {
     check: bool,
 }
 
-#[derive(Parser)]
-struct GenConfigArgs {
-    /// Directory to write party{0,1,2}.toml into.
-    #[arg(long)]
-    out_dir: PathBuf,
-    /// hostname:port for party 0, 1, 2, in order.
-    #[arg(long, num_args = 3)]
-    hosts: Vec<String>,
-    /// Send/recv timeout, e.g. "30min".
-    #[arg(long, default_value = "30min")]
-    timeout: String,
-    /// Connection establish timeout, e.g. "60s".
-    #[arg(long, default_value = "60s")]
-    connect_timeout: String,
-}
-
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
@@ -127,11 +107,11 @@ fn opt_level(n: u8) -> eyre::Result<OptLevel> {
 
 fn main() -> eyre::Result<()> {
     install_tracing();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| eyre::eyre!("could not install default rustls crypto provider"))?;
 
-    match Cli::parse().command {
-        Command::Run(args) => run(args),
-        Command::GenConfig(args) => gen_config(args),
-    }
+    run(Cli::parse())
 }
 
 /// Sends and receives one byte to/from each peer, so no party proceeds ahead of the others -
@@ -173,7 +153,7 @@ struct FileConfig {
     network: NetworkConfigFile,
 }
 
-fn run(args: RunArgs) -> eyre::Result<()> {
+fn run(args: Cli) -> eyre::Result<()> {
     let mut toml_src = String::new();
     std::fs::File::open(&args.config)
         .map_err(|e| eyre::eyre!("opening {}: {e}", args.config.display()))?
@@ -181,6 +161,11 @@ fn run(args: RunArgs) -> eyre::Result<()> {
     let file: FileConfig = toml::from_str(&toml_src)
         .map_err(|e| eyre::eyre!("parsing {}: {e}", args.config.display()))?;
     let network_config = NetworkConfig::try_from(file.network)?;
+    eyre::ensure!(
+        network_config.tls.is_some(),
+        "{} has no [network.tls] table; TlsNetwork needs `key` and `certs`",
+        args.config.display(),
+    );
     let my_id = network_config.my_id;
 
     let root = env!("CARGO_MANIFEST_DIR");
@@ -239,7 +224,7 @@ fn run(args: RunArgs) -> eyre::Result<()> {
     // Network establishment, the rep3 correlated-randomness handshake, and a warmup round trip
     // all happen here, entirely outside the timed region below.
     let t = Instant::now();
-    let net = TcpNetwork::new(network_config)?;
+    let net = TlsNetwork::new(network_config)?;
     barrier(&net)?;
     warmup(&net, 1 << 20)?;
     let mut state = Rep3State::new(&net, A2BType::default())?;
@@ -294,7 +279,7 @@ fn run(args: RunArgs) -> eyre::Result<()> {
 /// timed runs, so its network traffic never pollutes a measurement.
 fn check(
     my_id: usize,
-    net: &CountingNet<TcpNetwork>,
+    net: &CountingNet<TlsNetwork>,
     program: &Program<Fr>,
     values: &[Fr],
     witness: Vec<Rep3PrimeFieldShare<Fr>>,
@@ -336,35 +321,4 @@ fn send_witness(net: &impl Network, to: usize, witness: &[Rep3PrimeFieldShare<Fr
 fn recv_witness(net: &impl Network, from: usize) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>> {
     let buf = net.recv(from)?;
     Ok(Vec::<Rep3PrimeFieldShare<Fr>>::deserialize_compressed(&buf[..])?)
-}
-
-fn gen_config(args: GenConfigArgs) -> eyre::Result<()> {
-    eyre::ensure!(args.hosts.len() == 3, "--hosts needs exactly 3 entries, one per party");
-    std::fs::create_dir_all(&args.out_dir)?;
-
-    for i in 0..3 {
-        let bind_addr = format!("0.0.0.0:{}", port_of(&args.hosts[i])?);
-        let mut toml = String::new();
-        toml.push_str("[network]\n");
-        toml.push_str(&format!("my_id = {i}\n"));
-        toml.push_str(&format!("bind_addr = \"{bind_addr}\"\n"));
-        toml.push_str(&format!("timeout = \"{}\"\n", args.timeout));
-        toml.push_str(&format!("connect_timeout = \"{}\"\n", args.connect_timeout));
-        for (j, host) in args.hosts.iter().enumerate() {
-            toml.push_str(&format!("\n[[network.parties]]\nid = {j}\ndns_name = \"{host}\"\n"));
-        }
-
-        let out = args.out_dir.join(format!("party{i}.toml"));
-        std::fs::write(&out, &toml)?;
-        println!("wrote {}", out.display());
-    }
-    Ok(())
-}
-
-fn port_of(host: &str) -> eyre::Result<u16> {
-    host.rsplit_once(':')
-        .ok_or_else(|| eyre::eyre!("expected hostname:port, got {host}"))?
-        .1
-        .parse()
-        .map_err(|e| eyre::eyre!("invalid port in {host}: {e}"))
 }

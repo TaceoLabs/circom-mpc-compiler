@@ -29,6 +29,7 @@ mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", ver
 clap = { version = "4.5", features = ["derive"], optional = true }
 rand = { version = "0.8.5", optional = true }
 toml = { version = "0.8", optional = true }
+rustls = { version = "0.23", optional = true }
 
 [features]
 default = ["rep3", "round-counting"]
@@ -37,11 +38,11 @@ rep3 = ["dep:mpc-core", "dep:mpc-net"]
 # Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
 # wrapper is a thin delegating decorator, two relaxed atomics per send/recv.
 round-counting = ["rep3"]
-# The `merces-net` binary: real rep3 witness extension across three processes over a genuine TCP
+# The `merces-net` binary: real rep3 witness extension across three processes over a genuine TLS
 # network, as opposed to every other rep3 test/example/bench, which uses the in-process
-# `mpc_net::local::LocalNetwork`. Non-default: pulls in mpc-net's `tcp` backend plus
-# clap/rand/toml, none of which the library itself needs.
-net = ["round-counting", "mpc-net/tcp", "dep:clap", "dep:rand", "dep:toml"]
+# `mpc_net::local::LocalNetwork`. Non-default: pulls in mpc-net's `tls` backend plus
+# clap/rand/toml/rustls, none of which the library itself needs.
+net = ["round-counting", "mpc-net/tls", "dep:clap", "dep:rand", "dep:toml", "dep:rustls"]
 
 [[bin]]
 name = "merces-net"
