@@ -95,9 +95,7 @@ pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
 /// round cost.
 ///
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
-/// The bit decomposition (`a2y2b` then `bit_inject_many`) has the same per-site `a2y2b` limitation
-/// `num2bits::rep3_trace` documents: one round per site for that step, then one combined
-/// `bit_inject_many` call across every site's bits.
+/// The bit decomposition (`a2y2b_many` then `bit_inject_many`) is batched the same way.
 #[cfg(feature = "rep3")]
 pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
@@ -174,11 +172,11 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
         all_parts.push(parts);
     }
 
-    // Per-site a2b (no batched form - see the module doc), then one combined bit-injection.
+    // One a2b across every site's sum, then one combined bit-injection.
+    let a2b = conversion::a2y2b_many(&sums, net, state)?;
     let mut all_bit_shares = Vec::with_capacity(sites * 135);
-    for &sum in &sums {
-        let a_bits = conversion::a2y2b(sum, net, state)?;
-        all_bit_shares.extend((0..135).map(|i| (&a_bits >> i) & BigUint::one()));
+    for a_bits in &a2b {
+        all_bit_shares.extend((0..135).map(|i| (a_bits >> i) & BigUint::one()));
     }
     let all_bits_field = conversion::bit_inject_many(&all_bit_shares, net, state)?;
 
@@ -219,5 +217,30 @@ mod tests {
 
         let got = run3(&input, |net, state, shares| rep3_trace(shares, net, state));
         assert_eq!(got, expected);
+    }
+
+    /// Pins the round count: one batched 127-way `mul_vec`, one `a2y2b_many` across the whole
+    /// batch, then one `bit_inject_many` - independent of site count. The exact number inherits
+    /// `a2y2b_many`'s own (a garbled-circuit conversion, not pinned here), but it must not scale
+    /// with the number of sites.
+    #[cfg(feature = "round-counting")]
+    #[test]
+    fn rep3_cost_is_independent_of_site_count() {
+        use crate::vm::gadgets::test_support::run3_counted;
+
+        let input_for = |sites: usize| -> Vec<Fr> {
+            let mut input = Vec::new();
+            for i in 0..sites {
+                input.extend(super::num2bits::plain_trace(Fr::from(123_456_789u64 + i as u64), 254));
+            }
+            input
+        };
+
+        let (_, rounds_one) =
+            run3_counted(&input_for(1), |net, state, shares| rep3_trace(shares, net, state));
+        let (_, rounds_two) =
+            run3_counted(&input_for(2), |net, state, shares| rep3_trace(shares, net, state));
+
+        assert_eq!(rounds_one, rounds_two, "round count must not scale with site count");
     }
 }

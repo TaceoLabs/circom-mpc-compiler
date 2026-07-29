@@ -59,4 +59,21 @@ mod tests {
         let got = run3(&values, |net, state, shares| rep3_trace(shares, net, state));
         assert_eq!(got, expected);
     }
+
+    /// Pins the round count `eq_public_many` + `inv_vec` actually cost, so the "batched circuit-wide,
+    /// independent of site count" claim stays true. The count itself is inherited from mpc-core, not
+    /// chosen here - it is measured once (`sites=1`) and then required to hold at `sites=4` too.
+    #[cfg(feature = "round-counting")]
+    #[test]
+    fn rep3_cost_is_independent_of_site_count() {
+        use crate::vm::gadgets::test_support::run3_counted;
+
+        let one_site = [Fr::from(0u64)];
+        let (_, rounds_one) = run3_counted(&one_site, |net, state, shares| rep3_trace(shares, net, state));
+
+        let four_sites = [Fr::from(0u64), Fr::from(7u64), Fr::from(0u64), Fr::from(3u64)];
+        let (_, rounds_four) = run3_counted(&four_sites, |net, state, shares| rep3_trace(shares, net, state));
+
+        assert_eq!(rounds_one, rounds_four, "round count must not scale with site count");
+    }
 }

@@ -315,10 +315,11 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    free). Emitting a singleton round (rather than a bare `MulLocal`) keeps every intermediate graph
    state valid and is exactly `rep3::arithmetic::mul` called once per product - so this pass alone,
    before `round_schedule` runs, is already a correct (if naive) lowering, independently testable.
-3. **`round_schedule.rs`** - the headline transform. Computes MPC depth per value (`0` for
-   `Public`/`Input`/`Constant`/precomputation ops, `max` of inputs for linear ops and `MulLocal`,
-   `depth(Round) + 1` for `RoundResult`), then merges every singleton round at the same depth into
-   one. ASAP scheduling, so the round count equals the circuit's multiplicative depth - the minimum -
+3. **`round_schedule.rs`** - the headline transform. Buckets every value by `passes::mpc::level`'s
+   network-event level (see "The event axis" below - `Precompute`/`PrecomputeResult` charge a level
+   like everything else, they are not a `0` special case), then merges every singleton round at the
+   same level into one. ASAP scheduling, so the round count equals the circuit's multiplicative depth
+   plus any levels a precomputation site adds - the minimum for that DAG -
    and **message count drops from one-per-secret-mul to one-per-depth-level**. Not a
    `Graph::rewrite` consumer (see the note under "Pass infrastructure"): a product's final round is
    only fully known once every *other* product at its depth has been seen, which can be later in the
@@ -334,9 +335,12 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    checks it against three synthetic circuits with known multiplicative-depth shape
    (`circuits/bench_{chain,tree,widesum}.circom`): a chain of 3 dependent products needs 3 rounds of
    width 1, a balanced tree of 8 inputs needs 3 rounds of width 4/2/1, and 4 independent products
-   needs exactly 1 round of width 4. These are synthetic because the circuits that currently compile
-   at all are small (see "Known gaps") - there is no large real circuit yet to measure batching
-   against, and that limit is worth stating rather than hiding.
+   needs exactly 1 round of width 4. `mpc_summary` reports **IR reshare rounds only** - it has no
+   visibility into a precomputation batch's own internal round cost, which is a property of
+   `vm::gadgets`, not of the graph. `examples/merces.rs` (`round-counting` feature,
+   `vm::counting_net::CountingNet`) reports the *measured* total against a real 3-party run on the
+   merces circuits and attributes the difference to gadget-internal rounds (see "Real-world target
+   circuits" below).
 
 **Deliberately deferred, reason recorded instead of stubbed:** open sinking and `B2A(A2B(x))`
 cancellation/conversion minimization need `Div`, comparisons, or bitwise ops to exist - none do (see
@@ -766,7 +770,11 @@ all three intermediates local linear combinations by binomial expansion. `y` is 
 unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp` trick extended to also emit
 `square` and `pow_4` - which is precisely why it composes with a *full* trace at no extra round cost, since
 mpc-core only ever needed `x⁵`. Total per batch: `3 + (8 + partial_rounds(t))` rounds - 67 for
-`t ∈ {2,3,4}`, 68 for `t ∈ {8,12,16}` - **independent of the number of sites**.
+`t ∈ {2,3,4}`, 68 for `t ∈ {8,12,16}` - **independent of the number of sites**. The `r²..r⁵` prep
+happens exactly once per batch, in `Rep3Ops::prepare_sboxes`, *not* inside `sbox_layer` itself - each
+layer only slices a disjoint range out of that one pool. Measured, not just asserted, by
+`vm::gadgets::poseidon2::tests::rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites`
+(needs the `round-counting` feature) via `vm::counting_net::CountingNet`.
 
 The 22 constant tables in `vm/gadgets/poseidon2_constants.rs` are transcribed verbatim from
 `poseidon2_constants.circom`, and a unit test re-extracts the hex from that circuit file at test time and
@@ -867,6 +875,17 @@ witness compaction on this fork. This is *not* the same level the rest of `tests
 compaction-sensitive) - see `witness_extension_test_precompute!`'s own doc comment.
 
 ## Known gaps
+
+- **Batches that are provably independent still run as sequential driver calls, and so does a
+  same-level reshare round alongside them.** Two `(kind, stage)` batches at the same stage but
+  different kinds (a Poseidon2 `t=4` batch and a `t=16` batch, say) are exactly the case "The event
+  axis" proves mutually independent, and a same-level reshare round is independent of both by the
+  same argument - yet `Machine::run` issues each as its own `VmDriver` call, one after another,
+  paying the sum of their round counts where the max would do. `VmDriver` is fully synchronous
+  (`vm::driver::mod`), so there is no way to overlap them today. Fixing it means a split-phase
+  (issue/collect) or async `VmDriver`; the ALAP/window scheduling already deferred in
+  `passes::mpc::level` (see "Deliberately deferred" under "The event axis") is the other half of the
+  same story - both would need a cost model over batch services that does not exist yet.
 
 - **Only `Add`/`Sub`/`Mul` are supported at runtime.** Every other circom operator is a typed
   `Unsupported::Operator`/`NonConstantOperator` error (see "`Op<F>` is deliberately narrow" above).

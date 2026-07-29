@@ -131,6 +131,13 @@ trait Ops<F: PrimeField> {
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Self::V;
     fn add_public(&mut self, a: &Self::V, c: F) -> Self::V;
     fn mul_public(&mut self, a: &Self::V, c: F) -> Self::V;
+    /// Prepares any per-element correlated randomness [`Self::sbox_layer`] needs, for the whole
+    /// permutation batch at once - `walk` calls this once, up front, with the exact total element
+    /// count across every s-box layer (full and partial) and every site. A no-op unless a backend
+    /// actually has batch-wide prep to do (only `Rep3Ops` does).
+    fn prepare_sboxes(&mut self, _total_elements: usize) -> eyre::Result<()> {
+        Ok(())
+    }
     /// One s-box layer for a whole batch at once - the only step that communicates.
     fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>>;
 }
@@ -372,6 +379,10 @@ fn walk<F: PrimeField, O: Ops<F>>(
     let sites = states.len() / t;
     let pr = partial_rounds(t);
 
+    // 8 full-round layers of `sites * t` elements, plus `pr` partial-round layers of `sites`
+    // elements - the exact total the three `sbox_layer` calls below make, combined.
+    ops.prepare_sboxes(sites * (8 * t + pr))?;
+
     let mut traces: Vec<SiteTrace<O::V>> = Vec::with_capacity(sites);
     // Current state per site, and the running record.
     let mut current: Vec<Vec<O::V>> = Vec::with_capacity(sites);
@@ -534,16 +545,32 @@ pub fn plain_trace<F: PrimeField>(t: usize, states: &[F]) -> eyre::Result<Vec<F>
 
 // --- rep3 ---
 
+/// The correlated randomness [`Rep3Ops::sbox_layer`] consumes: `r` and its powers `r²..r⁵`, one
+/// entry per element across the *whole* permutation batch (every s-box layer, every site),
+/// prepared once by [`Rep3Ops::prepare_sboxes`] and consumed a slice at a time as layers run.
+#[cfg(feature = "rep3")]
+struct SboxPool<F: PrimeField> {
+    r: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+    r2: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+    r3: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+    r4: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+    r5: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+    /// How many elements of the pool have already been handed to a `sbox_layer` call.
+    consumed: usize,
+}
+
 /// rep3 backend. The s-box uses the masked-opening trick (see [`Rep3Ops::sbox_layer`]) so a whole
 /// layer costs **one** network round instead of the three a naive `x^2, x^4, x^5` chain needs.
 #[cfg(feature = "rep3")]
-struct Rep3Ops<'a, N: mpc_net::Network> {
+struct Rep3Ops<'a, F: PrimeField, N: mpc_net::Network> {
     net: &'a N,
     state: &'a mut mpc_core::protocols::rep3::Rep3State,
+    /// Populated by `prepare_sboxes` before `walk`'s round loop runs; `None` only before that call.
+    pool: Option<SboxPool<F>>,
 }
 
 #[cfg(feature = "rep3")]
-impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, N> {
+impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
     type V = mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>;
 
     fn public(&mut self, c: F) -> Self::V {
@@ -559,22 +586,17 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, N> {
         mpc_core::protocols::rep3::arithmetic::mul_public(*a, c)
     }
 
-    /// `x^2`, `x^4` and `x^5` are genuinely sequential as multiplications - from `{x, x^2}` the
-    /// second round can only reach degree 4 - so a naive layer is 3 rounds, i.e. `3 * (8 + pr)` for
-    /// the whole permutation (192 at t=3).
-    ///
-    /// Instead, mask and open: with a fresh random `r` (and `r^2..r^5` prepared once for the entire
-    /// batch), publish `y = x - r` in **one** round; then `x = y + r` makes all three intermediates
-    /// local linear combinations by binomial expansion. `y` is public and `r` uniform and unknown, so
-    /// nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp` trick, extended to also
-    /// emit `square` and `pow_4` - which is exactly why it composes with a *full* trace at no extra
-    /// round cost (mpc-core only ever needed `x^5`).
-    fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>> {
+    /// `r`, `r²`, `r³`, `r⁴`, `r⁵` for every element the whole permutation batch's s-box layers will
+    /// need (see [`SboxPool`]), in 3 rounds total - independent of batch size, and done exactly
+    /// once, before any layer runs. `r²..r⁵` depend only on `r`, not on any secret input, which is
+    /// what makes hoisting this out of the per-layer [`Self::sbox_layer`] sound: a *disjoint* slice
+    /// of this pool goes to each layer, so every (layer, element) still gets its own fresh `r` -
+    /// reusing one `r` across two layers would leak `x₁ - x₂` from their two masked opens.
+    fn prepare_sboxes(&mut self, total_elements: usize) -> eyre::Result<()> {
         use mpc_core::protocols::rep3::arithmetic;
 
-        let n = xs.len();
+        let n = total_elements;
         let r: Vec<Self::V> = (0..n).map(|_| arithmetic::rand(self.state)).collect();
-        // 3 rounds, independent of n: r2, r4, then r3 and r5 together.
         let r2 = arithmetic::mul_vec(&r, &r, self.net, self.state)?;
         let r4 = arithmetic::mul_vec(&r2, &r2, self.net, self.state)?;
         let (lhs, rhs): (Vec<_>, Vec<_>) = r
@@ -586,10 +608,56 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, N> {
         let r35 = arithmetic::mul_vec(&lhs, &rhs, self.net, self.state)?;
         let (r3, r5) = r35.split_at(n);
 
+        self.pool = Some(SboxPool {
+            r,
+            r2,
+            r3: r3.to_vec(),
+            r4,
+            r5: r5.to_vec(),
+            consumed: 0,
+        });
+        Ok(())
+    }
+
+    /// `x^2`, `x^4` and `x^5` are genuinely sequential as multiplications - from `{x, x^2}` the
+    /// second round can only reach degree 4 - so a naive layer is 3 rounds, i.e. `3 * (8 + pr)` for
+    /// the whole permutation (192 at t=3).
+    ///
+    /// Instead, mask and open: with `r` (and `r^2..r^5`, prepared once for the entire batch by
+    /// [`Self::prepare_sboxes`]), publish `y = x - r` in **one** round; then `x = y + r` makes all
+    /// three intermediates local linear combinations by binomial expansion. `y` is public and `r`
+    /// uniform and unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp`
+    /// trick, extended to also emit `square` and `pow_4` - which is exactly why it composes with a
+    /// *full* trace at no extra round cost (mpc-core only ever needed `x^5`).
+    fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>> {
+        use mpc_core::protocols::rep3::arithmetic;
+
+        let n = xs.len();
+        let pool = self
+            .pool
+            .as_mut()
+            .ok_or_else(|| eyre::eyre!("sbox_layer called before prepare_sboxes"))?;
+        eyre::ensure!(
+            pool.consumed + n <= pool.r.len(),
+            "sbox randomness pool exhausted: {} elements requested, {} remain",
+            n,
+            pool.r.len() - pool.consumed
+        );
+        let start = pool.consumed;
+        let end = start + n;
+        pool.consumed = end;
+        let (r, r2, r3, r4, r5) = (
+            &pool.r[start..end],
+            &pool.r2[start..end],
+            &pool.r3[start..end],
+            &pool.r4[start..end],
+            &pool.r5[start..end],
+        );
+
         // The one round that scales with the layer.
         let masked: Vec<Self::V> = xs
             .iter()
-            .zip(&r)
+            .zip(r)
             .map(|(x, r)| arithmetic::sub(*x, *r))
             .collect();
         let y = arithmetic::open_vec(&masked, self.net)?;
@@ -646,6 +714,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     let mut ops = Rep3Ops {
         net,
         state: rep3_state,
+        pool: None,
     };
     let traces = walk(&mut ops, t, states, &rc)?;
     let mut out = Vec::with_capacity(sites * result_slots(t));
@@ -749,6 +818,23 @@ mod tests {
                 rep3_trace(t, shares, net, state)
             });
             assert_eq!(got, expected, "t={t}");
+        }
+    }
+
+    /// Pins the round claim in `rep3_trace`'s doc: `3 + 8 + partial_rounds(t)`, the same for every
+    /// site count in a batch.
+    #[cfg(all(feature = "rep3", feature = "round-counting"))]
+    #[test]
+    fn rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites() {
+        use crate::vm::gadgets::test_support::run3_counted;
+
+        for t in SUPPORTED_WIDTHS {
+            let expected_rounds = 3 + 8 + partial_rounds(t);
+            for sites in [1, 3] {
+                let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
+                let (_, rounds) = run3_counted(&states, |net, state, shares| rep3_trace(t, shares, net, state));
+                assert_eq!(rounds, expected_rounds, "t={t} sites={sites}");
+            }
         }
     }
 }

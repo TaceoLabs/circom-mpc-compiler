@@ -230,7 +230,9 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 
     fn handle_store_bucket(&mut self, store_bucket: &StoreBucket) -> Result<()> {
         match &store_bucket.context.size {
-            SizeOption::Single(n) if *n > 1 => return self.handle_bulk_store_bucket(store_bucket, *n),
+            SizeOption::Single(n) if *n > 1 => {
+                return self.handle_bulk_store_bucket(store_bucket, *n)
+            }
             SizeOption::Multiple(_) => {
                 return Err(Unsupported::Instruction {
                     kind: "bulk copy spanning multiple component instances".to_owned(),
@@ -346,9 +348,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         // instantiation of any repeated regular template.
         if let Some(sub_cmp) = self.compiled_graphs.get(&symbol) {
             let sub_cmp = sub_cmp.clone();
-            self.push_instances(create_cmp_bucket, |signal_offset| SubGraphInstance::Compiled {
-                template: sub_cmp.clone(),
-                signal_offset,
+            self.push_instances(create_cmp_bucket, |signal_offset| {
+                SubGraphInstance::Compiled {
+                    template: sub_cmp.clone(),
+                    signal_offset,
+                }
             });
             return Ok(());
         }
@@ -408,9 +412,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         let sub_cmp = sub_cmp_compiler.parse()?;
         self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
 
-        self.push_instances(create_cmp_bucket, |signal_offset| SubGraphInstance::Compiled {
-            template: sub_cmp.clone(),
-            signal_offset,
+        self.push_instances(create_cmp_bucket, |signal_offset| {
+            SubGraphInstance::Compiled {
+                template: sub_cmp.clone(),
+                signal_offset,
+            }
         });
         Ok(())
     }
@@ -480,9 +486,11 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 };
                 if let AddressType::Variable = &load_bucket.address_type {
                     let value_id = *self.var_to_value.get(&index).expect("must be there");
-                    to_usize(self.eval_constant_node(value_id).unwrap_or_else(|| {
-                        panic!("non constant loading in get constant value")
-                    }))
+                    to_usize(
+                        self.eval_constant_node(value_id).unwrap_or_else(|| {
+                            panic!("non constant loading in get constant value")
+                        }),
+                    )
                 } else {
                     panic!("non variable loading in get constant value");
                 }
@@ -747,7 +755,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     pub(crate) fn handle_inst(&mut self, inst: &Instruction) -> Result<Option<ValueId>> {
-        tracing::trace!("{}", inst.to_string());
         match inst {
             Instruction::Value(value_bucket) => Ok(Some(self.handle_value_bucket(value_bucket)?)),
             Instruction::Load(load_bucket) => Ok(Some(self.handle_load_bucket(load_bucket)?)),

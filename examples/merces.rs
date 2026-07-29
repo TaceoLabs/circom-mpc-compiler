@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::fixtures::{flatten, merces_server_inputs};
+use circom_mpc_compiler::vm::counting_net::CountingNet;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
@@ -22,6 +23,7 @@ use mpc_core::protocols::rep3::{
     combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
 };
 use mpc_net::local::LocalNetwork;
+use mpc_net::Network;
 use rand::thread_rng;
 
 const MAX_DEPTH: usize = 13;
@@ -122,8 +124,14 @@ fn main() -> eyre::Result<()> {
     );
 
     let t = Instant::now();
-    let rep3 = run_rep3(&program, &values);
+    let (rep3, measured_rounds, bytes_sent, bytes_recv) = run_rep3(&program, &values);
     println!("rep3:    {:.2?}  (3 parties over an in-process LocalNetwork)", t.elapsed());
+    println!(
+        "  rounds={measured_rounds} measured  ({} reshare + {} gadget-internal)",
+        summary.rounds,
+        measured_rounds.saturating_sub(summary.rounds),
+    );
+    println!("  bytes sent={bytes_sent} recv={bytes_recv}  (party 0)");
 
     if rep3 == plain {
         println!("\nwitnesses agree: the rep3 driver reconstructs exactly what the plain one computes.");
@@ -139,8 +147,11 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Three real parties, each with its own connection and correlated randomness.
-fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
+/// Three real parties, each with its own connection and correlated randomness. Returns the
+/// reconstructed witness, party 0's measured round count, and party 0's sent/received byte totals
+/// (summed across its two peer connections) - the `CountingNet` wrapper is what makes those last two
+/// observable at all; see `vm::counting_net`.
+fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> (Vec<Fr>, usize, usize, usize) {
     let mut rng = thread_rng();
     let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
         .input_domains
@@ -151,13 +162,14 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
         .collect();
 
     let networks = LocalNetwork::new(3);
-    let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+    let results: Vec<(Vec<Rep3PrimeFieldShare<Fr>>, usize, usize, usize)> = std::thread::scope(|scope| {
         networks
             .into_iter()
             .enumerate()
             .map(|(party, net)| {
                 let shares = &shares;
                 scope.spawn(move || {
+                    let net = CountingNet::new(net);
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                     let mut driver = Rep3Driver::new(&net, &mut state);
                     let mut next = 0;
@@ -166,7 +178,12 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
                         next += 1;
                         s
                     });
-                    Machine::run(program, &mut driver, &inputs).unwrap()
+                    let witness = Machine::run(program, &mut driver, &inputs).unwrap();
+                    let (bytes_sent, bytes_recv) = net
+                        .get_connection_stats()
+                        .iter()
+                        .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
+                    (witness, net.rounds(), bytes_sent, bytes_recv)
                 })
             })
             .collect::<Vec<_>>()
@@ -175,6 +192,16 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
             .collect()
     });
 
-    let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
-    combine_field_elements(&w0, &w1, &w2)
+    let [(w0, rounds, bytes_sent, bytes_recv), (w1, ..), (w2, ..)]: [(
+        Vec<Rep3PrimeFieldShare<Fr>>,
+        usize,
+        usize,
+        usize,
+    ); 3] = results.try_into().unwrap();
+    (
+        combine_field_elements(&w0, &w1, &w2),
+        rounds,
+        bytes_sent,
+        bytes_recv,
+    )
 }

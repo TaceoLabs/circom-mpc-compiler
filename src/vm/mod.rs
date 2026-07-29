@@ -5,6 +5,8 @@
 //! "Bytecode and the slot machine".
 
 pub mod codegen;
+#[cfg(feature = "round-counting")]
+pub mod counting_net;
 pub mod driver;
 pub mod gadgets;
 pub mod machine;

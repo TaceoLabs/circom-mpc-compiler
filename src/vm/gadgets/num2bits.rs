@@ -12,14 +12,8 @@ pub fn plain_trace<F: PrimeField>(x: F, n: usize) -> Vec<F> {
         .collect()
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::precompute` call.
-///
-/// `a2y2b`'s arithmetic-to-binary conversion has no batched (`_vec`) form in mpc-core, so it costs
-/// one round *per site* - the one part of this gadget that genuinely isn't circuit-wide batched
-/// (worth flagging rather than silently pretending otherwise - see `docs/ARCHITECTURE.md`,
-/// "Precomputation"). The bit-injection step that follows it, in contrast, is batched across every
-/// site's bits in a single call, which is where the real savings are for a circuit with many
-/// Num2Bits sites.
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::precompute` call:
+/// one `a2y2b_many` across every site's input, then one `bit_inject_many` across every site's bits.
 #[cfg(feature = "rep3")]
 pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     n: usize,
@@ -31,10 +25,10 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     use num_bigint::BigUint;
     use num_traits::One;
 
+    let a2b = conversion::a2y2b_many(inputs, net, state)?;
     let mut all_bits = Vec::with_capacity(inputs.len() * n);
-    for &x in inputs {
-        let a2b = conversion::a2y2b(x, net, state)?;
-        all_bits.extend((0..n).map(|i| (&a2b >> i) & BigUint::one()));
+    for a2b in &a2b {
+        all_bits.extend((0..n).map(|i| (a2b >> i) & BigUint::one()));
     }
     conversion::bit_inject_many(&all_bits, net, state)
 }
@@ -54,5 +48,24 @@ mod tests {
 
         let got = run3(&values, |net, state, shares| rep3_trace(n, shares, net, state));
         assert_eq!(got, expected);
+    }
+
+    /// Pins the round count: one `a2y2b_many` call across the whole batch, then one
+    /// `bit_inject_many` - independent of site count. The exact number is `a2y2b_many`'s own
+    /// (a garbled-circuit conversion, not pinned here), but it must not scale with the number of
+    /// sites.
+    #[cfg(feature = "round-counting")]
+    #[test]
+    fn rep3_cost_is_independent_of_site_count() {
+        use crate::vm::gadgets::test_support::run3_counted;
+
+        let n = 12;
+        let one_site = [Fr::from(1u64)];
+        let (_, rounds_one) = run3_counted(&one_site, |net, state, shares| rep3_trace(n, shares, net, state));
+
+        let four_sites: Vec<Fr> = (1..=4).map(Fr::from).collect();
+        let (_, rounds_four) = run3_counted(&four_sites, |net, state, shares| rep3_trace(n, shares, net, state));
+
+        assert_eq!(rounds_one, rounds_four, "round count must not scale with site count");
     }
 }
