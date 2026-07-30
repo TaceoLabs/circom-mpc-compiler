@@ -72,6 +72,12 @@ required-features = ["rep3"]
 name = "compile"
 harness = false
 
+# Batch-size scaling sweep for the merces server mains; see benches/merces.rs.
+[[bench]]
+name = "merces"
+harness = false
+required-features = ["rep3"]
+
 # Runs the circuits across three real rep3 parties.
 [[example]]
 name = "merces"
