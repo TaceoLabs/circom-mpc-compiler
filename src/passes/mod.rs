@@ -7,6 +7,7 @@ mod algebraic;
 mod const_fold;
 mod cse;
 mod dead_code;
+mod dead_signals;
 // pub(crate), not private: `vm::codegen` reuses `mpc::domain::{Domain, signal_domain}` - the same
 // per-value classification `mul_split` computes while lowering - to pick opcodes and slot banks,
 // rather than re-deriving domain from scratch. See `docs/ARCHITECTURE.md`, "Bytecode and the slot
@@ -80,7 +81,12 @@ pub(crate) struct PassManager<F: PrimeField> {
 
 impl<F: PrimeField> PassManager<F> {
     pub(crate) fn for_opt_level(opt: OptLevel) -> Self {
-        let mut optimize: Vec<Box<dyn Pass<F>>> = vec![Box::new(dead_code::DeadCode)];
+        // Unconditional at every OptLevel (not gated on O0/O1/O2), same as `DeadCode` right after
+        // it: pruning witness-dead outputs is a correctness-neutral, format-neutral shrink, not an
+        // optimization worth making optional, and `tests/circom_ir.rs`'s O0/O1/O2 witness-agreement
+        // matrix only actually covers this pass if every level runs it.
+        let mut optimize: Vec<Box<dyn Pass<F>>> =
+            vec![Box::new(dead_signals::DeadSignals), Box::new(dead_code::DeadCode)];
         if opt >= OptLevel::O1 {
             optimize.push(Box::new(const_fold::ConstFold));
         }

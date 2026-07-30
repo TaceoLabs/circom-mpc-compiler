@@ -235,7 +235,14 @@ impl Machine {
         public: &mut [F],
         shared: &mut [D::Share],
     ) -> eyre::Result<()> {
-        if batch.result_bank == Bank::Public {
+        // Whether this batch needs a genuine MPC call, rather than `batch.result_bank == Public`:
+        // for every kind but `Reveal` the two coincide (a site's inputs are all-`Public` exactly
+        // when its result stays `Public`), but `Reveal`'s `result_bank` is unconditionally `Public`
+        // even when its own inputs are `Shared` - that is its entire purpose (see
+        // `PrecomputeKind::Reveal`), and precisely that case still needs a real `driver.open` call.
+        let needs_mpc = batch.input_slots.iter().any(|input| input.bank == Bank::Shared);
+
+        if !needs_mpc {
             let inputs: Vec<F> = batch
                 .input_slots
                 .iter()
@@ -248,13 +255,14 @@ impl Machine {
                 })
                 .collect::<eyre::Result<_>>()?;
             let results = Self::run_plain_batch(batch.kind, &inputs)?;
-            return Self::store_batch_results(batch, &results, public);
+            eyre::ensure!(
+                batch.result_bank == Bank::Public,
+                "an all-public precompute batch's result bank must be Public"
+            );
+            let selected = Self::select_requests(&results, batch)?;
+            return Self::store_batch_results(batch, &selected, public);
         }
 
-        eyre::ensure!(
-            batch.result_bank == Bank::Shared,
-            "precompute batch result bank cannot be Local"
-        );
         // A site input isn't always a share - a circuit may pass a literal, which codegen resolves
         // to a `Public`-bank slot (see `SiteInput`). Promote those; every gadget expects shares.
         let inputs: Vec<D::Share> = batch
@@ -268,14 +276,32 @@ impl Machine {
                 ),
             })
             .collect();
+
+        // `Reveal` is the one kind whose MPC path writes into the `Public` bank (a genuine open,
+        // rather than a share-producing gadget) - every other kind writes into `Shared`.
+        if let PrecomputeKind::Reveal { .. } = batch.kind {
+            eyre::ensure!(
+                batch.result_bank == Bank::Public,
+                "a Reveal precompute batch's result bank must be Public"
+            );
+            let opened = driver.open(&inputs)?;
+            let selected = Self::select_requests(&opened, batch)?;
+            return Self::store_batch_results(batch, &selected, public);
+        }
+        eyre::ensure!(
+            batch.result_bank == Bank::Shared,
+            "precompute batch result bank cannot be Local"
+        );
         let results = match batch.kind {
             PrecomputeKind::Poseidon2 { t } => driver.poseidon2_traces(t, &inputs)?,
             PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
             PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
             PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
+            PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
-        Self::store_batch_results(batch, &results, shared)
+        let selected = Self::select_requests(&results, batch)?;
+        Self::store_batch_results(batch, &selected, shared)
     }
 
     fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
@@ -303,7 +329,46 @@ impl Machine {
                     .flat_map(aliascheck::plain_trace)
                     .collect()
             }
+            // An all-public reveal is the identity: every party already holds every input in the
+            // clear, so "opening" it changes nothing.
+            PrecomputeKind::Reveal { .. } => inputs.to_vec(),
         })
+    }
+
+    /// Selects each site's witness-live logical result slots out of a gadget's full per-site
+    /// output, flattening site-major. A temporary bridge (see `docs/ARCHITECTURE.md`,
+    /// "Precomputation"): every gadget still computes and returns its *full* per-site trace
+    /// unconditionally (`num_outputs + num_intermediates` values), and this filters the
+    /// `PrecomputeBatch::result_requests` subset out of it before storing - until a later step
+    /// teaches each gadget to skip computing the witness-dead majority in the first place.
+    fn select_requests<T: Clone>(full: &[T], batch: &PrecomputeBatch) -> eyre::Result<Vec<T>> {
+        eyre::ensure!(batch.sites > 0, "precompute batch has no sites");
+        eyre::ensure!(
+            full.len().is_multiple_of(batch.sites),
+            "precompute batch ({:?}, {} sites) returned {} results, not an even multiple of \
+             the site count",
+            batch.kind,
+            batch.sites,
+            full.len()
+        );
+        let capacity = full.len() / batch.sites;
+        let mut selected = Vec::with_capacity(batch.result_requests.len());
+        for site in 0..batch.sites {
+            let site_full = &full[site * capacity..(site + 1) * capacity];
+            let lo = batch.result_offsets[site] as usize;
+            let hi = batch.result_offsets[site + 1] as usize;
+            for &logical in &batch.result_requests[lo..hi] {
+                let logical = logical as usize;
+                eyre::ensure!(
+                    logical < capacity,
+                    "precompute batch ({:?}) requested slot {logical}, exceeding the {capacity} \
+                     the circuit's own signal layout reserves",
+                    batch.kind
+                );
+                selected.push(site_full[logical].clone());
+            }
+        }
+        Ok(selected)
     }
 
     fn store_batch_results<T: Clone>(
@@ -311,33 +376,17 @@ impl Machine {
         results: &[T],
         destination: &mut [T],
     ) -> eyre::Result<()> {
-        eyre::ensure!(batch.sites > 0, "precompute batch has no sites");
         eyre::ensure!(
-            results.len().is_multiple_of(batch.sites),
-            "precompute batch ({:?}, {} sites) returned {} results, not an even multiple of \
-             the site count",
+            results.len() == batch.result_slots.len(),
+            "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
+             slot)",
             batch.kind,
-            batch.sites,
-            results.len()
+            results.len(),
+            batch.result_slots.len()
         );
-        let per_site_actual = results.len() / batch.sites;
-        let per_site_capacity = batch.result_slots.len() / batch.sites;
-        eyre::ensure!(
-            per_site_actual <= per_site_capacity,
-            "precompute batch ({:?}) returned {per_site_actual} results per site, exceeding \
-             the {per_site_capacity} the circuit's own signal layout reserves",
-            batch.kind
-        );
-        if per_site_actual == 0 {
-            return Ok(());
-        }
-        for (site_idx, chunk) in results.chunks_exact(per_site_actual).enumerate() {
-            let base = site_idx * per_site_capacity;
-            for (k, value) in chunk.iter().enumerate() {
-                let slot = batch.result_slots[base + k];
-                if slot != u32::MAX {
-                    destination[slot as usize] = value.clone();
-                }
+        for (&slot, value) in batch.result_slots.iter().zip(results) {
+            if slot != u32::MAX {
+                destination[slot as usize] = value.clone();
             }
         }
         Ok(())

@@ -8,13 +8,17 @@ function commitDs() {
     return 0x544143454f2d4d65726365732d436f6d6d6974;
 }
 
+// Commitments are opened to every MPC party: `r` stays secret, so revealing `out` does not reveal
+// `value`. This is what lets everything the commitment feeds - the Merkle walk, the roots, the
+// batch statement `q` - run as public, deterministic local work instead of secret-shared MPC.
 template Commit1() {
     signal input value;
     signal input r;
     signal output out;
 
     var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()]);
-    out <== hash[0];
+    signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
+    out <== revealed[0];
 }
 
 // commit(balance, index; r, DS) — includes user index in the leaf commitment
@@ -25,7 +29,8 @@ template Commit2() {
     signal output out;
 
     var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([balance, index, r, commitDs()]);
-    out <== hash[0];
+    signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
+    out <== revealed[0];
 }
 
 template AccumulateIndexWithRangeCheck(N) {

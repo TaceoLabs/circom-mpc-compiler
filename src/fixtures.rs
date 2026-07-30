@@ -158,6 +158,32 @@ pub fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -
     Ok(flat)
 }
 
+/// `CompilerConfig::mpc_public_inputs` for either merces server main: signal names merces' own MPC
+/// implementation (`~/repos/merces/crates/merces-server-proof/src/trace_builders/cosnark_arity4.rs`)
+/// passes as cleartext `Rep3VmType::Public` rather than secret-shared, even though only `alpha` is
+/// SNARK-public in `main {public [alpha]}`. `sender`/`receiver` are the arity-4 Merkle index bits,
+/// `senderPath`/`receiverPath` their sibling hashes; `depth`, `isDeposit`, `isWithdraw` are marked
+/// `// Public` directly in `circuits/merces/merces/server.circom`. Deliberately excludes `amount`:
+/// merces passes it cleartext for a pure deposit/withdraw but shared for a transfer, and one
+/// circuit serves all three, so it cannot be declared public here without being wrong for transfers.
+pub const MERCES_MPC_PUBLIC_INPUTS: &[&str] = &[
+    "sender",
+    "receiver",
+    "senderPath",
+    "receiverPath",
+    "depth",
+    "isDeposit",
+    "isWithdraw",
+];
+
+/// [`MERCES_MPC_PUBLIC_INPUTS`] as owned `String`s, ready for `CompilerConfig::mpc_public_inputs`.
+pub fn merces_mpc_public_inputs() -> Vec<String> {
+    MERCES_MPC_PUBLIC_INPUTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// One real protocol input set for a vendored merces main, keyed by `(main, name)`.
 pub struct Scenario {
     /// `circuits/merces/main/<main>.circom`.

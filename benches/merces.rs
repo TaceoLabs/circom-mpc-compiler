@@ -53,6 +53,7 @@ fn config() -> CompilerConfig {
     config
         .link_library
         .push(format!("{}/circuits/merces/", manifest_dir()).into());
+    config.mpc_public_inputs = circom_mpc_compiler::fixtures::merces_mpc_public_inputs();
     config
 }
 

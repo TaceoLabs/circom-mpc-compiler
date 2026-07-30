@@ -224,6 +224,7 @@ fn bench_batch(
     config.opt_level = opt;
     config.link_library.push(format!("{root}/circuits/libs/").into());
     config.link_library.push(format!("{root}/circuits/merces/").into());
+    config.mpc_public_inputs = circom_mpc_compiler::fixtures::merces_mpc_public_inputs();
     let path = format!("{root}/circuits/merces/main/transfer_arity4_batch{n}.circom");
 
     println!("party {my_id}: batch {n}: circuit {path} (opt={opt:?})");

@@ -25,7 +25,13 @@ template RangeCheckWithOutputFlag(BITSIZE) {
         sum += n2b.out[i];
     }
 
-    valid <== TACEO_PRECOMPUTATION_IsZero()(sum);
+    // Declassified: `valid` is one of the ten fields of the batch statement `q` compressed at the
+    // end of `TransferBatchedCompressedArity4` (see `compression.circom`), so it is revealed there
+    // regardless - doing it here lets it feed the rest of that compression as public, deterministic
+    // work instead of round-tripping through MPC.
+    signal isZeroOut <== TACEO_PRECOMPUTATION_IsZero()(sum);
+    signal revealed[1] <== TACEO_REVEAL(1)([isZeroOut]);
+    valid <== revealed[0];
 }
 
 // ─── Arity-4 variants ────────────────────────────────────────────────────────

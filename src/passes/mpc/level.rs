@@ -80,13 +80,24 @@ pub(crate) fn network_levels_with_domains<F: PrimeField>(
             // A public gadget is ordinary deterministic local work. Its result must remain after
             // its producer in graph order, but it must not advance the communication axis or split
             // otherwise batchable shared work. Shared gadgets remain real network events.
-            Op::PrecomputeResult(_) => match domains[i] {
-                Domain::Public => level[node.inputs[0].index()],
-                Domain::Shared => level[node.inputs[0].index()] + 1,
-                // Invalid lowered graphs are rejected later with a proper codegen error. Keep
-                // analysis total so diagnostics never turn that rejection into a panic.
-                Domain::Local => level[node.inputs[0].index()] + 1,
-            },
+            //
+            // Keyed on the *producing* `Op::Precompute` node's own domain (`domains[precompute_idx]`),
+            // not the result's own (`domains[i]`). For every kind but `Reveal` the two coincide -
+            // `passes::mpc::domain::compute_domains` copies a site's domain straight onto its
+            // results - so this is unobservable there. `Reveal` is the one kind whose *result*
+            // domain is unconditionally `Public` (that is its entire purpose) while its *site* can
+            // still genuinely be `Shared` - and a genuine open is a real network event that must
+            // still charge a level, exactly as if the result stayed `Shared`.
+            Op::PrecomputeResult(_) => {
+                let precompute_idx = node.inputs[0].index();
+                match domains[precompute_idx] {
+                    Domain::Public => level[precompute_idx],
+                    Domain::Shared => level[precompute_idx] + 1,
+                    // Invalid lowered graphs are rejected later with a proper codegen error. Keep
+                    // analysis total so diagnostics never turn that rejection into a panic.
+                    Domain::Local => level[precompute_idx] + 1,
+                }
+            }
         };
     }
     level

@@ -35,6 +35,18 @@ pub struct CompilerConfig {
     /// `src/frontend/mod.rs`) - this configures this crate's own passes (see `src/passes/`).
     #[serde(default)]
     pub opt_level: OptLevel,
+    /// Input names every MPC party holds in cleartext, even though they are not declared SNARK-public
+    /// (`main {public [...]}`). This is a genuine declassification: it tells the MPC domain analysis
+    /// (`passes::mpc::domain`) to treat these signals as `Domain::Public` - no reshare, no network
+    /// round - which is only sound if every party genuinely already holds the value in the clear
+    /// outside the proof (e.g. transaction metadata the real off-chain protocol distributes as
+    /// plaintext). Misclassifying a value that is *not* actually public here leaks it to every MPC
+    /// party; never populate this from anything other than an explicit, audited caller decision.
+    /// Independent of `public_inputs` (`ir::Graph::public_inputs`), which stays the correct source
+    /// for the SNARK statement split - the zkey's own `num_instance_variables` decides that, not
+    /// this list (see `docs/ARCHITECTURE.md`, "Proving").
+    #[serde(default)]
+    pub mpc_public_inputs: Vec<String>,
 }
 
 fn default_version() -> String {
@@ -50,6 +62,7 @@ impl Default for CompilerConfig {
             verbose: false,
             inspect: false,
             opt_level: OptLevel::default(),
+            mpc_public_inputs: vec![],
         }
     }
 }

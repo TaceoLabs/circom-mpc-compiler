@@ -31,3 +31,15 @@ template TACEO_PRECOMPUTATION_IsZero() {
 
     out <== IsZero()(in);
 }
+
+// Declassifies `in` to every MPC party in the clear. A pure identity in-circuit (no constraint this
+// compiler's own R1CS depends on beyond `out === in`), recognized by name the same way the four
+// `TACEO_PRECOMPUTATION_*` gadgets above are - a real, explicit declassification decision, never
+// inferred from dataflow. Revealing a Pedersen-style commitment (its randomizer stays secret) does
+// not reveal the value it commits to; that is the intended use.
+template TACEO_REVEAL(n) {
+    signal input in[n];
+    signal output out[n];
+
+    out <== in;
+}

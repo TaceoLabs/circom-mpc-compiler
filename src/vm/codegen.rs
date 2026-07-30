@@ -7,7 +7,7 @@
 
 use ark_ff::PrimeField;
 
-use crate::ir::{Graph, Op, ValueId};
+use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
 use crate::passes::mpc::domain::{compute_domains, signal_domain, Domain};
 use crate::passes::mpc::precompute_schedule::plan_precompute_batches;
 
@@ -113,6 +113,28 @@ fn select_opcode(op: &Op<impl PrimeField>, da: Domain, db: Domain) -> eyre::Resu
     })
 }
 
+/// Which bank a precomputation site's results live in. Every kind but [`PrecomputeKind::Reveal`]
+/// keeps the site's own domain (deterministic public work stays `Public`, a real share stays
+/// `Shared`) - `Reveal`'s entire purpose is to leave the `Public` domain regardless of whether its
+/// own input was `Shared`, since that is exactly what a genuine MPC open does. See
+/// `docs/ARCHITECTURE.md`, "Precomputation".
+fn precompute_result_bank(kind: PrecomputeKind, domain: Domain) -> eyre::Result<Bank> {
+    if domain == Domain::Local {
+        eyre::bail!(
+            "codegen: a precomputation site reads a Local (un-reshared MulLocal) value - it must \
+             be reshared first; this is a lowering invariant violation"
+        );
+    }
+    if matches!(kind, PrecomputeKind::Reveal { .. }) {
+        return Ok(Bank::Public);
+    }
+    Ok(match domain {
+        Domain::Public => Bank::Public,
+        Domain::Shared => Bank::Shared,
+        Domain::Local => unreachable!("checked above"),
+    })
+}
+
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `CoCircomCompiler::compile`) into a `Program`.
 pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
@@ -124,11 +146,15 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     // A site's inputs must still hold their values when its *batch* runs, which is later than the
     // `Op::Precompute` node that reads them - so extend their lifetimes to the batch's anchor.
     //
-    // Currently masked on frontend-produced graphs: `inline_precomputed` pushes every site input
-    // into `graph.outputs()`, and `compute_last_use` pins outputs to `nodes.len()`. Done anyway,
-    // because hand-built codegen test graphs don't bind site inputs to outputs, and any future
-    // witness-compaction pass that stops binding intermediate signals would silently reintroduce a
-    // clobbered-input bug that no proof would necessarily localize.
+    // Load-bearing, not just defense in depth, now that `passes::dead_signals` prunes witness-dead
+    // outputs before this runs: `inline_precomputed` pushes every site input into `graph.outputs()`,
+    // but circom's own constraint simplification frequently drops a gadget's own input signal from
+    // the witness, so `dead_signals` removes that binding and `compute_last_use` no longer pins the
+    // input to `nodes.len()`. This extension is what stops the allocator from recycling a site
+    // input's slot between the `Op::Precompute` node and the batch's actual service point. Hand-built
+    // codegen test graphs never bound site inputs to outputs in the first place, which is why this
+    // was already exercised (`site_input_slot_survives_until_its_batch_runs`, below) before it
+    // became load-bearing on real circuits too.
     for plan in &plans {
         for &(_, site_node) in &plan.sites {
             for input in &nodes[site_node].inputs {
@@ -136,6 +162,13 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
             }
         }
     }
+    debug_assert!(
+        plans.iter().all(|plan| plan.sites.iter().all(|&(_, site_node)| nodes[site_node]
+            .inputs
+            .iter()
+            .all(|input| last_use[input.index()] >= plan.anchor))),
+        "a precompute site's input must survive at least until its batch's anchor"
+    );
     // Batch indices anchored at each node, emitted right after that node is processed.
     let mut batches_at: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (batch_idx, plan) in plans.iter().enumerate() {
@@ -167,29 +200,64 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
             site_domains[site_id.index()] = domain[i];
         }
     }
+
+    // Every site's *surviving* result slots: `passes::dead_signals` (run before `gc`) has already
+    // dropped the `outputs` binding for every witness-dead result, and `gc` then deleted the
+    // now-unreferenced `Op::PrecomputeResult` nodes - so a site's reserved region only needs to be
+    // as wide as what's left, not its full `num_outputs + num_intermediates` capacity. Real scale:
+    // at merces' `transfer_arity4_batch8`, this is the difference between ~2700 Poseidon2 result
+    // slots per site and the ~140 actually read.
+    //
+    // `live_nodes[site]` is parallel to `live_slots[site]`: the node index of each surviving
+    // `PrecomputeResult`, resolved to a physical slot below once `site_result_base` is known.
+    let mut live_slots: Vec<Vec<u32>> = vec![Vec::new(); graph.precompute_sites().len()];
+    let mut live_nodes: Vec<Vec<usize>> = vec![Vec::new(); graph.precompute_sites().len()];
+    for (i, node) in nodes.iter().enumerate() {
+        if let Op::PrecomputeResult(k) = &node.op {
+            let Op::Precompute(site_id) = &nodes[node.inputs[0].index()].op else {
+                unreachable!("Graph::verify guarantees PrecomputeResult's input is Precompute");
+            };
+            live_slots[site_id.index()].push(*k);
+            live_nodes[site_id.index()].push(i);
+        }
+    }
+    debug_assert!(
+        live_slots.iter().all(|s| s.windows(2).all(|w| w[0] < w[1])),
+        "a site's surviving PrecomputeResult nodes must stay in ascending slot order - gc and \
+         dead_signals never reorder nodes, only drop them - since the flat, site-contiguous \
+         request list below depends on it"
+    );
+
     let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.precompute_sites().len());
-    for (site, site_domain) in graph.precompute_sites().iter().zip(site_domains) {
-        let results = u32::try_from(site.num_outputs + site.num_intermediates)
-            .expect("precompute site has more results than fit into u32");
-        match site_domain {
-            Domain::Public => {
+    for (site_id, site) in graph.precompute_sites().iter().enumerate() {
+        let results = u32::try_from(live_slots[site_id].len())
+            .expect("precompute site has more live results than fit into u32");
+        match precompute_result_bank(site.kind, site_domains[site_id])? {
+            Bank::Public => {
                 site_result_base.push(Slot {
                     bank: Bank::Public,
                     index: p_next,
                 });
                 p_next += results;
             }
-            Domain::Shared => {
+            Bank::Shared => {
                 site_result_base.push(Slot {
                     bank: Bank::Shared,
                     index: s_next,
                 });
                 s_next += results;
             }
-            Domain::Local => eyre::bail!(
-                "codegen: a precomputation site reads a Local (un-reshared MulLocal) value - \
-                 it must be reshared first; this is a lowering invariant violation"
-            ),
+            Bank::Local => unreachable!("precompute_result_bank never returns Local"),
+        }
+    }
+
+    // Node-indexed physical slot for every surviving `PrecomputeResult`, so the arm below never
+    // does `base + logical_slot` arithmetic - which stops holding the moment slots are sparse.
+    let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
+    for (site_id, base) in site_result_base.iter().enumerate() {
+        for (pos, &node_idx) in live_nodes[site_id].iter().enumerate() {
+            result_phys[node_idx] =
+                Some(base.index + u32::try_from(pos).expect("site has more live results than fit into u32"));
         }
     }
 
@@ -197,7 +265,13 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     let mut input_bindings: Vec<InputBinding> = Vec::new();
     for input_index in 0..graph.num_inputs {
         let sig = crate::ir::SignalIdx::new(graph.num_outputs + input_index);
-        let d = signal_domain(graph.num_outputs, &graph.input_list, &graph.public_inputs, sig);
+        let d = signal_domain(
+            graph.num_outputs,
+            &graph.input_list,
+            &graph.public_inputs,
+            &graph.mpc_public_inputs,
+            sig,
+        );
         input_domains.push(match d {
             Domain::Public => Bank::Public,
             Domain::Shared => Bank::Shared,
@@ -412,14 +486,17 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 // The Precompute node's own value is never read directly (only via
                 // PrecomputeResult) - it needs no slot.
             }
-            Op::PrecomputeResult(result_slot) => {
+            Op::PrecomputeResult(_) => {
                 let Op::Precompute(site_id) = &nodes[node.inputs[0].index()].op else {
                     unreachable!("Graph::verify guarantees PrecomputeResult's input is Precompute");
                 };
                 let base = site_result_base[site_id.index()];
+                let phys = result_phys[i]
+                    .expect("every PrecomputeResult node that survives to codegen was counted \
+                             into live_slots/live_nodes above");
                 slot[i] = Some(Slot {
                     bank: base.bank,
-                    index: base.index + result_slot,
+                    index: phys,
                 });
             }
         }
@@ -457,31 +534,39 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         .iter()
         .map(|plan| {
             let mut input_slots = Vec::new();
+            // Site-contiguous, ascending within a site: `result_requests[lo..hi]` (via
+            // `result_offsets[site]..result_offsets[site + 1]`) is the sorted list of logical
+            // slots this site actually needs, and `result_slots[lo..hi]` their destinations - two
+            // sites in one batch may now have different live counts, which is exactly why a flat
+            // `sites * capacity` shape (recovered by division) no longer works.
+            let mut result_requests = Vec::new();
+            let mut result_offsets = Vec::with_capacity(plan.sites.len() + 1);
             let mut result_slots = Vec::new();
+            result_offsets.push(0u32);
             for &(site_id, _) in &plan.sites {
-                let site = &graph.precompute_sites()[site_id];
                 input_slots.extend_from_slice(&site_inputs[site_id]);
-                let results = site.num_outputs + site.num_intermediates;
                 let base = site_result_base[site_id];
                 debug_assert_eq!(
                     base.bank,
-                    match plan.domain {
-                        Domain::Public => Bank::Public,
-                        Domain::Shared => Bank::Shared,
-                        Domain::Local => unreachable!(),
-                    }
+                    precompute_result_bank(plan.kind, plan.domain)
+                        .expect("already validated while reserving site_result_base")
                 );
-                result_slots.extend((0..results).map(|k| base.index + u32::try_from(k).unwrap()));
+                for (pos, &logical) in live_slots[site_id].iter().enumerate() {
+                    result_requests.push(logical);
+                    result_slots.push(base.index + u32::try_from(pos).expect("checked above"));
+                }
+                result_offsets.push(
+                    u32::try_from(result_requests.len()).expect("too many precompute results"),
+                );
             }
             PrecomputeBatch {
                 kind: plan.kind,
                 sites: plan.sites.len(),
-                result_bank: match plan.domain {
-                    Domain::Public => Bank::Public,
-                    Domain::Shared => Bank::Shared,
-                    Domain::Local => unreachable!(),
-                },
+                result_bank: precompute_result_bank(plan.kind, plan.domain)
+                    .expect("already validated while reserving site_result_base"),
                 input_slots,
+                result_requests,
+                result_offsets,
                 result_slots,
             }
         })
@@ -853,6 +938,51 @@ mod tests {
         let batch = &program.precompute_batches[0];
         assert_eq!(batch.input_slots.len(), 1);
         assert_eq!(batch.input_slots[0].bank, Bank::Public);
+    }
+
+    /// Sparse result slots (some logical slots' `PrecomputeResult` node pruned by
+    /// `passes::dead_signals` before codegen ever runs) must compact to exactly the surviving
+    /// count, not the site's full reserved capacity - and each survivor must land at its position
+    /// *within the survivors*, not at its original logical index.
+    #[test]
+    fn sparse_result_slots_are_compacted_in_order() {
+        // A capacity-3 site (1 output + 2 intermediates) where only logical slots 0 and 2 survive -
+        // slot 1's `PrecomputeResult` node simply never exists, exactly as `dead_signals` + `gc`
+        // would leave it.
+        let site = PrecomputeSite {
+            kind: PrecomputeKind::IsZero,
+            header: "IsZero_0".to_owned(),
+            num_inputs: 1,
+            num_outputs: 1,
+            num_intermediates: 2,
+        };
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2: survives
+            Node::new(Op::PrecomputeResult(2), vec![ValueId::new(1)]), // 3: survives
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(3)]), // 4
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(4))],
+            vec![site],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 1);
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.result_requests, vec![0, 2], "requests logical slots 0 and 2 only");
+        assert_eq!(batch.result_offsets, vec![0, 2], "one site, both its requests");
+        assert_eq!(
+            batch.result_slots.len(),
+            2,
+            "the reserved region is 2 wide (the live count), not the site's capacity of 3"
+        );
+        // The two surviving results must land at adjacent physical slots (base, base + 1), not at
+        // their original logical indices 0 and 2.
+        assert_eq!(batch.result_slots[1], batch.result_slots[0] + 1);
     }
 
     /// A `Local` value feeding a site is a lowering-invariant violation, not a circuit shape.

@@ -167,6 +167,7 @@ pub(crate) fn build_graph<P: Pairing>(
 ) -> Result<ir::Graph<P::ScalarField>> {
     let program_archive = get_program_archive::<P::ScalarField>(file, &config)?;
     let public_inputs = program_archive.public_inputs.clone();
+    let mpc_public_inputs = config.mpc_public_inputs.clone();
     let (mut circuit, _output_mapping, signal_spans) = build_circuit(program_archive, &config)?;
     let constant_table = circuit
         .c_producer
@@ -243,7 +244,7 @@ pub(crate) fn build_graph<P: Pairing>(
         &FxHashMap::default(),
     );
 
-    Ok(ir::Graph::from_parts(
+    let mut graph = ir::Graph::from_parts(
         nodes,
         outputs,
         precompute_sites,
@@ -253,5 +254,7 @@ pub(crate) fn build_graph<P: Pairing>(
         main_inputs,
         main_outputs,
         circuit.c_producer.total_number_of_signals,
-    ))
+    );
+    graph.mpc_public_inputs = mpc_public_inputs;
+    Ok(graph)
 }

@@ -16,7 +16,7 @@
 
 use ark_ff::PrimeField;
 
-use crate::ir::{Graph, Node, Op, RewriteAction, RoundDesc, RoundId, RoundKind, ValueId};
+use crate::ir::{Graph, Node, Op, PrecomputeKind, RewriteAction, RoundDesc, RoundId, RoundKind, ValueId};
 use crate::passes::{Changed, Pass, PassContext};
 
 use super::domain::{signal_domain, Domain};
@@ -34,6 +34,11 @@ impl<F: PrimeField> Pass<F> for MulSplit {
         let num_outputs = graph.num_outputs;
         let input_list = graph.input_list.clone();
         let public_inputs = graph.public_inputs.clone();
+        let mpc_public_inputs = graph.mpc_public_inputs.clone();
+        // Kinds only (not the whole `PrecomputeSite`), keyed by `PrecomputeId` - just enough to
+        // mirror `domain::compute_domains`'s `Reveal`-forces-`Public` rule below.
+        let site_kinds: Vec<PrecomputeKind> =
+            graph.precompute_sites().iter().map(|site| site.kind).collect();
 
         // Domain of each *new-space* value, grown by exactly one entry per node pushed to
         // `new_nodes` inside `Graph::rewrite` - see the module doc for why this can't be a
@@ -41,7 +46,7 @@ impl<F: PrimeField> Pass<F> for MulSplit {
         let mut domain: Vec<Domain> = Vec::with_capacity(graph.len());
         let mut rounds: Vec<RoundDesc> = Vec::new();
 
-        let changed = graph.rewrite(|_id, node, _emitted| match &node.op {
+        let changed = graph.rewrite(|_id, node, emitted| match &node.op {
             Op::Mul
                 if domain[node.inputs[0].index()] == Domain::Shared
                     && domain[node.inputs[1].index()] == Domain::Shared =>
@@ -68,7 +73,13 @@ impl<F: PrimeField> Pass<F> for MulSplit {
                 RewriteAction::Keep
             }
             Op::Input(sig) => {
-                domain.push(signal_domain(num_outputs, &input_list, &public_inputs, *sig));
+                domain.push(signal_domain(
+                    num_outputs,
+                    &input_list,
+                    &public_inputs,
+                    &mpc_public_inputs,
+                    *sig,
+                ));
                 RewriteAction::Keep
             }
             Op::Add | Op::Sub | Op::Mul => {
@@ -84,8 +95,21 @@ impl<F: PrimeField> Pass<F> for MulSplit {
                 domain.push(d);
                 RewriteAction::Keep
             }
+            // Mirrors `domain::compute_domains`'s `Reveal`-forces-`Public` rule (see there for why):
+            // a `Reveal` site's result is unconditionally `Public`, regardless of its own site's
+            // domain. `emitted` is every new-space node pushed so far - the `Op::Precompute` node
+            // this result references always precedes it (topological order), so it's already there.
             Op::PrecomputeResult(_) => {
-                domain.push(domain[node.inputs[0].index()]);
+                let precompute_idx = node.inputs[0].index();
+                let d = match &emitted[precompute_idx].op {
+                    Op::Precompute(site_id)
+                        if matches!(site_kinds[site_id.index()], PrecomputeKind::Reveal { .. }) =>
+                    {
+                        Domain::Public
+                    }
+                    _ => domain[precompute_idx],
+                };
+                domain.push(d);
                 RewriteAction::Keep
             }
             // mul_split runs before any of these exist (frontend never produces them, and it's the

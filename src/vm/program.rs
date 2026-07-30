@@ -110,8 +110,16 @@ pub struct PrecomputeBatch {
     /// `sites * (this kind's per-site input count)` entries, one site's inputs contiguous, in site
     /// order.
     pub input_slots: Vec<SiteInput>,
-    /// `sites * (this kind's per-site result count)` slots in [`Self::result_bank`], one site's
-    /// results contiguous, in site order. `u32::MAX` = discard.
+    /// Which of each site's logical result slots (`0..num_outputs + num_intermediates`) are
+    /// actually witness-live - `passes::dead_signals` prunes the rest before codegen ever sees this
+    /// batch. Site-contiguous, ascending within a site; `result_offsets[site]..result_offsets[site
+    /// + 1]` is that site's own sorted sublist. Two sites in one batch can have different live
+    /// counts, which is why this isn't a flat `sites * capacity` shape recoverable by division.
+    pub result_requests: Vec<u32>,
+    /// `len == sites + 1`: CSR row pointers into [`Self::result_requests`]/[`Self::result_slots`].
+    pub result_offsets: Vec<u32>,
+    /// Parallel to [`Self::result_requests`]: the destination slot in [`Self::result_bank`] for
+    /// each requested value. `u32::MAX` = discard.
     pub result_slots: Vec<u32>,
 }
 

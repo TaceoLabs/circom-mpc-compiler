@@ -76,6 +76,7 @@ fn merces_config() -> CompilerConfig {
     config
         .link_library
         .push(format!("{}/circuits/merces/", manifest_dir()).into());
+    config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
     config
 }
 
@@ -187,19 +188,30 @@ fn transfer_arity4_batch8_all_scenarios_run_end_to_end() {
 }
 
 /// Precomputation batching, on a real circuit rather than a synthetic fixture: these circuits have
-/// hundreds of sites, and the whole point of grouping by `(kind, stage)` is that they cost far fewer
-/// driver calls than that. Asserted as a strict inequality rather than an exact count so the test
-/// tracks the *claim* and not today's scheduling arithmetic.
+/// hundreds of sites, and the whole point of grouping by `(kind, stage, domain)` is that they cost
+/// far fewer driver calls than that. Asserted as a strict inequality rather than an exact count so
+/// the test tracks the *claim* and not today's scheduling arithmetic.
+///
+/// Counts only batches that actually need a `VmDriver` call (any `Shared`-bank input) - since
+/// `CompilerConfig::mpc_public_inputs` and `TACEO_REVEAL` (see `merces_config`, `hash.circom`,
+/// `server.circom`) legitimately split what used to be one batch into an all-public one (zero
+/// network cost, `Machine::run_batch`'s plain-gadget path) and a genuinely shared one, `batches`
+/// alone no longer tracks driver-call cost - only the shared subset does.
 #[test]
 fn batching_collapses_many_sites_into_few_driver_calls() {
     for main in ["transfer_arity4_batch1", "transfer_arity4_batch8"] {
         let (program, _) = compiled(main);
         let sites: usize = program.precompute_batches.iter().map(|b| b.sites).sum();
-        let batches = program.precompute_batches.len();
+        let shared_batches = program
+            .precompute_batches
+            .iter()
+            .filter(|b| b.input_slots.iter().any(|input| input.bank == Bank::Shared))
+            .count();
         assert!(sites > 50, "{main}: expected a site-heavy circuit, got {sites}");
         assert!(
-            batches * 4 < sites,
-            "{main}: {sites} sites collapsed into only {batches} batches - batching regressed"
+            shared_batches * 4 < sites,
+            "{main}: {sites} sites collapsed into only {shared_batches} MPC-driver batches - \
+             batching regressed"
         );
     }
 }

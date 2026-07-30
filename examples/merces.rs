@@ -100,6 +100,9 @@ fn main() -> eyre::Result<()> {
     config
         .link_library
         .push(format!("{root}/circuits/merces/").into());
+    if is_merces_main {
+        config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
+    }
 
     let path = if is_merces_main {
         format!("{root}/circuits/merces/main/{arg}.circom")

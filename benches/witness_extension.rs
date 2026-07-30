@@ -85,6 +85,7 @@ fn config(case: &Case) -> CompilerConfig {
         config
             .link_library
             .push(format!("{}/circuits/merces/", manifest_dir()).into());
+        config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
     }
     config
 }

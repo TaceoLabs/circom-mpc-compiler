@@ -22,9 +22,14 @@ use super::program::{
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// Version 1 had no interleaved `Opcode::Precompute`; version 2 always stored precompute results in
 /// the shared bank. Version 3 records each batch's result bank so all-public gadgets can remain
-/// public. `Machine::run` deliberately has no compatibility shim: accepting either older layout
-/// could produce a plausible-looking wrong witness.
-const VERSION: u32 = 3;
+/// public. Version 4 adds the `PrecomputeKind::Reveal` tag. Version 5 adds `result_requests`/
+/// `result_offsets` to `PrecomputeBatch`, and changes `result_slots`' own meaning from one entry
+/// per site's full reserved capacity to one entry per *requested* (witness-live) slot - a
+/// version-4 reader has no way to tell the two shapes apart from length alone, so accepting it
+/// under version 5's semantics would silently scatter a batch's results into the wrong slots.
+/// `Machine::run` deliberately has no compatibility shim: accepting either older layout could
+/// produce a plausible-looking wrong witness.
+const VERSION: u32 = 5;
 
 impl Opcode {
     fn to_u8(self) -> u8 {
@@ -109,6 +114,10 @@ impl PrecomputeKind {
             PrecomputeKind::IsZero => w.write_u8(2)?,
             PrecomputeKind::AliasCheck => w.write_u8(3)?,
             PrecomputeKind::IsEqual => w.write_u8(4)?,
+            PrecomputeKind::Reveal { n } => {
+                w.write_u8(5)?;
+                w.write_u32::<LittleEndian>(*n as u32)?;
+            }
         }
         Ok(())
     }
@@ -124,6 +133,9 @@ impl PrecomputeKind {
             2 => PrecomputeKind::IsZero,
             3 => PrecomputeKind::AliasCheck,
             4 => PrecomputeKind::IsEqual,
+            5 => PrecomputeKind::Reveal {
+                n: r.read_u32::<LittleEndian>()? as usize,
+            },
             other => eyre::bail!("unknown PrecomputeKind tag {other}"),
         })
     }
@@ -184,6 +196,8 @@ impl<F: PrimeField> Program<F> {
                 w.write_u8(input.bank.to_u8())?;
                 w.write_u32::<LittleEndian>(input.slot)?;
             }
+            write_u32_vec(w, &batch.result_requests)?;
+            write_u32_vec(w, &batch.result_offsets)?;
             write_u32_vec(w, &batch.result_slots)?;
         }
 
@@ -287,12 +301,29 @@ impl<F: PrimeField> Program<F> {
                 let slot = r.read_u32::<LittleEndian>()?;
                 input_slots.push(SiteInput { bank, slot });
             }
+            let result_requests = read_u32_vec(r)?;
+            let result_offsets = read_u32_vec(r)?;
             let result_slots = read_u32_vec(r)?;
+            eyre::ensure!(
+                result_offsets.len() == sites + 1,
+                "precompute batch result_offsets has {} entries, expected sites + 1 = {}",
+                result_offsets.len(),
+                sites + 1
+            );
+            eyre::ensure!(
+                result_requests.len() == result_slots.len(),
+                "precompute batch result_requests ({}) and result_slots ({}) must have the same \
+                 length - one destination per requested slot",
+                result_requests.len(),
+                result_slots.len()
+            );
             batches.push(PrecomputeBatch {
                 kind,
                 sites,
                 result_bank,
                 input_slots,
+                result_requests,
+                result_offsets,
                 result_slots,
             });
         }

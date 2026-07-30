@@ -141,6 +141,13 @@ pub enum PrecomputeKind {
     IsEqual,
     /// Proves a 254-bit decomposition is a canonical (non-aliased) representative.
     AliasCheck,
+    /// Declassifies `n` values: opens them to every MPC party in the clear if they were `Shared`,
+    /// or is the identity if they were already `Public`. A genuine MPC event, not deterministic
+    /// local work - see `docs/ARCHITECTURE.md`, "MPC lowering" and "Precomputation", and
+    /// `passes::mpc::level`'s re-keyed `PrecomputeResult` rule for how a `Reveal` site still
+    /// charges a network level exactly when its own input was `Shared`, even though its result's
+    /// *domain* is unconditionally `Public`.
+    Reveal { n: usize },
 }
 
 impl PrecomputeKind {
@@ -217,6 +224,9 @@ impl PrecomputeKind {
             // signal-span accounting (an independent cross-check against circom's own DAG, see
             // `frontend/mod.rs::compute_signal_spans`) does not let it skip.
             PrecomputeKind::AliasCheck => Some(255 + 127 + 1 + 136),
+            // n outputs, no intermediates - a `TACEO_REVEAL(n)` site's own signal layout is exactly
+            // `[in[n]][out[n]]`, and result slots skip the site's own inputs.
+            PrecomputeKind::Reveal { n } => Some(n),
         }
     }
 }
@@ -385,6 +395,13 @@ pub struct Graph<F: PrimeField> {
     pub signal_to_witness: Vec<usize>,
     pub input_list: InputList,
     pub public_inputs: Vec<String>,
+    /// Input names every MPC party holds in cleartext, even though they are not SNARK-public (not
+    /// in `public_inputs`/circom's own `main {public [...]}`). This is a genuine declassification,
+    /// supplied by `CompilerConfig::mpc_public_inputs` and populated by `frontend::build_graph` -
+    /// never inferred. Consulted only by `passes::mpc::domain::signal_domain`; `public_inputs`
+    /// alone remains the correct source for the SNARK statement split (see `vm::witness`), so this
+    /// is a separate list rather than merged into `public_inputs`.
+    pub mpc_public_inputs: Vec<String>,
     pub num_inputs: usize,
     pub num_outputs: usize,
     pub num_signals: usize,
@@ -414,6 +431,7 @@ impl<F: PrimeField> Graph<F> {
             signal_to_witness,
             input_list,
             public_inputs,
+            mpc_public_inputs: Vec::new(),
             num_inputs,
             num_outputs,
             num_signals,
@@ -443,6 +461,20 @@ impl<F: PrimeField> Graph<F> {
 
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {
         &self.outputs
+    }
+
+    /// Drops every `outputs` entry `keep` rejects, preserving the relative order of the rest.
+    /// Order must be preserved: several entries can name the same signal (a nested subcomponent's
+    /// input signal is pushed once as a `LocalSignal` alias and, if it also feeds a precomputation
+    /// site, again as a site input - `frontend/inline.rs`), and `Machine::run`'s store loop is
+    /// last-write-wins, so reordering could change *which* value ends up in a shared signal slot.
+    /// Returns whether anything was actually dropped. Used by `passes::dead_signals` to prune
+    /// outputs that bind to neither a genuine reader nor a witness position, so `Graph::gc`'s
+    /// existing reachability sweep can delete the now-unreferenced producer nodes.
+    pub(crate) fn retain_outputs(&mut self, mut keep: impl FnMut(SignalIdx, ValueId) -> bool) -> bool {
+        let before = self.outputs.len();
+        self.outputs.retain(|&(signal, value)| keep(signal, value));
+        self.outputs.len() != before
     }
 
     /// Every batched MPC network round, indexed by [`RoundId`]. Empty before `passes::mpc` runs.
@@ -521,11 +553,16 @@ impl<F: PrimeField> Graph<F> {
         for &(_, root) in &self.outputs {
             keep[root.index()] = true;
         }
-        // Every precomputation site must survive gc even if none of its results end up read
-        // (they normally do, via the outputs pushed for each result slot - this is a defense in
-        // depth, not the only thing keeping them alive): the runtime supplies traces positionally,
-        // one per site in inlining order, so silently dropping a "dead" site would desynchronize
-        // every later site's trace. See docs/ARCHITECTURE.md, "Precomputation".
+        // Every precomputation site must survive gc even if none of its results end up read. Since
+        // `passes::dead_signals` prunes every witness-dead output before this runs, a site whose
+        // results are all witness-dead and never read by an ordinary node genuinely has zero
+        // references at this point - this rule is the *only* thing keeping such a site's node (and
+        // transitively its input chain) alive, not defense in depth. It must stay: `vm::codegen`
+        // resolves each site's destination slots at compile time from a fixed, in-order
+        // `precompute_sites` table (`site_result_base[site] + slot`), so silently dropping a "dead"
+        // site would desynchronize every later same-kind site's slot range, and `Graph::verify`
+        // requires exactly one `Op::Precompute` node per site regardless. See
+        // docs/ARCHITECTURE.md, "Precomputation".
         for (i, node) in self.nodes.iter().enumerate() {
             if matches!(node.op, Op::Precompute(_)) {
                 keep[i] = true;
