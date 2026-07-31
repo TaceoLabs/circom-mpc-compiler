@@ -7,7 +7,6 @@
 //! [`inline::inline_template`].
 
 mod build;
-mod error;
 mod fold;
 mod inline;
 mod unroll;
@@ -204,7 +203,7 @@ pub(crate) fn build_graph<P: Pairing>(
         &mut precompute_sites,
         main_template_graph,
         0,
-        inline::TemplatePosition::Root,
+        true,
         &FxHashMap::default(),
     );
 

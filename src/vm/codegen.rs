@@ -57,6 +57,44 @@ struct Slot {
     index: u32,
 }
 
+/// The recyclable slot arena for Phase B: one `BankAlloc` per bank, the reserved-region bounds
+/// they must never recycle into, and the liveness table that drives when a slot is released.
+struct Arena {
+    p: BankAlloc,
+    s: BankAlloc,
+    l: BankAlloc,
+    p_reserved_end: u32,
+    s_reserved_end: u32,
+    last_use: Vec<usize>,
+}
+
+impl Arena {
+    fn alloc(&mut self, bank: Bank) -> u32 {
+        match bank {
+            Bank::Public => self.p.alloc(),
+            Bank::Shared => self.s.alloc(),
+            Bank::Local => self.l.alloc(),
+        }
+    }
+
+    /// Releases `value`'s slot if `current` is its last use. Taking the mapping makes release
+    /// idempotent when one consumer mentions the same SSA value more than once (`x*x`, or the same
+    /// value in several positions of one gadget batch).
+    fn free_if_dead(&mut self, value: ValueId, current: usize, slot: &mut [Option<Slot>]) {
+        if self.last_use[value.index()] != current {
+            return;
+        }
+        let Some(s) = slot[value.index()].take() else {
+            return;
+        };
+        match s.bank {
+            Bank::Public => self.p.free(s.index, self.p_reserved_end),
+            Bank::Shared => self.s.free(s.index, self.s_reserved_end),
+            Bank::Local => {} // freed directly at the Round arm, not through this helper
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ZeroTestRevealPair {
     zero_test_site: usize,
@@ -476,13 +514,15 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         }
     }
 
-    let p_reserved_end = p_next;
-    let s_reserved_end = s_next;
-
     // --- Phase B: the recyclable arena + instruction emission ---
-    let mut p_alloc = BankAlloc::starting_at(p_reserved_end);
-    let mut s_alloc = BankAlloc::starting_at(s_reserved_end);
-    let mut l_alloc = BankAlloc::starting_at(0);
+    let mut arena = Arena {
+        p: BankAlloc::starting_at(p_next),
+        s: BankAlloc::starting_at(s_next),
+        l: BankAlloc::starting_at(0),
+        p_reserved_end: p_next,
+        s_reserved_end: s_next,
+        last_use,
+    };
 
     let mut instructions: Vec<Instruction> = Vec::new();
     let mut rounds: Vec<RoundEntry> = vec![
@@ -523,11 +563,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 } else {
                     (sa.index, sb.index)
                 };
-                let dst = match dst_bank {
-                    Bank::Public => p_alloc.alloc(),
-                    Bank::Shared => s_alloc.alloc(),
-                    Bank::Local => unreachable!("Add/Sub/Mul never produce a Local result"),
-                };
+                let dst = arena.alloc(dst_bank);
                 instructions.push(Instruction {
                     op: opcode,
                     dst,
@@ -538,26 +574,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     bank: dst_bank,
                     index: dst,
                 });
-                free_if_dead(
-                    node.inputs[0],
-                    i,
-                    &last_use,
-                    &mut slot,
-                    &mut p_alloc,
-                    &mut s_alloc,
-                    p_reserved_end,
-                    s_reserved_end,
-                );
-                free_if_dead(
-                    node.inputs[1],
-                    i,
-                    &last_use,
-                    &mut slot,
-                    &mut p_alloc,
-                    &mut s_alloc,
-                    p_reserved_end,
-                    s_reserved_end,
-                );
+                arena.free_if_dead(node.inputs[0], i, &mut slot);
+                arena.free_if_dead(node.inputs[1], i, &mut slot);
             }
             Op::MulLocal => {
                 let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
@@ -572,7 +590,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                         domain[node.inputs[1].index()]
                     );
                 }
-                let dst = l_alloc.alloc();
+                let dst = arena.alloc(Bank::Local);
                 instructions.push(Instruction {
                     op: Opcode::MulLocal,
                     dst,
@@ -583,26 +601,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     bank: Bank::Local,
                     index: dst,
                 });
-                free_if_dead(
-                    node.inputs[0],
-                    i,
-                    &last_use,
-                    &mut slot,
-                    &mut p_alloc,
-                    &mut s_alloc,
-                    p_reserved_end,
-                    s_reserved_end,
-                );
-                free_if_dead(
-                    node.inputs[1],
-                    i,
-                    &last_use,
-                    &mut slot,
-                    &mut p_alloc,
-                    &mut s_alloc,
-                    p_reserved_end,
-                    s_reserved_end,
-                );
+                arena.free_if_dead(node.inputs[0], i, &mut slot);
+                arena.free_if_dead(node.inputs[1], i, &mut slot);
             }
             Op::Round(round_id) => {
                 let operand_start =
@@ -616,7 +616,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                         );
                     }
                     round_operands.push(s.index);
-                    l_alloc.free(s.index, 0);
+                    arena.l.free(s.index, 0);
                 }
                 let len = u32::try_from(node.inputs.len())
                     .expect("round has more slots than fit into u32");
@@ -638,7 +638,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                             round_id.index()
                         ),
                     }
-                    let dst = s_alloc.alloc();
+                    let dst = arena.alloc(Bank::Shared);
                     round_results.push(dst);
                     slot[result_idx] = Some(Slot {
                         bank: Bank::Shared,
@@ -661,16 +661,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 // but the allocator handles it correctly regardless).
                 for k in 0..node.inputs.len() {
                     let result_idx = i + 1 + k;
-                    free_if_dead(
-                        ValueId::new(result_idx),
-                        result_idx,
-                        &last_use,
-                        &mut slot,
-                        &mut p_alloc,
-                        &mut s_alloc,
-                        p_reserved_end,
-                        s_reserved_end,
-                    );
+                    arena.free_if_dead(ValueId::new(result_idx), result_idx, &mut slot);
                 }
                 i += node.inputs.len(); // skip the RoundResult nodes just handled
             }
@@ -744,32 +735,14 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 RuntimePlan::Normal(plan_idx) => {
                     for &(_, site_node) in &plans[plan_idx].sites {
                         for &input in &nodes[site_node].inputs {
-                            free_if_dead(
-                                input,
-                                i,
-                                &last_use,
-                                &mut slot,
-                                &mut p_alloc,
-                                &mut s_alloc,
-                                p_reserved_end,
-                                s_reserved_end,
-                            );
+                            arena.free_if_dead(input, i, &mut slot);
                         }
                     }
                 }
                 RuntimePlan::IsZeroReveal(fusion_idx) => {
                     for pair in &fusion_plans[fusion_idx].pairs {
                         for &input in &nodes[pair.zero_test_node].inputs {
-                            free_if_dead(
-                                input,
-                                i,
-                                &last_use,
-                                &mut slot,
-                                &mut p_alloc,
-                                &mut s_alloc,
-                                p_reserved_end,
-                                s_reserved_end,
-                            );
+                            arena.free_if_dead(input, i, &mut slot);
                         }
                     }
                 }
@@ -936,37 +909,11 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         witness_sources,
         num_inputs: graph.num_inputs,
         slots: SlotCounts {
-            public: p_alloc.next,
-            shared: s_alloc.next,
-            local: l_alloc.next,
+            public: arena.p.next,
+            shared: arena.s.next,
+            local: arena.l.next,
         },
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn free_if_dead(
-    value: ValueId,
-    current: usize,
-    last_use: &[usize],
-    slot: &mut [Option<Slot>],
-    p_alloc: &mut BankAlloc,
-    s_alloc: &mut BankAlloc,
-    p_reserved_end: u32,
-    s_reserved_end: u32,
-) {
-    if last_use[value.index()] != current {
-        return;
-    }
-    // Taking the mapping makes release idempotent when one consumer mentions the same SSA value
-    // more than once (`x*x`, or the same value in several positions of one gadget batch).
-    let Some(s) = slot[value.index()].take() else {
-        return;
-    };
-    match s.bank {
-        Bank::Public => p_alloc.free(s.index, p_reserved_end),
-        Bank::Shared => s_alloc.free(s.index, s_reserved_end),
-        Bank::Local => {} // freed directly at the Round arm, not through this helper
-    }
 }
 
 #[cfg(test)]

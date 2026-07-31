@@ -844,7 +844,6 @@ dependencies = [
  "serde",
  "serde_json",
  "taceo-circom-types",
- "thiserror 1.0.69",
  "toml",
  "tracing",
  "tracing-subscriber 0.3.18",

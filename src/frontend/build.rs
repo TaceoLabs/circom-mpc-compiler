@@ -18,8 +18,10 @@ use rustc_hash::FxHashMap;
 
 use crate::ir::{Op, PrecomputeKind, ValueId};
 
-use super::error::Unsupported;
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
+
+const MAPPED_LOCATION: &str =
+    "unsupported mapped location rule (bus/anonymous component access)";
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -78,21 +80,25 @@ pub(crate) enum SubGraphInstance<F: PrimeField> {
         signal_offset: usize,
     },
     /// A recognized gadget template: its body is never compiled - `frontend/inline.rs` turns this
-    /// into an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
-    /// "Precomputation".
-    Precomputed {
-        /// Which gadget this site runs - resolved from the template's `name`/`num_inputs`/
-        /// `num_outputs` in `handle_create_cmp_bucket`, once, rather than re-derived every time
-        /// this instance is inlined.
-        kind: PrecomputeKind,
-        /// The template's specialized header, e.g. `"Poseidon2_12"` (`TemplateCodeInfo::header`) -
-        /// the key `precompute_spans` is looked up by.
-        header: String,
-        signal_offset: usize,
-        num_inputs: usize,
-        num_outputs: usize,
-        num_intermediates: usize,
-    },
+    /// into an `ir::Op::Precompute` site instead of recursing.
+    Precomputed(PrecomputedInstance),
+}
+
+/// One recognized gadget instance: everything `frontend/inline.rs` needs to cut it into a
+/// precomputation site. Resolved once in `handle_create_cmp_bucket` rather than re-derived every
+/// time the instance is inlined.
+#[derive(Clone)]
+pub(crate) struct PrecomputedInstance {
+    pub(crate) kind: PrecomputeKind,
+    /// The template's specialized header, e.g. `"Poseidon2_3"` (`TemplateCodeInfo::header`) -
+    /// the key `precompute_spans` is looked up by.
+    pub(crate) header: String,
+    /// Relative to the immediate father's signal frame, like every
+    /// `CreateCmpBucket::signal_offset`.
+    pub(crate) signal_offset: usize,
+    pub(crate) num_inputs: usize,
+    pub(crate) num_outputs: usize,
+    pub(crate) num_intermediates: usize,
 }
 
 /// The not-yet-inlined value graph of a single template. `sub_graphs[i]` is the i-th
@@ -228,12 +234,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 return self.handle_bulk_store_bucket(store_bucket, *n)
             }
             SizeOption::Multiple(_) => {
-                return Err(Unsupported::Instruction {
-                    kind: "bulk copy spanning multiple component instances".to_owned(),
-                    template: self.code.header.clone(),
-                    line: store_bucket.line,
-                }
-                .into());
+                return Err(self.unsupported(
+                    "unsupported instruction `bulk copy spanning multiple component instances`",
+                    store_bucket.line,
+                ));
             }
             _ => {}
         }
@@ -248,11 +252,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.write_value_at(&store_bucket.dest_address_type, index, value);
             }
             LocationRule::Mapped { .. } => {
-                return Err(Unsupported::MappedLocation {
-                    template: self.code.header.clone(),
-                    line: store_bucket.line,
-                }
-                .into());
+                return Err(self.unsupported(MAPPED_LOCATION, store_bucket.line));
             }
         }
         Ok(())
@@ -283,11 +283,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             template_header: _,
         } = &store_bucket.dest
         else {
-            return Err(Unsupported::MappedLocation {
-                template: self.code.header.clone(),
-                line: store_bucket.line,
-            }
-            .into());
+            return Err(self.unsupported(MAPPED_LOCATION, store_bucket.line));
         };
         let dest_base = self.get_constant_value(dest_location);
         let dest_address_type = store_bucket.dest_address_type.clone();
@@ -300,15 +296,13 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     fn err_bulk_copy_shape(&self, store_bucket: &StoreBucket) -> eyre::Report {
-        Unsupported::Instruction {
-            kind: format!(
-                "bulk copy whose source is not a plain indexed load: `{}`",
+        self.unsupported(
+            format!(
+                "unsupported instruction `bulk copy whose source is not a plain indexed load: {}`",
                 store_bucket.src.to_string()
             ),
-            template: self.code.header.clone(),
-            line: store_bucket.line,
-        }
-        .into()
+            store_bucket.line,
+        )
     }
 
     /// Pushes one [`SubGraphInstance`] per repetition of `create_cmp_bucket`, at consecutive
@@ -380,14 +374,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             let num_intermediates = span - num_inputs - num_outputs;
 
             self.push_instances(create_cmp_bucket, |signal_offset| {
-                SubGraphInstance::Precomputed {
+                SubGraphInstance::Precomputed(PrecomputedInstance {
                     kind,
                     header: header.clone(),
                     signal_offset,
                     num_inputs,
                     num_outputs,
                     num_intermediates,
-                }
+                })
             });
             return Ok(());
         }
@@ -590,31 +584,37 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
+    /// A circom construct this compiler deliberately does not support (yet, or ever).
+    /// `tests/frontend.rs` and `tests/merces.rs` pin several of these message prefixes.
+    fn unsupported(&self, msg: impl std::fmt::Display, line: usize) -> eyre::Report {
+        eyre::eyre!("{msg} in template `{}` at line {line}", self.code.header)
+    }
+
     fn err_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::Operator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!("unsupported operator `{}`", compute_bucket.op.to_string()),
+            compute_bucket.line,
+        )
     }
 
     fn err_non_constant_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::NonConstantOperator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!(
+                "operator `{}` is only supported on compile-time constants",
+                compute_bucket.op.to_string()
+            ),
+            compute_bucket.line,
+        )
     }
 
     fn err_address_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::AddressOperator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!(
+                "address operator `{}` in value position (dynamic array indexing)",
+                compute_bucket.op.to_string()
+            ),
+            compute_bucket.line,
+        )
     }
 
     fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> Result<ValueId> {
@@ -642,21 +642,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 let index = self.get_constant_value(location);
                 Ok(self.read_value_at(&load_bucket.address_type, index))
             }
-            LocationRule::Mapped { .. } => Err(Unsupported::MappedLocation {
-                template: self.code.header.clone(),
-                line: load_bucket.line,
+            LocationRule::Mapped { .. } => {
+                Err(self.unsupported(MAPPED_LOCATION, load_bucket.line))
             }
-            .into()),
         }
     }
 
     fn err_instruction(&self, kind: &str, line: usize) -> eyre::Report {
-        Unsupported::Instruction {
-            kind: kind.to_owned(),
-            template: self.code.header.clone(),
-            line,
-        }
-        .into()
+        self.unsupported(format!("unsupported instruction `{kind}`"), line)
     }
 
     /// `if`/`else` on a **compile-time-constant** condition: evaluate the condition, then lower only

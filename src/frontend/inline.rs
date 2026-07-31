@@ -15,26 +15,18 @@
 use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
-use super::build::{SubGraphInstance, TemplateGraph, TemplateOp};
-use crate::ir::{self, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
-
-/// Whether the template being inlined is the main template or one of its descendants. Absolute
-/// signal offsets cannot encode this: when main declares no signals, its first child legitimately
-/// starts at offset zero too.
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub(super) enum TemplatePosition {
-    Root,
-    Nested,
-}
+use super::build::{PrecomputedInstance, SubGraphInstance, TemplateGraph, TemplateOp};
+use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
 
 /// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
-/// signal space) into `nodes`/`outputs`. `position` identifies main independently of that numeric
-/// offset. `input_mapping` carries the values the *caller* stored into this template's own input
+/// signal space) into `nodes`/`outputs`. `is_root` identifies main independently of that numeric
+/// offset (when main declares no signals, its first child legitimately starts at offset zero
+/// too). `input_mapping` carries the values the *caller* stored into this template's own input
 /// ports (empty for main, which has no caller).
 ///
 /// `precompute_sites` accumulates one entry per recognized gadget instance encountered anywhere in
 /// the recursion, in encounter order - that order is the contract the runtime's supplied traces
-/// must follow (see `docs/ARCHITECTURE.md`, "Precomputation").
+/// must follow.
 ///
 /// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
 /// can resolve it once this call returns.
@@ -44,7 +36,7 @@ pub(super) fn inline_template<F: PrimeField>(
     precompute_sites: &mut Vec<PrecomputeSite>,
     template: TemplateGraph<F>,
     signal_offset: usize,
-    position: TemplatePosition,
+    is_root: bool,
     input_mapping: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
     let mut port_outputs = FxHashMap::default();
@@ -78,7 +70,7 @@ pub(super) fn inline_template<F: PrimeField>(
             TemplateOp::LocalSignal(signal) => {
                 let resolved = if let Some(&v) = local_writes.get(&signal) {
                     v
-                } else if position == TemplatePosition::Nested {
+                } else if !is_root {
                     *input_mapping.get(&signal).unwrap_or_else(|| {
                         panic!("subcomponent input signal {signal} read before it was provided")
                     })
@@ -88,7 +80,7 @@ pub(super) fn inline_template<F: PrimeField>(
                     nodes.push(ir::Node::new(Op::Input(SignalIdx::new(signal)), vec![]));
                     new_id
                 };
-                if position == TemplatePosition::Nested {
+                if !is_root {
                     // this subcomponent's own input signal is still part of the circuit's flat
                     // signal space and must be addressable by signal_to_witness
                     outputs.push((SignalIdx::new(signal + signal_offset), resolved));
@@ -99,7 +91,7 @@ pub(super) fn inline_template<F: PrimeField>(
                 let value =
                     local_remap[node.inputs[0].index()].expect("value used before it was resolved");
                 local_writes.insert(signal, value);
-                if position == TemplatePosition::Nested {
+                if !is_root {
                     port_outputs.insert(signal, value);
                 }
                 outputs.push((SignalIdx::new(signal + signal_offset), value));
@@ -180,50 +172,37 @@ fn inline_sub_graph_instance<F: PrimeField>(
             precompute_sites,
             template,
             parent_offset + signal_offset,
-            TemplatePosition::Nested,
+            false,
             sub_cmp_inputs,
         ),
-        SubGraphInstance::Precomputed {
-            kind,
-            header,
-            signal_offset,
-            num_inputs,
-            num_outputs,
-            num_intermediates,
-        } => inline_precomputed(
-            nodes,
-            outputs,
-            precompute_sites,
-            kind,
-            header,
-            parent_offset + signal_offset,
-            num_inputs,
-            num_outputs,
-            num_intermediates,
-            sub_cmp_inputs,
-        ),
+        SubGraphInstance::Precomputed(site) => {
+            inline_precomputed(nodes, outputs, precompute_sites, site, parent_offset, sub_cmp_inputs)
+        }
     }
 }
 
 /// Turns one recognized gadget instance into an `Op::Precompute` node plus one
-/// `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body. Implements
-/// the layout documented in `docs/ARCHITECTURE.md`, "Precomputation": result slots
-/// `0..num_outputs` are the gadget's own outputs (signals `signal_offset ..`), slots
+/// `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body. Result
+/// slots `0..num_outputs` are the gadget's own outputs (signals `signal_offset ..`), slots
 /// `num_outputs..` are its subtree's intermediate signals in flat order (signals
 /// `signal_offset + num_outputs + num_inputs ..`).
-#[allow(clippy::too_many_arguments)]
 fn inline_precomputed<F: PrimeField>(
     nodes: &mut Vec<ir::Node<F>>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
-    kind: PrecomputeKind,
-    header: String,
-    signal_offset: usize,
-    num_inputs: usize,
-    num_outputs: usize,
-    num_intermediates: usize,
+    site: PrecomputedInstance,
+    parent_offset: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
+    let PrecomputedInstance {
+        kind,
+        header,
+        signal_offset,
+        num_inputs,
+        num_outputs,
+        num_intermediates,
+    } = site;
+    let signal_offset = parent_offset + signal_offset;
     // Cross-checks the circuit's actual signal layout against what the gadget's VM
     // implementation is prepared to produce, for every kind whose result count has a closed form
     // (Poseidon2's doesn't - see `PrecomputeKind::expected_results`, checked instead at
