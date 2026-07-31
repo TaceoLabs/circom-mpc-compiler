@@ -63,7 +63,7 @@ fn prove_and_verify(name: &str) {
     // `vm::witness`'s module doc for why this comes from the zkey and not from `input_domains`.
     let n_pub = matrices.num_instance_variables;
     assert_eq!(
-        program.signal_to_witness.len(),
+        program.witness_sources.len(),
         matrices.num_instance_variables + matrices.num_witness_variables,
         "{name}: this compiler's witness length disagrees with the zkey's - they were not built \
          from the same compilation"
@@ -104,7 +104,8 @@ fn prove_and_verify(name: &str) {
                     let shares = &shares;
                     scope.spawn(move || {
                         let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
-                        let mut driver = Rep3Driver::new(&ext, &mut state);
+                        let mut driver =
+                            Rep3Driver::<Fr, _>::new_for_run(&ext, &mut state, program).unwrap();
                         let mut next = 0;
                         let inputs = program.classify_inputs(values, |_v| {
                             let s = shares[next][party];

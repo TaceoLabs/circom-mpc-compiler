@@ -5,17 +5,20 @@
 //! since it normalizes throughput by witness size and only compares batch1 against batch8.
 //!
 //! Inputs are seeded-random field elements (`StdRng::seed_from_u64`), not real protocol values, for
-//! every `N` uniformly - this bench only measures witness-extension time and never proves or checks
-//! a `===` constraint, and rep3's cost is value-independent (see `src/bin/merces-net.rs`, which makes
-//! the same call). Real fixtures only exist for batch1/batch8 anyway (`src/fixtures.rs`); using them
-//! for those two and dummy values for batch16/batch32 would mix two input provenances in one group
-//! for no benefit here.
+//! every `N` uniformly - this bench only measures total per-execution witness-extension cost and
+//! never proves or checks a `===` constraint, and rep3's cost is value-independent (see
+//! `src/bin/merces-net.rs`, which makes the same call). Real fixtures only exist for batch1/batch8
+//! anyway (`src/fixtures.rs`); using them for those two and dummy values for batch16/batch32 would
+//! mix two input provenances in one group for no benefit here.
 //!
 //! Each party's `LocalNetwork` and `Rep3State` (the correlated-randomness handshake) are built once
 //! per `N`, outside every timed iteration, and reused across all of them - deliberately unlike
 //! `witness_extension.rs`, which pays that setup inside every timed run to model a fresh connection.
 //! Here the setup cost is roughly constant in `N` and would compress the very scaling curve this bench
 //! exists to measure.
+//! The `rep3_total` series still measures total per-execution cost: each iteration prepares a fresh
+//! program-wide Poseidon2 pool before running the online VM; only the one-time connection/state
+//! setup is excluded.
 
 use ark_bn254::{Bn254, Fr};
 use ark_ff::UniformRand;
@@ -104,8 +107,8 @@ fn rep3_setup() -> (Vec<LocalNetwork>, Vec<Rep3State>) {
     (networks, states)
 }
 
-/// One full 3-party execution over the long-lived `networks`/`states` `rep3_setup` built for this
-/// `N`, reused run to run.
+/// One full 3-party total-cost execution over the long-lived `networks`/`states` `rep3_setup` built
+/// for this `N`, including fresh program-wide Poseidon2 preprocessing on every run.
 fn run_rep3(
     program: &Program<Fr>,
     values: &[Fr],
@@ -120,7 +123,8 @@ fn run_rep3(
             .enumerate()
             .map(|(party, (net, state))| {
                 scope.spawn(move || {
-                    let mut driver = Rep3Driver::new(net, state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(net, state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];
@@ -164,7 +168,7 @@ fn bench(c: &mut Criterion) {
             .collect();
 
         let (networks, mut states) = rep3_setup();
-        group.bench_with_input(BenchmarkId::new("rep3", n), &(), |b, ()| {
+        group.bench_with_input(BenchmarkId::new("rep3_total", n), &(), |b, ()| {
             b.iter(|| run_rep3(&program, &values, &shares, &networks, &mut states));
         });
     }

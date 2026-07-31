@@ -7,7 +7,7 @@ use ark_ff::PrimeField;
 use crate::ir::PrecomputeKind;
 
 use super::driver::VmDriver;
-use super::program::{Bank, Opcode, PrecomputeBatch, Program};
+use super::program::{Bank, BatchKind, Opcode, PrecomputeBatch, Program, WitnessSource};
 
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
@@ -52,12 +52,72 @@ impl<F: PrimeField> Program<F> {
 
 pub struct Machine;
 
+/// Ensures `finish_run` executes while unwinding as well as on every ordinary return. The explicit
+/// finish path propagates consistency errors; `Drop` deliberately ignores them because replacing an
+/// in-flight panic would hide the original failure. Rep3 transitions to `Spent` before its check in
+/// either path.
+struct RunGuard<'a, F: PrimeField, D: VmDriver<F>> {
+    driver: &'a mut D,
+    finished: bool,
+    field: std::marker::PhantomData<F>,
+}
+
+impl<'a, F: PrimeField, D: VmDriver<F>> RunGuard<'a, F, D> {
+    fn new(driver: &'a mut D) -> Self {
+        Self {
+            driver,
+            finished: false,
+            field: std::marker::PhantomData,
+        }
+    }
+
+    fn driver(&mut self) -> &mut D {
+        self.driver
+    }
+
+    fn finish(mut self) -> eyre::Result<()> {
+        // Disarm Drop first: a fallible finish must never be attempted twice.
+        self.finished = true;
+        self.driver.finish_run()
+    }
+}
+
+impl<F: PrimeField, D: VmDriver<F>> Drop for RunGuard<'_, F, D> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.driver.finish_run();
+        }
+    }
+}
+
 impl Machine {
     pub fn run<F: PrimeField, D: VmDriver<F>>(
         program: &Program<F>,
         driver: &mut D,
         inputs: &[InputValue<F, D::Share>],
     ) -> eyre::Result<Vec<D::Share>> {
+        // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
+        // network error, or panic all spend a one-shot prepared driver.
+        driver.begin_run()?;
+        let mut guard = RunGuard::<F, D>::new(driver);
+        let run = Self::run_inner(program, guard.driver(), inputs);
+        let finish = guard.finish();
+        match (run, finish) {
+            (Ok(witness), Ok(())) => Ok(witness),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(run_error), Err(finish_error)) => Err(eyre::eyre!(
+                "{run_error:#}; driver finalization also failed: {finish_error:#}"
+            )),
+        }
+    }
+
+    fn run_inner<F: PrimeField, D: VmDriver<F>>(
+        program: &Program<F>,
+        driver: &mut D,
+        inputs: &[InputValue<F, D::Share>],
+    ) -> eyre::Result<Vec<D::Share>> {
+        program.validate()?;
         eyre::ensure!(
             inputs.len() == program.num_inputs,
             "expected {} inputs, got {}",
@@ -135,8 +195,7 @@ impl Machine {
                     let start = entry.operand_start as usize;
                     let len = entry.len as usize;
                     eyre::ensure!(
-                        pending_mul_dst.as_slice()
-                            == &program.round_operands[start..start + len],
+                        pending_mul_dst.as_slice() == &program.round_operands[start..start + len],
                         "MulLocal instructions do not match the following round's operand table"
                     );
                     let products = driver.mul_local_vec(&pending_mul_lhs, &pending_mul_rhs);
@@ -182,37 +241,33 @@ impl Machine {
             "program ended with MulLocal instructions not followed by Reshare"
         );
 
-        // Signal 0 is the reserved always-true constant; every genuine `SignalIdx` `s` lands at
-        // `s + 1` - `Program::signal_to_witness` already indexes into this same, offset-by-one
-        // array.
-        let mut signals: Vec<D::Share> = vec![D::Share::default(); program.num_signals];
-        signals[0] = driver.promote(F::one());
-        for store in &program.stores {
-            signals[store.signal as usize + 1] = match store.bank {
-                Bank::Public => driver.promote(public[store.slot as usize]),
-                Bank::Shared => shared[store.slot as usize].clone(),
-                Bank::Local => unreachable!("codegen never stores a Local value directly"),
-            };
+        // Codegen has already projected circom's flat signal address space into witness order.
+        // Build exactly the final witness: no `num_signals`-sized zero-fill and no second clone
+        // pass over that temporary array.
+        let mut witness = Vec::with_capacity(program.witness_sources.len());
+        for source in &program.witness_sources {
+            witness.push(match *source {
+                WitnessSource::One => driver.promote(F::one()),
+                WitnessSource::Zero => driver.promote(F::zero()),
+                WitnessSource::Input(input_index) => match &inputs[input_index as usize] {
+                    InputValue::Public(value) => driver.promote(*value),
+                    InputValue::Secret(value) => value.clone(),
+                },
+                WitnessSource::Slot {
+                    bank: Bank::Public,
+                    slot,
+                } => driver.promote(public[slot as usize]),
+                WitnessSource::Slot {
+                    bank: Bank::Shared,
+                    slot,
+                } => shared[slot as usize].clone(),
+                WitnessSource::Slot {
+                    bank: Bank::Local,
+                    ..
+                } => unreachable!("codegen never emits a Local witness source"),
+            });
         }
-        // Main's own circuit inputs are never `graph.outputs()` entries (only a *nested*
-        // subcomponent's input signal is - see `frontend/inline.rs::inline_template`'s
-        // `TemplateOp::LocalSignal` arm), so they'd otherwise never reach `signals` at all - copy
-        // each one in directly from the caller-supplied `inputs`. Uses the original `inputs`
-        // argument (not a P/S-bank slot) so this covers an input whose `Op::Input` node `gc`
-        // dropped as dead too - still a genuine witness entry.
-        for (input_index, value) in inputs.iter().enumerate() {
-            let signal = program.num_outputs + input_index;
-            signals[signal + 1] = match value {
-                InputValue::Public(v) => driver.promote(*v),
-                InputValue::Secret(v) => v.clone(),
-            };
-        }
-
-        Ok(program
-            .signal_to_witness
-            .iter()
-            .map(|&idx| signals[idx].clone())
-            .collect())
+        Ok(witness)
     }
 
     /// Services one batched precomputation site group at its point in the instruction stream. A
@@ -235,12 +290,21 @@ impl Machine {
         public: &mut [F],
         shared: &mut [D::Share],
     ) -> eyre::Result<()> {
-        // Whether this batch needs a genuine MPC call, rather than `batch.result_bank == Public`:
+        if batch.kind == BatchKind::IsZeroReveal {
+            return Self::run_is_zero_reveal_batch(batch, driver, public, shared);
+        }
+        let BatchKind::Precompute(kind) = batch.kind else {
+            unreachable!("fused batch handled above")
+        };
+        // Whether this batch needs a genuine MPC call, rather than inferring it from result targets:
         // for every kind but `Reveal` the two coincide (a site's inputs are all-`Public` exactly
-        // when its result stays `Public`), but `Reveal`'s `result_bank` is unconditionally `Public`
+        // when its result stays `Public`), but `Reveal`'s result target is unconditionally `Public`
         // even when its own inputs are `Shared` - that is its entire purpose (see
         // `PrecomputeKind::Reveal`), and precisely that case still needs a real `driver.open` call.
-        let needs_mpc = batch.input_slots.iter().any(|input| input.bank == Bank::Shared);
+        let needs_mpc = batch
+            .input_slots
+            .iter()
+            .any(|input| input.bank == Bank::Shared);
 
         if !needs_mpc {
             let inputs: Vec<F> = batch
@@ -254,13 +318,18 @@ impl Machine {
                     Ok(public[input.slot as usize])
                 })
                 .collect::<eyre::Result<_>>()?;
-            let results = Self::run_plain_batch(batch.kind, &inputs)?;
-            eyre::ensure!(
-                batch.result_bank == Bank::Public,
-                "an all-public precompute batch's result bank must be Public"
-            );
+            if let PrecomputeKind::Poseidon2 { t } = kind {
+                let selected = super::gadgets::poseidon2::plain_trace_requested(
+                    t,
+                    &inputs,
+                    &batch.result_requests,
+                    &batch.result_offsets,
+                )?;
+                return Self::store_batch_results_owned(batch, selected, Bank::Public, public);
+            }
+            let results = Self::run_plain_batch(kind, &inputs)?;
             let selected = Self::select_requests(&results, batch)?;
-            return Self::store_batch_results(batch, &selected, public);
+            return Self::store_batch_results(batch, &selected, Bank::Public, public);
         }
 
         // A site input isn't always a share - a circuit may pass a literal, which codegen resolves
@@ -279,21 +348,22 @@ impl Machine {
 
         // `Reveal` is the one kind whose MPC path writes into the `Public` bank (a genuine open,
         // rather than a share-producing gadget) - every other kind writes into `Shared`.
-        if let PrecomputeKind::Reveal { .. } = batch.kind {
-            eyre::ensure!(
-                batch.result_bank == Bank::Public,
-                "a Reveal precompute batch's result bank must be Public"
-            );
+        if let PrecomputeKind::Reveal { .. } = kind {
             let opened = driver.open(&inputs)?;
             let selected = Self::select_requests(&opened, batch)?;
-            return Self::store_batch_results(batch, &selected, public);
+            return Self::store_batch_results(batch, &selected, Bank::Public, public);
         }
-        eyre::ensure!(
-            batch.result_bank == Bank::Shared,
-            "precompute batch result bank cannot be Local"
-        );
-        let results = match batch.kind {
-            PrecomputeKind::Poseidon2 { t } => driver.poseidon2_traces(t, &inputs)?,
+        if let PrecomputeKind::Poseidon2 { t } = kind {
+            let selected = driver.poseidon2_requested_traces(
+                t,
+                &inputs,
+                &batch.result_requests,
+                &batch.result_offsets,
+            )?;
+            return Self::store_batch_results_owned(batch, selected, Bank::Shared, shared);
+        }
+        let results = match kind {
+            PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
             PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
             PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
@@ -301,7 +371,74 @@ impl Machine {
             PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
         let selected = Self::select_requests(&results, batch)?;
-        Self::store_batch_results(batch, &selected, shared)
+        Self::store_batch_results(batch, &selected, Bank::Shared, shared)
+    }
+
+    fn run_is_zero_reveal_batch<F: PrimeField, D: VmDriver<F>>(
+        batch: &PrecomputeBatch,
+        driver: &mut D,
+        public: &mut [F],
+        shared: &mut [D::Share],
+    ) -> eyre::Result<()> {
+        eyre::ensure!(batch.sites > 0, "fused IsZero/Reveal batch has no sites");
+        eyre::ensure!(
+            batch.input_slots.len() == batch.sites,
+            "fused IsZero/Reveal batch has {} inputs for {} sites",
+            batch.input_slots.len(),
+            batch.sites
+        );
+        let inputs: Vec<_> = batch
+            .input_slots
+            .iter()
+            .map(|input| {
+                eyre::ensure!(
+                    input.bank == Bank::Shared,
+                    "fused IsZero/Reveal requires one Shared input per site"
+                );
+                Ok(shared[input.slot as usize].clone())
+            })
+            .collect::<eyre::Result<_>>()?;
+        let traces = driver.is_zero_reveal_traces(&inputs)?;
+        eyre::ensure!(
+            traces.len() == batch.sites,
+            "fused IsZero/Reveal returned {} site traces, expected {}",
+            traces.len(),
+            batch.sites
+        );
+        eyre::ensure!(
+            batch.result_offsets.len() == batch.sites + 1
+                && batch.result_requests.len() == batch.result_targets.len(),
+            "malformed fused IsZero/Reveal CSR result table"
+        );
+        for (site, (is_zero, inverse, revealed)) in traces.into_iter().enumerate() {
+            let lo = batch.result_offsets[site] as usize;
+            let hi = batch.result_offsets[site + 1] as usize;
+            eyre::ensure!(lo <= hi && hi <= batch.result_requests.len(), "invalid fused CSR row");
+            for (&logical, target) in batch.result_requests[lo..hi]
+                .iter()
+                .zip(&batch.result_targets[lo..hi])
+            {
+                if target.slot == u32::MAX {
+                    continue;
+                }
+                match logical {
+                    0 => {
+                        eyre::ensure!(target.bank == Bank::Shared, "IsZero.out must target Shared");
+                        shared[target.slot as usize] = is_zero.clone();
+                    }
+                    1 => {
+                        eyre::ensure!(target.bank == Bank::Shared, "IsZero.inv must target Shared");
+                        shared[target.slot as usize] = inverse.clone();
+                    }
+                    2 => {
+                        eyre::ensure!(target.bank == Bank::Public, "Reveal.out must target Public");
+                        public[target.slot as usize] = revealed;
+                    }
+                    other => eyre::bail!("fused IsZero/Reveal requested invalid logical slot {other}"),
+                }
+            }
+        }
+        Ok(())
     }
 
     fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
@@ -337,10 +474,10 @@ impl Machine {
 
     /// Selects each site's witness-live logical result slots out of a gadget's full per-site
     /// output, flattening site-major. A temporary bridge (see `docs/ARCHITECTURE.md`,
-    /// "Precomputation"): every gadget still computes and returns its *full* per-site trace
-    /// unconditionally (`num_outputs + num_intermediates` values), and this filters the
-    /// `PrecomputeBatch::result_requests` subset out of it before storing - until a later step
-    /// teaches each gadget to skip computing the witness-dead majority in the first place.
+    /// "Precomputation"): gadgets other than Poseidon2 still compute and return their *full*
+    /// per-site trace (`num_outputs + num_intermediates` values), and this filters the
+    /// `PrecomputeBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
+    /// directly and bypasses this bridge.
     fn select_requests<T: Clone>(full: &[T], batch: &PrecomputeBatch) -> eyre::Result<Vec<T>> {
         eyre::ensure!(batch.sites > 0, "precompute batch has no sites");
         eyre::ensure!(
@@ -374,21 +511,205 @@ impl Machine {
     fn store_batch_results<T: Clone>(
         batch: &PrecomputeBatch,
         results: &[T],
+        expected_bank: Bank,
         destination: &mut [T],
     ) -> eyre::Result<()> {
         eyre::ensure!(
-            results.len() == batch.result_slots.len(),
+            results.len() == batch.result_targets.len(),
             "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
              slot)",
             batch.kind,
             results.len(),
-            batch.result_slots.len()
+            batch.result_targets.len()
         );
-        for (&slot, value) in batch.result_slots.iter().zip(results) {
-            if slot != u32::MAX {
-                destination[slot as usize] = value.clone();
+        for (target, value) in batch.result_targets.iter().zip(results) {
+            eyre::ensure!(
+                target.bank == expected_bank,
+                "precompute batch ({:?}) result targets mixed banks unexpectedly",
+                batch.kind
+            );
+            if target.slot != u32::MAX {
+                destination[target.slot as usize] = value.clone();
             }
         }
         Ok(())
+    }
+
+    /// Poseidon2 already returns exactly the CSR-requested values, so consume that vector while
+    /// scattering it into bank slots instead of cloning it through the generic full-trace bridge.
+    fn store_batch_results_owned<T>(
+        batch: &PrecomputeBatch,
+        results: Vec<T>,
+        expected_bank: Bank,
+        destination: &mut [T],
+    ) -> eyre::Result<()> {
+        eyre::ensure!(
+            results.len() == batch.result_targets.len(),
+            "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
+             slot)",
+            batch.kind,
+            results.len(),
+            batch.result_targets.len()
+        );
+        for (target, value) in batch.result_targets.iter().zip(results) {
+            eyre::ensure!(
+                target.bank == expected_bank,
+                "precompute batch ({:?}) result targets mixed banks unexpectedly",
+                batch.kind
+            );
+            if target.slot != u32::MAX {
+                destination[target.slot as usize] = value;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_bn254::Fr;
+
+    use super::*;
+    use crate::vm::program::SlotCounts;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MockLifecycle {
+        Ready,
+        Running,
+        Spent,
+    }
+
+    struct PanicDriver {
+        lifecycle: MockLifecycle,
+        finish_calls: usize,
+    }
+
+    impl PanicDriver {
+        fn new() -> Self {
+            Self {
+                lifecycle: MockLifecycle::Ready,
+                finish_calls: 0,
+            }
+        }
+    }
+
+    impl VmDriver<Fr> for PanicDriver {
+        type Share = Fr;
+        type Local = Fr;
+
+        fn begin_run(&mut self) -> eyre::Result<()> {
+            match self.lifecycle {
+                MockLifecycle::Ready => {
+                    self.lifecycle = MockLifecycle::Running;
+                    Ok(())
+                }
+                MockLifecycle::Running | MockLifecycle::Spent => {
+                    eyre::bail!("mock driver is spent")
+                }
+            }
+        }
+
+        fn finish_run(&mut self) -> eyre::Result<()> {
+            self.lifecycle = MockLifecycle::Spent;
+            self.finish_calls += 1;
+            Ok(())
+        }
+
+        fn promote(&mut self, _value: Fr) -> Fr {
+            panic!("intentional execution panic")
+        }
+
+        fn add_ss(&mut self, _a: &Fr, _b: &Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn sub_ss(&mut self, _a: &Fr, _b: &Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn add_sp(&mut self, _a: &Fr, _b: Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn sub_sp(&mut self, _a: &Fr, _b: Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn sub_ps(&mut self, _a: Fr, _b: &Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn mul_sp(&mut self, _a: &Fr, _b: Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn mul_local(&mut self, _a: &Fr, _b: &Fr) -> Fr {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn reshare(&mut self, _locals: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn open(&mut self, _shares: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn poseidon2_traces(
+            &mut self,
+            _t: usize,
+            _states: &[Fr],
+        ) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn num2bits_traces(
+            &mut self,
+            _n: usize,
+            _inputs: &[Fr],
+        ) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn is_zero_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn is_equal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn alias_check_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+    }
+
+    #[test]
+    fn panic_finishes_and_spends_the_driver() {
+        let program = Program {
+            instructions: Vec::new(),
+            constants: Vec::new(),
+            input_domains: Vec::new(),
+            inputs: Vec::new(),
+            rounds: Vec::new(),
+            round_operands: Vec::new(),
+            round_results: Vec::new(),
+            precompute_batches: Vec::new(),
+            witness_sources: vec![WitnessSource::One],
+            num_inputs: 0,
+            slots: SlotCounts::default(),
+        };
+        let mut driver = PanicDriver::new();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Machine::run(&program, &mut driver, &[]);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(driver.lifecycle, MockLifecycle::Spent);
+        assert_eq!(driver.finish_calls, 1);
+
+        let reuse = Machine::run(&program, &mut driver, &[]).unwrap_err();
+        assert!(reuse.to_string().contains("spent"));
+        assert_eq!(driver.finish_calls, 1, "failed begin must not call finish");
     }
 }

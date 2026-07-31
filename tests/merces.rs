@@ -134,7 +134,8 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
                 let secret_shares = &secret_shares;
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];
@@ -162,7 +163,7 @@ fn witness_extension_agrees(main: &str, scenario: &str) {
     let plain = plain_witness(program, &values);
     assert_eq!(
         plain.len(),
-        program.signal_to_witness.len(),
+        program.witness_sources.len(),
         "{main}/{scenario}: witness length"
     );
 
@@ -184,6 +185,87 @@ fn transfer_arity4_batch1_all_scenarios_run_end_to_end() {
 fn transfer_arity4_batch8_all_scenarios_run_end_to_end() {
     for scenario in ["full_batch", "partial_batch", "multi_withdraw", "invalid_slot"] {
         witness_extension_agrees("transfer_arity4_batch8", scenario);
+    }
+}
+
+#[cfg(feature = "round-counting")]
+fn witness_extension_rounds(main: &str, scenario: &str) -> ([usize; 3], [usize; 3]) {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+
+    let (program, _) = compiled(main);
+    let values = scenario_values(main, scenario);
+    let mut rng = thread_rng();
+    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
+        .input_domains
+        .iter()
+        .zip(&values)
+        .filter(|(bank, _)| matches!(bank, Bank::Shared))
+        .map(|(_, &value)| share_field_element(value, &mut rng))
+        .collect();
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+
+    let rounds: Vec<(usize, usize)> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let secret_shares = &secret_shares;
+                let values = &values;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    net.reset();
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let preprocessing = net.rounds();
+
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(values, |_value| {
+                        let share = secret_shares[next][party];
+                        next += 1;
+                        share
+                    });
+                    Machine::run(program, &mut driver, &inputs).unwrap();
+                    (preprocessing, net.rounds())
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    let [(prep0, online0), (prep1, online1), (prep2, online2)]: [(usize, usize); 3] =
+        rounds.try_into().unwrap();
+    ([prep0, prep1, prep2], [online0, online1, online2])
+}
+
+#[cfg(feature = "round-counting")]
+#[test]
+fn server_mains_separate_preprocessing_from_online_rounds() {
+    for (main, scenario) in [
+        ("transfer_arity4_batch1", "deposit"),
+        ("transfer_arity4_batch8", "full_batch"),
+    ] {
+        let (preprocessing, online) = witness_extension_rounds(main, scenario);
+        let combined = std::array::from_fn(|party| preprocessing[party] + online[party]);
+
+        assert_eq!(preprocessing, [3, 3, 3], "{main}: preprocessing rounds");
+        assert_eq!(online, [69, 71, 71], "{main}: online rounds");
+        assert_eq!(
+            online.into_iter().max(),
+            Some(71),
+            "{main}: max online rounds"
+        );
+        assert_eq!(combined, [72, 74, 74], "{main}: combined rounds");
+        assert_eq!(
+            combined.into_iter().max(),
+            Some(74),
+            "{main}: max combined rounds"
+        );
     }
 }
 
@@ -292,7 +374,7 @@ fn proves_and_verifies(main: &str, scenario: &str) {
         .and_then(|s| s.values(input_list))
         .unwrap_or_else(|e| panic!("{main}/{scenario}: {e}"));
     assert_eq!(
-        program.signal_to_witness.len(),
+        program.witness_sources.len(),
         matrices.num_instance_variables + matrices.num_witness_variables,
         "{main}: this compiler's witness length disagrees with the zkey's - they were not built \
          from the same compilation"
@@ -325,7 +407,8 @@ fn proves_and_verifies(main: &str, scenario: &str) {
                 let values = &values;
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&ext_net, A2BType::default()).unwrap();
-                    let mut driver = Rep3Driver::new(&ext_net, &mut state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&ext_net, &mut state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];

@@ -2,7 +2,8 @@
 //! separately (potentially on different machines). Unlike `examples/merces.rs`, which runs all
 //! three parties in one process over an in-process `LocalNetwork`, this binary is the tool for
 //! measuring real network behavior: connection and correlated-randomness setup happen once and are
-//! excluded from every timed run, so `--runs` reports witness-extension time alone.
+//! excluded from every timed run, while each reported total-cost run includes fresh program-wide
+//! Poseidon2 preprocessing followed by online witness extension.
 //!
 //! Sweeps a set of batch sizes (`--batches`, default `1,8,16,32`) in one process, so the network
 //! and rep3 randomness setup is paid once for the whole sweep rather than once per size. Inputs are
@@ -73,7 +74,7 @@ struct Cli {
     /// Compiler optimization level: 0, 1, or 2.
     #[arg(long, default_value_t = 1)]
     opt: u8,
-    /// Number of timed witness-extension runs, per batch size.
+    /// Number of timed total-cost witness-extension runs, per batch size.
     #[arg(long, default_value_t = 5)]
     runs: usize,
     /// RNG seed for generating inputs and splitting them into rep3 shares. Must match across all
@@ -195,10 +196,10 @@ fn run(args: Cli) -> eyre::Result<()> {
     }
 
     println!("party {my_id}: summary");
-    println!("party {my_id}: {:>6}  {:>10}  {:>10}  {:>10}  {:>8}  {:>12}  {:>12}", "N", "min", "median", "max", "rounds", "bytes sent", "bytes recv");
+    println!("party {my_id}: {:>6}  {:>10}  {:>10}  {:>10}  {:>10}  {:>12}  {:>12}", "N", "min", "median", "max", "total rnds", "total sent", "total recv");
     for r in &results {
         println!(
-            "party {my_id}: {:>6}  {:>10.2?}  {:>10.2?}  {:>10.2?}  {:>8}  {:>12}  {:>12}",
+            "party {my_id}: {:>6}  {:>10.2?}  {:>10.2?}  {:>10.2?}  {:>10}  {:>12}  {:>12}",
             r.n, r.min, r.median, r.max, r.rounds, r.sent, r.recv
         );
     }
@@ -206,8 +207,9 @@ fn run(args: Cli) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Compiles `transfer_arity4_batch{n}.circom`, runs `runs` timed witness extensions against
-/// seeded-random dummy inputs, and returns the timing/traffic summary.
+/// Compiles `transfer_arity4_batch{n}.circom`, runs `runs` timed total-cost witness extensions
+/// (fresh Poseidon2 preprocessing plus online execution) against seeded-random dummy inputs, and
+/// returns the timing/traffic summary.
 fn bench_batch(
     my_id: usize,
     net: &CountingNet<TlsNetwork>,
@@ -253,10 +255,11 @@ fn bench_batch(
         program.slots.local,
     );
 
-    // Dummy inputs: this binary only measures witness-extension time, and rep3's cost is
-    // value-independent, so seeded-random field elements stand in for real merces protocol
-    // values. Every party derives the same share triples from the same seed, then keeps only its
-    // own index - no share distribution, no extra network round.
+    // Dummy inputs: this binary only measures total per-run witness-extension cost (fresh
+    // Poseidon2 preprocessing plus online execution), and rep3's cost is value-independent, so
+    // seeded-random field elements stand in for real merces protocol values. Every party derives
+    // the same share triples from the same seed, then keeps only its own index - no share
+    // distribution, no extra network round.
     let mut rng = StdRng::seed_from_u64(seed);
     let values: Vec<Fr> = (0..program.num_inputs).map(|_| Fr::rand(&mut rng)).collect();
     let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
@@ -285,7 +288,7 @@ fn bench_batch(
         let stats_before = net.get_connection_stats();
         let rounds_before = net.rounds();
         let t = Instant::now();
-        let mut driver = Rep3Driver::new(net, state);
+        let mut driver = Rep3Driver::<Fr, _>::new_for_run(net, state, &program)?;
         Machine::run(&program, &mut driver, &inputs)?;
         let elapsed = t.elapsed();
         net.flush()?;
@@ -294,7 +297,7 @@ fn bench_batch(
         let diff = stats_after.get_diff_to(&stats_before);
         let (sent, recv) = diff.values().fold((0, 0), |(s, r), &(a, b)| (s + a, r + b));
         println!(
-            "party {my_id}: batch {n}: run {i}: {:.2?}  rounds={rounds} bytes sent={sent} recv={recv}",
+            "party {my_id}: batch {n}: total-cost run {i}: {:.2?}  rounds={rounds} bytes sent={sent} recv={recv}",
             elapsed
         );
         wall_times.push(elapsed);
@@ -309,7 +312,7 @@ fn bench_batch(
     let max = wall_times[wall_times.len() - 1];
     let median = wall_times[wall_times.len() / 2];
     println!(
-        "party {my_id}: batch {n}: witness extension over {} runs: min={min:.2?} median={median:.2?} max={max:.2?}",
+        "party {my_id}: batch {n}: total-cost witness extension over {} runs: min={min:.2?} median={median:.2?} max={max:.2?}",
         wall_times.len()
     );
 

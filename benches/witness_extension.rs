@@ -12,6 +12,8 @@
 //!
 //! Note `LocalNetwork` is in-process, so rep3 numbers here measure protocol *work* and round
 //! *structure*, not real network latency - which is exactly the quantity round batching reduces.
+//! The `rep3_total` series is deliberately total cost: every measured iteration includes
+//! `Rep3State` setup, fresh program-wide Poseidon2 preprocessing, and online execution.
 
 use ark_bn254::{Bn254, Fr};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -123,8 +125,8 @@ fn run_plain(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
     Machine::run(program, &mut driver, &inputs).expect("plain run")
 }
 
-/// One full 3-party execution, including the per-run `Rep3State` setup a real deployment would also
-/// pay once per connection.
+/// One full 3-party total-cost execution, including the per-run `Rep3State` setup a real deployment
+/// would also pay once per connection and fresh program-wide Poseidon2 preprocessing.
 fn run_rep3(program: &Program<Fr>, values: &[Fr], shares: &[[Rep3PrimeFieldShare<Fr>; 3]]) {
     let networks = LocalNetwork::new(3);
     std::thread::scope(|scope| {
@@ -134,7 +136,8 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr], shares: &[[Rep3PrimeFieldShare
             .map(|(party, net)| {
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];
@@ -165,7 +168,7 @@ fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("witness_extension");
     // Witness entries produced, so throughput is comparable across very different circuit sizes.
     for (case, program, values) in &prepared {
-        group.throughput(Throughput::Elements(program.signal_to_witness.len() as u64));
+        group.throughput(Throughput::Elements(program.witness_sources.len() as u64));
 
         group.bench_with_input(BenchmarkId::new("plain", case.name), &(), |b, ()| {
             b.iter(|| run_plain(program, values));
@@ -180,7 +183,7 @@ fn bench(c: &mut Criterion) {
             .map(|(_, &v)| share_field_element(v, &mut rng))
             .collect();
 
-        group.bench_with_input(BenchmarkId::new("rep3", case.name), &(), |b, ()| {
+        group.bench_with_input(BenchmarkId::new("rep3_total", case.name), &(), |b, ()| {
             b.iter(|| run_rep3(program, values, &shares));
         });
     }

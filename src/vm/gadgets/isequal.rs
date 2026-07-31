@@ -74,9 +74,10 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 #[cfg(all(test, feature = "rep3"))]
 mod tests {
     use ark_bn254::Fr;
+    use mpc_core::protocols::rep3::conversion::A2BType;
 
     use super::*;
-    use crate::vm::gadgets::test_support::run3;
+    use crate::vm::gadgets::test_support::run3_with_a2b;
 
     #[test]
     fn rep3_agrees_with_plain_across_two_sites() {
@@ -90,8 +91,12 @@ mod tests {
             Fr::from(0u64),
         ];
         let expected = plain_trace(&values).unwrap();
-        let got = run3(&values, |net, state, shares| rep3_trace(shares, net, state));
-        assert_eq!(got, expected);
+        for strategy in [A2BType::Yao, A2BType::Direct] {
+            let got = run3_with_a2b(&values, strategy, |net, state, shares| {
+                rep3_trace(shares, net, state)
+            });
+            assert_eq!(got, expected, "strategy={strategy:?}");
+        }
     }
 
     #[test]
@@ -104,5 +109,41 @@ mod tests {
         let trace = plain_trace(&[Fr::from(10u64), Fr::from(4u64)]).unwrap();
         assert_eq!(trace[0], Fr::from(0u64));
         assert_eq!(trace[2], Fr::from(4u64) - Fr::from(10u64));
+    }
+
+    #[cfg(feature = "round-counting")]
+    #[test]
+    fn rep3_cost_matches_iszero_for_both_strategies_and_batch_sizes() {
+        use crate::vm::gadgets::test_support::run3_counted_with_a2b;
+
+        let one_site = [Fr::from(5u64), Fr::from(5u64)];
+        let four_sites = [
+            Fr::from(5u64),
+            Fr::from(5u64),
+            Fr::from(3u64),
+            Fr::from(9u64),
+            Fr::from(0u64),
+            Fr::from(0u64),
+            Fr::from(2u64),
+            Fr::from(7u64),
+        ];
+
+        for (strategy, expected_max) in [(A2BType::Yao, 11), (A2BType::Direct, 29)] {
+            let (_, rounds_one) =
+                run3_counted_with_a2b(&one_site, strategy, |net, state, shares| {
+                    rep3_trace(shares, net, state)
+                });
+            let (_, rounds_four) =
+                run3_counted_with_a2b(&four_sites, strategy, |net, state, shares| {
+                    rep3_trace(shares, net, state)
+                });
+
+            assert_eq!(rounds_one.max(), expected_max, "strategy={strategy:?}");
+            assert_eq!(rounds_four.max(), expected_max, "strategy={strategy:?}");
+            assert_eq!(
+                rounds_one.by_party, rounds_four.by_party,
+                "strategy={strategy:?}"
+            );
+        }
     }
 }

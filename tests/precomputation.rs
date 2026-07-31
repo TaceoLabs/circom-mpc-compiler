@@ -221,7 +221,7 @@ fn all_public_gadgets_stay_public_through_downstream_multiplication() {
     let program = CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
         .unwrap();
     assert_eq!(program.precompute_batches.len(), 1);
-    assert_eq!(program.precompute_batches[0].result_bank, circom_mpc_compiler::vm::program::Bank::Public);
+    assert_eq!(program.precompute_batches[0].result_targets[0].bank, circom_mpc_compiler::vm::program::Bank::Public);
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();

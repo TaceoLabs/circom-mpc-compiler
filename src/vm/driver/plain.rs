@@ -61,6 +61,16 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
         poseidon2::plain_trace(t, states)
     }
 
+    fn poseidon2_requested_traces(
+        &mut self,
+        t: usize,
+        states: &[F],
+        result_requests: &[u32],
+        result_offsets: &[u32],
+    ) -> eyre::Result<Vec<F>> {
+        poseidon2::plain_trace_requested(t, states, result_requests, result_offsets)
+    }
+
     fn num2bits_traces(&mut self, n: usize, inputs: &[F]) -> eyre::Result<Vec<F>> {
         Ok(inputs
             .iter()
@@ -69,7 +79,20 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
     }
 
     fn is_zero_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        Ok(inputs.iter().flat_map(|&x| iszero::plain_trace(x)).collect())
+        Ok(inputs
+            .iter()
+            .flat_map(|&x| iszero::plain_trace(x))
+            .collect())
+    }
+
+    fn is_zero_reveal_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<(F, F, F)>> {
+        Ok(inputs
+            .iter()
+            .map(|&x| {
+                let [is_zero, inverse] = iszero::plain_trace(x);
+                (is_zero, inverse, is_zero)
+            })
+            .collect())
     }
 
     fn is_equal_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {

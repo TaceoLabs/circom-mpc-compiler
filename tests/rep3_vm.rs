@@ -12,12 +12,14 @@
 
 use ark_bn254::{Bn254, Fr};
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element};
+use mpc_core::protocols::rep3::{
+    combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+};
 use mpc_net::local::LocalNetwork;
 use rand::thread_rng;
 
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::vm::program::Bank;
+use circom_mpc_compiler::vm::program::{Bank, BatchKind};
 use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
@@ -31,7 +33,7 @@ fn config() -> CompilerConfig {
     config
 }
 
-/// Runs one input through 3-party rep3 and returns the reconstructed witness.
+/// Runs one input vector through 3-party rep3 and returns the reconstructed witness.
 fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Vec<Fr> {
     // One [share0, share1, share2] triple per Shared-domain input, in the same order
     // `Program::classify_inputs` visits them - each party gets its own entry below.
@@ -53,7 +55,8 @@ fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Ve
                 let secret_shares = &secret_shares;
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];
@@ -84,11 +87,9 @@ fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Ve
 fn staged_precomputation_matches_the_plain_driver_under_rep3() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_staged_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_staged_test"), config())
+            .unwrap();
     assert_eq!(
         program.precompute_batches.len(),
         2,
@@ -110,6 +111,164 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
 }
 
 #[test]
+fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_iszero_reveal_test"),
+        config(),
+    )
+    .unwrap();
+    assert_eq!(program.precompute_batches.len(), 1);
+    assert_eq!(program.precompute_batches[0].kind, BatchKind::IsZeroReveal);
+    assert_eq!(program.precompute_batches[0].sites, 2);
+
+    let values = [Fr::from(0u64), Fr::from(7u64)];
+    let plain = {
+        let inputs = program.classify_inputs(&values, |v| v);
+        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+    };
+    assert_eq!(run_rep3(&program, &values), plain, "inputs {values:?}");
+}
+
+#[test]
+fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_isequal_reveal_test"),
+        config(),
+    )
+    .unwrap();
+    assert_eq!(program.precompute_batches.len(), 1);
+    assert_eq!(program.precompute_batches[0].kind, BatchKind::IsZeroReveal);
+    assert_eq!(program.precompute_batches[0].sites, 3);
+
+    for (values, expected) in [
+        ([Fr::from(5u64), Fr::from(5u64), Fr::from(5u64)], [1u64, 1, 1]),
+        // Circom orders public inputs first: [clear, secret[0], secret[1]].
+        ([Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)], [0u64, 0, 1]),
+        ([Fr::from(4u64), Fr::from(4u64), Fr::from(10u64)], [0u64, 1, 0]),
+    ] {
+        let plain = {
+            let inputs = program.classify_inputs(&values, |v| v);
+            Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+        };
+        assert_eq!(
+            &plain[1..4],
+            &expected.map(Fr::from),
+            "main equality outputs for {values:?}"
+        );
+        assert_eq!(run_rep3(&program, &values), plain, "inputs {values:?}");
+    }
+}
+
+#[cfg(feature = "round-counting")]
+#[test]
+fn fused_iszero_reveal_costs_one_online_round() {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_iszero_reveal_test"),
+        config(),
+    )
+    .unwrap();
+    let values = [Fr::from(0u64), Fr::from(7u64)];
+    let mut rng = thread_rng();
+    let shares: Vec<_> = values
+        .iter()
+        .map(|&value| share_field_element(value, &mut rng))
+        .collect();
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+    let rounds: Vec<_> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(&values, |_| {
+                        let share = shares[next][party];
+                        next += 1;
+                        share
+                    });
+                    Machine::run(program, &mut driver, &inputs).unwrap();
+                    net.rounds()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    assert_eq!(rounds, vec![1, 1, 1]);
+}
+
+#[cfg(feature = "round-counting")]
+#[test]
+fn three_fused_isequal_reveal_sites_cost_one_online_round() {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_isequal_reveal_test"),
+        config(),
+    )
+    .unwrap();
+    let values = [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)];
+    let mut rng = thread_rng();
+    let shares: Vec<_> = program
+        .input_domains
+        .iter()
+        .zip(values)
+        .filter(|(bank, _)| **bank == Bank::Shared)
+        .map(|(_, value)| share_field_element(value, &mut rng))
+        .collect();
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+    let rounds: Vec<_> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(&values, |_| {
+                        let share = shares[next][party];
+                        next += 1;
+                        share
+                    });
+                    Machine::run(program, &mut driver, &inputs).unwrap();
+                    net.rounds()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    assert_eq!(rounds, vec![1, 1, 1]);
+}
+
+#[test]
 fn wide_round_vector_products_match_the_plain_driver() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
@@ -127,20 +286,231 @@ fn wide_round_vector_products_match_the_plain_driver() {
 
 #[test]
 fn all_public_precomputation_uses_the_plain_path_under_rep3() {
-    use circom_mpc_compiler::OptLevel;
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+    use circom_mpc_compiler::OptLevel;
 
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_public_test"),
-        cfg,
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
+            .unwrap();
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
         Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
     };
     assert_eq!(run_rep3(&program, &values), plain);
+}
+
+#[cfg(feature = "round-counting")]
+#[test]
+fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    struct PartyRun {
+        first: Vec<Rep3PrimeFieldShare<Fr>>,
+        fresh: Vec<Rep3PrimeFieldShare<Fr>>,
+        preparation_rounds: usize,
+        first_online_rounds: usize,
+        reuse_rounds: usize,
+        fresh_preparation_rounds: usize,
+        fresh_online_rounds: usize,
+        reuse_error: String,
+    }
+
+    // One ordinary shared multiplication round and no Poseidon2 service: preparing either driver
+    // must be communication-free, while a successful execution costs exactly one round.
+    let program =
+        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    assert!(program.precompute_batches.is_empty());
+    let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
+    let mut rng = thread_rng();
+    let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = values
+        .iter()
+        .map(|&value| share_field_element(value, &mut rng))
+        .collect();
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+
+    let runs: Vec<PartyRun> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                let values = &values;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(values, |_| {
+                        let share = shares[next][party];
+                        next += 1;
+                        share
+                    });
+
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let preparation_rounds = net.rounds();
+                    let first = Machine::run(program, &mut driver, &inputs).unwrap();
+                    let first_online_rounds = net.rounds() - preparation_rounds;
+
+                    let before_reuse = net.rounds();
+                    let reuse_error = Machine::run(program, &mut driver, &inputs)
+                        .unwrap_err()
+                        .to_string();
+                    let reuse_rounds = net.rounds() - before_reuse;
+                    drop(driver);
+
+                    let before_fresh_preparation = net.rounds();
+                    let mut fresh_driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
+                    let before_fresh_run = net.rounds();
+                    let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();
+                    let fresh_online_rounds = net.rounds() - before_fresh_run;
+
+                    PartyRun {
+                        first,
+                        fresh,
+                        preparation_rounds,
+                        first_online_rounds,
+                        reuse_rounds,
+                        fresh_preparation_rounds,
+                        fresh_online_rounds,
+                        reuse_error,
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    for run in &runs {
+        assert_eq!(run.preparation_rounds, 0);
+        assert_eq!(run.first_online_rounds, 1);
+        assert_eq!(run.reuse_rounds, 0, "reuse rejection must be local");
+        assert_eq!(run.fresh_preparation_rounds, 0);
+        assert_eq!(run.fresh_online_rounds, 1);
+        assert!(run.reuse_error.contains("spent"), "{}", run.reuse_error);
+    }
+
+    let first = combine_field_elements(&runs[0].first, &runs[1].first, &runs[2].first);
+    let fresh = combine_field_elements(&runs[0].fresh, &runs[1].fresh, &runs[2].fresh);
+    let expected_inputs = program.classify_inputs(&values, |value| value);
+    let expected = Machine::run(&program, &mut PlainDriver, &expected_inputs).unwrap();
+    assert_eq!(first, expected);
+    assert_eq!(fresh, expected);
+}
+
+#[cfg(feature = "round-counting")]
+#[test]
+fn execution_error_spends_prepared_driver_without_communication() {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    struct PartyRun {
+        fresh: Vec<Rep3PrimeFieldShare<Fr>>,
+        error_rounds: usize,
+        reuse_rounds: usize,
+        fresh_preparation_rounds: usize,
+        fresh_online_rounds: usize,
+        execution_error: String,
+        reuse_error: String,
+    }
+
+    let program =
+        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    assert!(program.precompute_batches.is_empty());
+    let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
+    let mut rng = thread_rng();
+    let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = values
+        .iter()
+        .map(|&value| share_field_element(value, &mut rng))
+        .collect();
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+
+    let runs: Vec<PartyRun> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                let values = &values;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(values, |_| {
+                        let share = shares[next][party];
+                        next += 1;
+                        share
+                    });
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+
+                    let before_error = net.rounds();
+                    let execution_error = Machine::run(program, &mut driver, &[])
+                        .unwrap_err()
+                        .to_string();
+                    let error_rounds = net.rounds() - before_error;
+                    let before_reuse = net.rounds();
+                    let reuse_error = Machine::run(program, &mut driver, &inputs)
+                        .unwrap_err()
+                        .to_string();
+                    let reuse_rounds = net.rounds() - before_reuse;
+                    drop(driver);
+
+                    let before_fresh_preparation = net.rounds();
+                    let mut fresh_driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
+                    let before_fresh_run = net.rounds();
+                    let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();
+                    let fresh_online_rounds = net.rounds() - before_fresh_run;
+
+                    PartyRun {
+                        fresh,
+                        error_rounds,
+                        reuse_rounds,
+                        fresh_preparation_rounds,
+                        fresh_online_rounds,
+                        execution_error,
+                        reuse_error,
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    for run in &runs {
+        assert_eq!(run.error_rounds, 0);
+        assert_eq!(run.reuse_rounds, 0);
+        assert_eq!(run.fresh_preparation_rounds, 0);
+        assert_eq!(run.fresh_online_rounds, 1);
+        assert!(
+            run.execution_error.contains("expected 8 inputs, got 0"),
+            "{}",
+            run.execution_error
+        );
+        assert!(run.reuse_error.contains("spent"), "{}", run.reuse_error);
+    }
+
+    let fresh = combine_field_elements(&runs[0].fresh, &runs[1].fresh, &runs[2].fresh);
+    let expected_inputs = program.classify_inputs(&values, |value| value);
+    let expected = Machine::run(&program, &mut PlainDriver, &expected_inputs).unwrap();
+    assert_eq!(fresh, expected);
 }

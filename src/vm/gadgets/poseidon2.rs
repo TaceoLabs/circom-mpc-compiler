@@ -32,10 +32,12 @@
 //! which duplicates its much smaller layout between the plain and rep3 paths):
 //!
 //! - `Ops` - the arithmetic backend, implemented once for plain field elements and once for rep3
-//!   shares. Only `Ops::sbox_layer` ever communicates.
+//!   shares. During the walk, only `Ops::sbox_layer` communicates; rep3 pool preprocessing happens
+//!   separately, before online execution.
 //! - `walk` - the permutation itself, **layer-major across every site in lock-step**, so all of a
 //!   batch's s-boxes at one round go into a single `sbox_layer` call.
-//! - `emit_site` - the layout emitter, the one place the ordering above is encoded.
+//! - `SiteOutput` - a sparse layout sink. It records a value only when its logical result slot was
+//!   requested, while `walk` still computes every value needed to evolve the permutation state.
 
 use ark_ff::PrimeField;
 
@@ -139,13 +141,6 @@ trait Ops<F: PrimeField> {
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Self::V;
     fn add_public(&mut self, a: &Self::V, c: F) -> Self::V;
     fn mul_public(&mut self, a: &Self::V, c: F) -> Self::V;
-    /// Prepares any per-element correlated randomness [`Self::sbox_layer`] needs, for the whole
-    /// permutation batch at once - `walk` calls this once, up front, with the exact total element
-    /// count across every s-box layer (full and partial) and every site. A no-op unless a backend
-    /// actually has batch-wide prep to do (only `Rep3Ops` does).
-    fn prepare_sboxes(&mut self, _total_elements: usize) -> eyre::Result<()> {
-        Ok(())
-    }
     /// One s-box layer for a whole batch at once - the only step that communicates.
     fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>>;
 }
@@ -185,42 +180,140 @@ impl<F: PrimeField> Ops<F> for PlainOps {
 
 // --- The permutation, layer-major over every site ---
 
-/// One site's recorded blocks, each already in its own layout order.
-struct SiteTrace<V> {
-    /// `(9 + pr)` rows of `t`.
-    states: Vec<Vec<V>>,
-    /// The initial `ExternalMatMulT(t)` subtree.
-    initial_matmul: Vec<V>,
-    /// The 8 `FullRound` blocks, indexed `0..4` = first group, `4..8` = second group - which is
-    /// their layout order, so no re-sorting happens in [`emit_site`].
-    full: Vec<Vec<V>>,
-    /// The `pr` `PartialRound` blocks, in round order.
-    partial: Vec<Vec<V>>,
+enum SiteSelection<'a> {
+    All,
+    Requested(&'a [u32]),
 }
 
-/// `Acc(n)` over `in`: returns `(out, block)` where `block` is `[out][in[n]][sums[n]]`.
-fn acc<F: PrimeField, O: Ops<F>>(ops: &mut O, input: &[O::V]) -> (O::V, Vec<O::V>) {
-    let mut sums = Vec::with_capacity(input.len());
-    sums.push(input[0].clone());
-    for x in &input[1..] {
-        let prev = sums.last().expect("non-empty");
-        sums.push(ops.add(prev, x));
+/// Index-addressed output for one site. The witness layout is not execution ordered: the second
+/// full-round group executes after the partial rounds but precedes them in signal order. Directly
+/// addressing requested logical slots preserves that layout without retaining whole round blocks.
+struct SiteOutput<'a, V> {
+    selection: SiteSelection<'a>,
+    values: Vec<Option<V>>,
+    capacity: usize,
+}
+
+impl<'a, V: Clone> SiteOutput<'a, V> {
+    fn all(capacity: usize) -> Self {
+        Self {
+            selection: SiteSelection::All,
+            values: vec![None; capacity],
+            capacity,
+        }
     }
-    let out = sums.last().expect("non-empty").clone();
-    let mut block = vec![out.clone()];
-    block.extend_from_slice(input);
-    block.extend(sums);
-    (out, block)
+
+    fn requested(capacity: usize, requests: &'a [u32]) -> Self {
+        Self {
+            selection: SiteSelection::Requested(requests),
+            values: vec![None; requests.len()],
+            capacity,
+        }
+    }
+
+    fn destination(&self, logical: usize) -> Option<usize> {
+        debug_assert!(logical < self.capacity);
+        match self.selection {
+            SiteSelection::All => Some(logical),
+            SiteSelection::Requested(requests) => requests.binary_search(&(logical as u32)).ok(),
+        }
+    }
+
+    fn wants(&self, logical: usize) -> bool {
+        self.destination(logical).is_some()
+    }
+
+    fn record(&mut self, logical: usize, value: &V) {
+        if let Some(destination) = self.destination(logical) {
+            self.values[destination] = Some(value.clone());
+        }
+    }
+
+    fn record_owned(&mut self, logical: usize, value: V) {
+        if let Some(destination) = self.destination(logical) {
+            self.values[destination] = Some(value);
+        }
+    }
+
+    fn record_slice(&mut self, start: usize, values: &[V]) {
+        for (offset, value) in values.iter().enumerate() {
+            self.record(start + offset, value);
+        }
+    }
+
+    fn finish(self, site: usize) -> eyre::Result<Vec<V>> {
+        self.values
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| {
+                value.ok_or_else(|| {
+                    eyre::eyre!(
+                        "Poseidon2 site {site} did not emit requested result position {position}"
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// Starts of the four sections in one site's logical result layout. The site's top-level inputs are
+/// supplied by the caller and therefore omitted from the result slots.
+struct Layout {
+    states: usize,
+    initial_matmul: usize,
+    full: usize,
+    partial: usize,
+}
+
+impl Layout {
+    fn new(t: usize) -> Self {
+        let pr = partial_rounds(t);
+        let states = t;
+        let initial_matmul = states + (9 + pr) * t;
+        let full = initial_matmul + external_matmul_signals(t);
+        let partial = full + 8 * full_round_signals(t);
+        debug_assert_eq!(partial + pr * partial_round_signals(t), result_slots(t));
+        Self {
+            states,
+            initial_matmul,
+            full,
+            partial,
+        }
+    }
+}
+
+/// `Acc(n)` over `input`. Records `[out][in[n]][sums[n]]` at `base`, while retaining only the
+/// running sum needed by state evolution.
+fn acc<F: PrimeField, O: Ops<F>>(
+    ops: &mut O,
+    input: &[O::V],
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> O::V {
+    let n = input.len();
+    trace.record_slice(base + 1, input);
+    let mut sum = input[0].clone();
+    trace.record(base + 1 + n, &sum);
+    for (i, x) in input[1..].iter().enumerate() {
+        sum = ops.add(&sum, x);
+        trace.record(base + 1 + n + i + 1, &sum);
+    }
+    trace.record(base, &sum);
+    sum
 }
 
 /// `ExternalMatMul2`/`3`/`4` over exactly 2, 3 or 4 elements.
 fn external_matmul_leaf<F: PrimeField, O: Ops<F>>(
     ops: &mut O,
     input: &[O::V],
-) -> (Vec<O::V>, Vec<O::V>) {
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> Vec<O::V> {
     let two = F::from(2u64);
     let four = F::from(4u64);
-    match input.len() {
+    let t = input.len();
+    trace.record_slice(base + t, input);
+    let out = match t {
         2 | 3 => {
             // out[i] = in[i] + sum
             let mut sum = input[0].clone();
@@ -228,10 +321,8 @@ fn external_matmul_leaf<F: PrimeField, O: Ops<F>>(
                 sum = ops.add(&sum, x);
             }
             let out: Vec<O::V> = input.iter().map(|x| ops.add(x, &sum)).collect();
-            let mut block = out.clone();
-            block.extend_from_slice(input);
-            block.push(sum);
-            (out, block)
+            trace.record(base + 2 * t, &sum);
+            out
         }
         4 => {
             let double_in1 = ops.mul_public(&input[1], two);
@@ -250,26 +341,43 @@ fn external_matmul_leaf<F: PrimeField, O: Ops<F>>(
                 ops.add(&t_2, &t_4),
                 t_4.clone(),
             ];
-            let mut block = out.clone();
-            block.extend_from_slice(input);
             // Source-declaration order of the 10 named intermediates.
-            block.extend([
-                double_in1, double_in3, t_0, t_1, quad_t_0, quad_t_1, t_2, t_3, t_4, t_5,
-            ]);
-            (out, block)
+            for (i, value) in [
+                &double_in1,
+                &double_in3,
+                &t_0,
+                &t_1,
+                &quad_t_0,
+                &quad_t_1,
+                &t_2,
+                &t_3,
+                &t_4,
+                &t_5,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                trace.record(base + 2 * t + i, value);
+            }
+            out
         }
         n => unreachable!("external_matmul_leaf takes 2, 3 or 4 elements, got {n}"),
-    }
+    };
+    trace.record_slice(base, &out);
+    out
 }
 
 /// `ExternalMatMulT(t)`: `[out[t]][in[t]][subtree]`.
 fn external_matmul<F: PrimeField, O: Ops<F>>(
     ops: &mut O,
     input: &[O::V],
-) -> (Vec<O::V>, Vec<O::V>) {
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> Vec<O::V> {
     let t = input.len();
-    let (out, subtree) = if t <= 4 {
-        external_matmul_leaf(ops, input)
+    trace.record_slice(base + t, input);
+    let out = if t <= 4 {
+        external_matmul_leaf(ops, input, trace, base + 2 * t)
     } else {
         let m = t / 4;
         // `mds[]` is created textually before `accs[]` in `ExternalMatMulT`'s source, but circom
@@ -279,19 +387,22 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
         // before every `mds[]` instance. Cross-checked against a real circom witness
         // (`main.Poseidon2_..ExternalMatMulT_...accs[0].out` precedes `.mds[0].out[0]`).
         let mut mds_out = Vec::with_capacity(m);
-        let mut mds_blocks = Vec::new();
+        let accs_base = base + 2 * t;
+        let mds_base = accs_base + 4 * acc_signals(m);
         for i in 0..m {
-            let (o, b) = external_matmul_leaf(ops, &input[4 * i..4 * i + 4]);
+            let o = external_matmul_leaf(
+                ops,
+                &input[4 * i..4 * i + 4],
+                trace,
+                mds_base + i * external_matmul_leaf_signals(4),
+            );
             mds_out.push(o);
-            mds_blocks.extend(b);
         }
         let mut acc_out = Vec::with_capacity(4);
-        let mut acc_blocks = Vec::new();
         for l in 0..4 {
             let column: Vec<O::V> = mds_out.iter().map(|row| row[l].clone()).collect();
-            let (o, b) = acc(ops, &column);
+            let o = acc(ops, &column, trace, accs_base + l * acc_signals(m));
             acc_out.push(o);
-            acc_blocks.extend(b);
         }
         let mut out = Vec::with_capacity(t);
         for row in &mds_out {
@@ -299,13 +410,10 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
                 out.push(ops.add(value, &acc_out[j]));
             }
         }
-        acc_blocks.extend(mds_blocks);
-        (out, acc_blocks)
+        out
     };
-    let mut block = out.clone();
-    block.extend_from_slice(input);
-    block.extend(subtree);
-    (out, block)
+    trace.record_slice(base, &out);
+    out
 }
 
 /// `InternalMatMul2`/`3` - a genuine nested subcomponent for those widths, hence its own block
@@ -313,7 +421,9 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
 fn internal_matmul_leaf<F: PrimeField, O: Ops<F>>(
     ops: &mut O,
     input: &[O::V],
-) -> (Vec<O::V>, Vec<O::V>) {
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> Vec<O::V> {
     let t = input.len();
     let two = F::from(2u64);
     let mut sum = input[0].clone();
@@ -333,10 +443,10 @@ fn internal_matmul_leaf<F: PrimeField, O: Ops<F>>(
             ops.add(&scaled, &sum)
         })
         .collect();
-    let mut block = out.clone();
-    block.extend_from_slice(input);
-    block.push(sum);
-    (out, block)
+    trace.record_slice(base, &out);
+    trace.record_slice(base + t, input);
+    trace.record(base + 2 * t, &sum);
+    out
 }
 
 /// `InternalMatMulT(t)`: `[out[t]][in[t]]` plus either a nested `InternalMatMul2`/`3` subcomponent, or
@@ -345,12 +455,15 @@ fn internal_matmul<F: PrimeField, O: Ops<F>>(
     ops: &mut O,
     input: &[O::V],
     diag: &[F],
-) -> (Vec<O::V>, Vec<O::V>) {
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> Vec<O::V> {
     let t = input.len();
-    let (out, tail) = match t {
-        2..=3 => internal_matmul_leaf(ops, input),
+    trace.record_slice(base + t, input);
+    let out = match t {
+        2..=3 => internal_matmul_leaf(ops, input, trace, base + 2 * t),
         _ => {
-            let (acc_value, acc_block) = acc(ops, input);
+            let acc_value = acc(ops, input, trace, base + 2 * t + 1);
             let out: Vec<O::V> = input
                 .iter()
                 .zip(diag)
@@ -360,25 +473,25 @@ fn internal_matmul<F: PrimeField, O: Ops<F>>(
                 })
                 .collect();
             // Own intermediate `acc` precedes the `Acc(t)` subtree.
-            let mut tail = vec![acc_value];
-            tail.extend(acc_block);
-            (out, tail)
+            trace.record(base + 2 * t, &acc_value);
+            out
         }
     };
-    let mut block = out.clone();
-    block.extend_from_slice(input);
-    block.extend(tail);
-    (out, block)
+    trace.record_slice(base, &out);
+    out
 }
 
-/// `Sbox_e`'s block: `[out][in][square][pow_4]`.
-fn sbox_e_block<V: Clone>(input: &V, trace: &SboxTrace<V>) -> Vec<V> {
-    vec![
-        trace.out.clone(),
-        input.clone(),
-        trace.square.clone(),
-        trace.pow4.clone(),
-    ]
+/// Records `Sbox_e`'s block: `[out][in][square][pow_4]`.
+fn record_sbox_e<V: Clone>(
+    output: &mut SiteOutput<'_, V>,
+    base: usize,
+    input: &V,
+    trace: &SboxTrace<V>,
+) {
+    output.record(base, &trace.out);
+    output.record(base + 1, input);
+    output.record(base + 2, &trace.square);
+    output.record(base + 3, &trace.pow4);
 }
 
 /// Runs the permutation for every site in `states` (each `t` elements, concatenated) in lock-step,
@@ -388,34 +501,30 @@ fn walk<F: PrimeField, O: Ops<F>>(
     t: usize,
     states: &[O::V],
     rc: &RoundConstants<F>,
-) -> eyre::Result<Vec<SiteTrace<O::V>>> {
+    mut outputs: Vec<SiteOutput<'_, O::V>>,
+) -> eyre::Result<Vec<O::V>> {
     let sites = states.len() / t;
     let pr = partial_rounds(t);
+    let layout = Layout::new(t);
+    debug_assert_eq!(outputs.len(), sites);
 
-    // 8 full-round layers of `sites * t` elements, plus `pr` partial-round layers of `sites`
-    // elements - the exact total the three `sbox_layer` calls below make, combined.
-    ops.prepare_sboxes(sites * (8 * t + pr))?;
-
-    let mut traces: Vec<SiteTrace<O::V>> = Vec::with_capacity(sites);
-    // Current state per site, and the running record.
+    // Current state per site. Witness values are recorded directly into `outputs`; no round or
+    // subcomponent trace blocks are materialized.
     let mut current: Vec<Vec<O::V>> = Vec::with_capacity(sites);
     for site in 0..sites {
         let input = &states[site * t..(site + 1) * t];
-        let (out, block) = external_matmul(ops, input);
-        current.push(out.clone());
-        traces.push(SiteTrace {
-            states: vec![out],
-            initial_matmul: block,
-            full: Vec::with_capacity(8),
-            partial: Vec::with_capacity(pr),
-        });
+        let out = external_matmul(ops, input, &mut outputs[site], layout.initial_matmul);
+        outputs[site].record_slice(layout.states, &out);
+        current.push(out);
     }
 
     // A full round, for every site at once: add RC, one s-box layer, external matrix.
     let full_round = |ops: &mut O,
-                          current: &mut Vec<Vec<O::V>>,
-                          traces: &mut Vec<SiteTrace<O::V>>,
-                          round_rc: &[F]|
+                      current: &mut Vec<Vec<O::V>>,
+                      outputs: &mut Vec<SiteOutput<'_, O::V>>,
+                      round_rc: &[F],
+                      layout_round: usize,
+                      state_row: usize|
      -> eyre::Result<()> {
         let mut linear: Vec<Vec<O::V>> = Vec::with_capacity(sites);
         for state in current.iter() {
@@ -433,24 +542,36 @@ fn walk<F: PrimeField, O: Ops<F>>(
         for (site, state) in current.iter_mut().enumerate() {
             let sbox_traces = &sboxes[site * t..(site + 1) * t];
             let sbox_out: Vec<O::V> = sbox_traces.iter().map(|s| s.out.clone()).collect();
-            let (out, emm_block) = external_matmul(ops, &sbox_out);
+            let base = layout.full + layout_round * full_round_signals(t);
+            let emm_base = base + 5 * t;
+            let out = external_matmul(ops, &sbox_out, &mut outputs[site], emm_base);
 
             // [out][in][RC][linear_layer][sbox] + ExternalMatMulT + Sbox
-            let mut block = out.clone();
-            block.extend_from_slice(state);
-            block.extend(round_rc.iter().map(|&c| ops.public(c)));
-            block.extend(linear[site].iter().cloned());
-            block.extend(sbox_out.iter().cloned());
-            block.extend(emm_block);
+            outputs[site].record_slice(base, &out);
+            outputs[site].record_slice(base + t, state);
+            for (i, &c) in round_rc.iter().enumerate() {
+                let logical = base + 2 * t + i;
+                if outputs[site].wants(logical) {
+                    let value = ops.public(c);
+                    outputs[site].record_owned(logical, value);
+                }
+            }
+            outputs[site].record_slice(base + 3 * t, &linear[site]);
+            outputs[site].record_slice(base + 4 * t, &sbox_out);
             // Sbox(t)'s own block: [out[t]][in[t]] + t x Sbox_e
-            block.extend(sbox_out.iter().cloned());
-            block.extend(linear[site].iter().cloned());
+            let sbox_base = emm_base + external_matmul_signals(t);
+            outputs[site].record_slice(sbox_base, &sbox_out);
+            outputs[site].record_slice(sbox_base + t, &linear[site]);
             for (k, s) in sbox_traces.iter().enumerate() {
-                block.extend(sbox_e_block(&linear[site][k], s));
+                record_sbox_e(
+                    &mut outputs[site],
+                    sbox_base + 2 * t + k * SBOX_E_SIGNALS,
+                    &linear[site][k],
+                    s,
+                );
             }
 
-            traces[site].full.push(block);
-            traces[site].states.push(out.clone());
+            outputs[site].record_slice(layout.states + state_row * t, &out);
             *state = out;
         }
         Ok(())
@@ -458,7 +579,7 @@ fn walk<F: PrimeField, O: Ops<F>>(
 
     for round in 0..4 {
         let round_rc = &rc.full1[round * t..(round + 1) * t];
-        full_round(ops, &mut current, &mut traces, round_rc)?;
+        full_round(ops, &mut current, &mut outputs, round_rc, round, round + 1)?;
     }
 
     // Partial rounds: RC and s-box on element 0 only, then the internal matrix.
@@ -474,51 +595,50 @@ fn walk<F: PrimeField, O: Ops<F>>(
             let sbox = &sboxes[site];
             let mut imm_input = vec![sbox.out.clone()];
             imm_input.extend_from_slice(&state[1..]);
-            let (out, imm_block) = internal_matmul(ops, &imm_input, &rc.diag);
+            let base = layout.partial + round * partial_round_signals(t);
+            let imm_base = base + 2 * t + 3 + SBOX_E_SIGNALS;
+            let out = internal_matmul(ops, &imm_input, &rc.diag, &mut outputs[site], imm_base);
 
             // [out][in][RC][linear_layer][sbox] + Sbox_e + InternalMatMulT
-            let mut block = out.clone();
-            block.extend_from_slice(state);
-            let rc_value = ops.public(c);
-            block.extend([rc_value, linear[site].clone(), sbox.out.clone()]);
-            block.extend(sbox_e_block(&linear[site], sbox));
-            block.extend(imm_block);
+            outputs[site].record_slice(base, &out);
+            outputs[site].record_slice(base + t, state);
+            let rc_slot = base + 2 * t;
+            if outputs[site].wants(rc_slot) {
+                let rc_value = ops.public(c);
+                outputs[site].record_owned(rc_slot, rc_value);
+            }
+            outputs[site].record(base + 2 * t + 1, &linear[site]);
+            outputs[site].record(base + 2 * t + 2, &sbox.out);
+            record_sbox_e(&mut outputs[site], base + 2 * t + 3, &linear[site], sbox);
 
-            traces[site].partial.push(block);
-            traces[site].states.push(out.clone());
+            outputs[site].record_slice(layout.states + (5 + round) * t, &out);
             *state = out;
         }
     }
 
     for round in 0..4 {
         let round_rc = &rc.full2[round * t..(round + 1) * t];
-        full_round(ops, &mut current, &mut traces, round_rc)?;
+        full_round(
+            ops,
+            &mut current,
+            &mut outputs,
+            round_rc,
+            4 + round,
+            5 + pr + round,
+        )?;
     }
 
-    Ok(traces)
-}
+    // Top-level `[out[t]]`, known only after the second full-round group.
+    for (site, state) in current.iter().enumerate() {
+        outputs[site].record_slice(0, state);
+    }
 
-/// Flattens one site into its [`result_slots`] values, in circom's own signal order. **The one place
-/// the layout rule from the module doc is encoded.**
-fn emit_site<V: Clone>(t: usize, site: &SiteTrace<V>) -> Vec<V> {
-    let mut out = Vec::with_capacity(result_slots(t));
-    // [out[t]] - the final state. (The site's own [in[t]] is skipped: those are the caller's, not
-    // results.)
-    out.extend(site.states.last().expect("at least one state").iter().cloned());
-    // [state[(9+pr)][t]], row-major.
-    for row in &site.states {
-        out.extend(row.iter().cloned());
+    let expected = outputs.iter().map(|output| output.values.len()).sum();
+    let mut result = Vec::with_capacity(expected);
+    for (site, output) in outputs.into_iter().enumerate() {
+        result.extend(output.finish(site)?);
     }
-    // Subtrees, ordered by template-instance id: ExternalMatMulT, then every FullRound, then every
-    // PartialRound.
-    out.extend(site.initial_matmul.iter().cloned());
-    for block in &site.full {
-        out.extend(block.iter().cloned());
-    }
-    for block in &site.partial {
-        out.extend(block.iter().cloned());
-    }
-    out
+    Ok(result)
 }
 
 fn check_width(t: usize, states: usize) -> eyre::Result<usize> {
@@ -534,35 +654,124 @@ fn check_width(t: usize, states: usize) -> eyre::Result<usize> {
     Ok(states / t)
 }
 
+fn requested_outputs<'a, V: Clone>(
+    sites: usize,
+    capacity: usize,
+    requests: &'a [u32],
+    offsets: &[u32],
+) -> eyre::Result<Vec<SiteOutput<'a, V>>> {
+    eyre::ensure!(
+        offsets.len() == sites + 1,
+        "Poseidon2 request offsets has length {}, expected {} for {sites} sites",
+        offsets.len(),
+        sites + 1
+    );
+    eyre::ensure!(
+        offsets[0] == 0,
+        "Poseidon2 request offsets must start at zero"
+    );
+    eyre::ensure!(
+        offsets[sites] as usize == requests.len(),
+        "Poseidon2 final request offset is {}, but there are {} requests",
+        offsets[sites],
+        requests.len()
+    );
+
+    let mut outputs = Vec::with_capacity(sites);
+    for site in 0..sites {
+        let lo = offsets[site] as usize;
+        let hi = offsets[site + 1] as usize;
+        eyre::ensure!(
+            lo <= hi && hi <= requests.len(),
+            "Poseidon2 site {site} has invalid request range {lo}..{hi}"
+        );
+        let site_requests = &requests[lo..hi];
+        for pair in site_requests.windows(2) {
+            eyre::ensure!(
+                pair[0] < pair[1],
+                "Poseidon2 site {site} result requests must be strictly ascending"
+            );
+        }
+        if let Some(&last) = site_requests.last() {
+            eyre::ensure!(
+                (last as usize) < capacity,
+                "Poseidon2 site {site} requested result slot {last}, but capacity is {capacity}"
+            );
+        }
+        outputs.push(SiteOutput::requested(capacity, site_requests));
+    }
+    Ok(outputs)
+}
+
 /// Plain traces for a whole batch: `states` is `sites * t` values (one length-`t` state per site,
 /// concatenated), and the result is `sites * result_slots(t)` values in `Machine::precompute`'s slot
 /// order.
 pub fn plain_trace<F: PrimeField>(t: usize, states: &[F]) -> eyre::Result<Vec<F>> {
     let sites = check_width(t, states.len())?;
+    let capacity = result_slots(t);
     let rc = RoundConstants::load(t)?;
-    let traces = walk(&mut PlainOps, t, states, &rc)?;
-    let mut out = Vec::with_capacity(sites * result_slots(t));
-    for site in &traces {
-        let emitted = emit_site(t, site);
-        debug_assert_eq!(emitted.len(), result_slots(t));
-        out.extend(emitted);
-    }
+    let outputs = (0..sites).map(|_| SiteOutput::all(capacity)).collect();
+    let out = walk(&mut PlainOps, t, states, &rc, outputs)?;
     eyre::ensure!(
-        out.len() == sites * result_slots(t),
+        out.len() == sites * capacity,
         "Poseidon2(t={t}) emitted {} values, expected {}",
         out.len(),
-        sites * result_slots(t)
+        sites * capacity
     );
     Ok(out)
 }
 
+/// Computes only the requested logical trace slots for each site. `result_offsets` is a CSR row
+/// pointer of length `sites + 1`; each site's request row must be strictly ascending and contain
+/// slots in `0..result_slots(t)`. The returned values are site-major in exactly that CSR order.
+///
+/// All permutation state and s-box layers are still evaluated, because they feed later rounds. The
+/// optimization is that witness-dead state copies, round constants, and subcomponent intermediates
+/// are never materialized in the returned trace.
+pub fn plain_trace_requested<F: PrimeField>(
+    t: usize,
+    states: &[F],
+    result_requests: &[u32],
+    result_offsets: &[u32],
+) -> eyre::Result<Vec<F>> {
+    let sites = check_width(t, states.len())?;
+    let capacity = result_slots(t);
+    let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
+    let rc = RoundConstants::load(t)?;
+    walk(&mut PlainOps, t, states, &rc, outputs)
+}
+
 // --- rep3 ---
 
-/// The correlated randomness [`Rep3Ops::sbox_layer`] consumes: `r` and its powers `r²..r⁵`, one
-/// entry per element across the *whole* permutation batch (every s-box layer, every site),
-/// prepared once by [`Rep3Ops::prepare_sboxes`] and consumed a slice at a time as layers run.
+/// Number of fresh masks one Poseidon2 service consumes. There are eight full-round s-box layers
+/// of `t` elements and `partial_rounds(t)` one-element partial layers for every site.
+///
+/// Kept separate from the trace entry points because [`crate::vm::Program`] derives one checked,
+/// program-wide preprocessing budget from the *executable* shared-Poseidon instruction
+/// occurrences before a run starts.
 #[cfg(feature = "rep3")]
-struct SboxPool<F: PrimeField> {
+pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
+    eyre::ensure!(
+        SUPPORTED_WIDTHS.contains(&t),
+        "unsupported Poseidon2 width t={t} - circuits/libs/taceo/poseidon2.circom only defines \
+         {SUPPORTED_WIDTHS:?}"
+    );
+    let full = t
+        .checked_mul(8)
+        .ok_or_else(|| eyre::eyre!("Poseidon2(t={t}) full-round mask count overflows"))?;
+    let per_site = full
+        .checked_add(partial_rounds(t))
+        .ok_or_else(|| eyre::eyre!("Poseidon2(t={t}) per-site mask count overflows"))?;
+    sites
+        .checked_mul(per_site)
+        .ok_or_else(|| eyre::eyre!("Poseidon2(t={t}) mask budget overflows for {sites} sites"))
+}
+
+/// The correlated randomness [`Rep3Ops::sbox_layer`] consumes: `r` and its powers `r²..r⁵`, one
+/// entry per s-box element across every shared Poseidon2 service in one program execution. The
+/// pool is prepared once, then disjoint slices are consumed in instruction order.
+#[cfg(feature = "rep3")]
+pub(crate) struct Rep3Poseidon2Preprocessing<F: PrimeField> {
     r: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
     r2: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
     r3: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
@@ -572,14 +781,91 @@ struct SboxPool<F: PrimeField> {
     consumed: usize,
 }
 
+#[cfg(feature = "rep3")]
+impl<F: PrimeField> Rep3Poseidon2Preprocessing<F> {
+    fn ensure_available(&self, count: usize) -> eyre::Result<()> {
+        let end = self
+            .consumed
+            .checked_add(count)
+            .ok_or_else(|| eyre::eyre!("Poseidon2 mask-pool cursor overflows"))?;
+        eyre::ensure!(
+            end <= self.r.len(),
+            "Poseidon2 mask pool exhausted: {count} elements requested, {} remain",
+            self.r.len().saturating_sub(self.consumed)
+        );
+        Ok(())
+    }
+
+    /// Verifies the one-shot driver consumed exactly the executable program's derived budget.
+    pub(crate) fn ensure_consumed(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.consumed == self.r.len(),
+            "Poseidon2 mask pool consumption mismatch: consumed {}, prepared {}",
+            self.consumed,
+            self.r.len()
+        );
+        Ok(())
+    }
+}
+
+/// Prepares `r, r², r³, r⁴, r⁵` for a complete program execution in exactly three rounds,
+/// independent of `total_elements`. A zero budget is represented by empty vectors and performs no
+/// network operation.
+#[cfg(feature = "rep3")]
+pub(crate) fn preprocess_rep3<F: PrimeField, N: mpc_net::Network>(
+    total_elements: usize,
+    net: &N,
+    state: &mut mpc_core::protocols::rep3::Rep3State,
+) -> eyre::Result<Rep3Poseidon2Preprocessing<F>> {
+    use mpc_core::protocols::rep3::arithmetic;
+
+    if total_elements == 0 {
+        return Ok(Rep3Poseidon2Preprocessing {
+            r: Vec::new(),
+            r2: Vec::new(),
+            r3: Vec::new(),
+            r4: Vec::new(),
+            r5: Vec::new(),
+            consumed: 0,
+        });
+    }
+
+    let n = total_elements;
+    let combined = n
+        .checked_mul(2)
+        .ok_or_else(|| eyre::eyre!("Poseidon2 power-preprocessing vector length overflows"))?;
+    let r: Vec<_> = (0..n).map(|_| arithmetic::rand(state)).collect();
+    let r2 = arithmetic::mul_vec(&r, &r, net, state)?;
+    let r4 = arithmetic::mul_vec(&r2, &r2, net, state)?;
+    let mut lhs = Vec::with_capacity(combined);
+    lhs.extend(r.iter().copied());
+    lhs.extend(r.iter().copied());
+    let mut rhs = Vec::with_capacity(combined);
+    rhs.extend(r2.iter().copied());
+    rhs.extend(r4.iter().copied());
+    let mut r35 = arithmetic::mul_vec(&lhs, &rhs, net, state)?;
+    drop(lhs);
+    drop(rhs);
+    let r5 = r35.split_off(n);
+    let r3 = r35;
+
+    Ok(Rep3Poseidon2Preprocessing {
+        r,
+        r2,
+        r3,
+        r4,
+        r5,
+        consumed: 0,
+    })
+}
+
 /// rep3 backend. The s-box uses the masked-opening trick (see [`Rep3Ops::sbox_layer`]) so a whole
 /// layer costs **one** network round instead of the three a naive `x^2, x^4, x^5` chain needs.
 #[cfg(feature = "rep3")]
 struct Rep3Ops<'a, F: PrimeField, N: mpc_net::Network> {
     net: &'a N,
     state: &'a mut mpc_core::protocols::rep3::Rep3State,
-    /// Populated by `prepare_sboxes` before `walk`'s round loop runs; `None` only before that call.
-    pool: Option<SboxPool<F>>,
+    pool: &'a mut Rep3Poseidon2Preprocessing<F>,
 }
 
 #[cfg(feature = "rep3")]
@@ -599,45 +885,12 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
         mpc_core::protocols::rep3::arithmetic::mul_public(*a, c)
     }
 
-    /// `r`, `r²`, `r³`, `r⁴`, `r⁵` for every element the whole permutation batch's s-box layers will
-    /// need (see [`SboxPool`]), in 3 rounds total - independent of batch size, and done exactly
-    /// once, before any layer runs. `r²..r⁵` depend only on `r`, not on any secret input, which is
-    /// what makes hoisting this out of the per-layer [`Self::sbox_layer`] sound: a *disjoint* slice
-    /// of this pool goes to each layer, so every (layer, element) still gets its own fresh `r` -
-    /// reusing one `r` across two layers would leak `x₁ - x₂` from their two masked opens.
-    fn prepare_sboxes(&mut self, total_elements: usize) -> eyre::Result<()> {
-        use mpc_core::protocols::rep3::arithmetic;
-
-        let n = total_elements;
-        let r: Vec<Self::V> = (0..n).map(|_| arithmetic::rand(self.state)).collect();
-        let r2 = arithmetic::mul_vec(&r, &r, self.net, self.state)?;
-        let r4 = arithmetic::mul_vec(&r2, &r2, self.net, self.state)?;
-        let (lhs, rhs): (Vec<_>, Vec<_>) = r
-            .iter()
-            .copied()
-            .chain(r.iter().copied())
-            .zip(r2.iter().copied().chain(r4.iter().copied()))
-            .unzip();
-        let r35 = arithmetic::mul_vec(&lhs, &rhs, self.net, self.state)?;
-        let (r3, r5) = r35.split_at(n);
-
-        self.pool = Some(SboxPool {
-            r,
-            r2,
-            r3: r3.to_vec(),
-            r4,
-            r5: r5.to_vec(),
-            consumed: 0,
-        });
-        Ok(())
-    }
-
     /// `x^2`, `x^4` and `x^5` are genuinely sequential as multiplications - from `{x, x^2}` the
     /// second round can only reach degree 4 - so a naive layer is 3 rounds, i.e. `3 * (8 + pr)` for
     /// the whole permutation (192 at t=3).
     ///
-    /// Instead, mask and open: with `r` (and `r^2..r^5`, prepared once for the entire batch by
-    /// [`Self::prepare_sboxes`]), publish `y = x - r` in **one** round; then `x = y + r` makes all
+    /// Instead, mask and open: with `r` (and `r^2..r^5`, prepared once for the entire run by
+    /// [`preprocess_rep3`]), publish `y = x - r` in **one** round; then `x = y + r` makes all
     /// three intermediates local linear combinations by binomial expansion. `y` is public and `r`
     /// uniform and unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp`
     /// trick, extended to also emit `square` and `pow_4` - which is exactly why it composes with a
@@ -646,16 +899,8 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
         use mpc_core::protocols::rep3::arithmetic;
 
         let n = xs.len();
-        let pool = self
-            .pool
-            .as_mut()
-            .ok_or_else(|| eyre::eyre!("sbox_layer called before prepare_sboxes"))?;
-        eyre::ensure!(
-            pool.consumed + n <= pool.r.len(),
-            "sbox randomness pool exhausted: {} elements requested, {} remain",
-            n,
-            pool.r.len() - pool.consumed
-        );
+        self.pool.ensure_available(n)?;
+        let pool = &mut self.pool;
         let start = pool.consumed;
         let end = start + n;
         pool.consumed = end;
@@ -713,8 +958,79 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
     }
 }
 
-/// The rep3 twin of [`plain_trace`]: one call services an entire batch, and every site rides the same
-/// network rounds - `3 + (8 + partial_rounds(t))` in total, independent of the number of sites.
+/// Internal full-trace path backed by a caller-owned, program-wide preprocessing pool. It spends
+/// only the online `8 + partial_rounds(t)` rounds; preparation is deliberately outside this call.
+#[cfg(feature = "rep3")]
+pub(crate) fn rep3_trace_preprocessed<F: PrimeField, N: mpc_net::Network>(
+    t: usize,
+    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    net: &N,
+    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
+    preprocessing: &mut Rep3Poseidon2Preprocessing<F>,
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+    let sites = check_width(t, states.len())?;
+    let required = mask_elements(t, sites)?;
+    preprocessing.ensure_available(required)?;
+    let consumed_before = preprocessing.consumed;
+    let capacity = result_slots(t);
+    let rc = RoundConstants::load(t)?;
+    let mut ops = Rep3Ops {
+        net,
+        state: rep3_state,
+        pool: preprocessing,
+    };
+    let outputs = (0..sites).map(|_| SiteOutput::all(capacity)).collect();
+    let out = walk(&mut ops, t, states, &rc, outputs)?;
+    eyre::ensure!(
+        ops.pool.consumed - consumed_before == required,
+        "Poseidon2(t={t}) consumed {} masks, expected {required}",
+        ops.pool.consumed - consumed_before
+    );
+    eyre::ensure!(
+        out.len() == sites * capacity,
+        "Poseidon2(t={t}) emitted {} values, expected {}",
+        out.len(),
+        sites * capacity
+    );
+    Ok(out)
+}
+
+/// Internal sparse-trace twin of [`rep3_trace_preprocessed`]. Request sparsity changes only local
+/// trace retention; it consumes the same pool slice and online rounds as the full path.
+#[cfg(feature = "rep3")]
+pub(crate) fn rep3_trace_requested_preprocessed<F: PrimeField, N: mpc_net::Network>(
+    t: usize,
+    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    net: &N,
+    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
+    preprocessing: &mut Rep3Poseidon2Preprocessing<F>,
+    result_requests: &[u32],
+    result_offsets: &[u32],
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+    let sites = check_width(t, states.len())?;
+    let required = mask_elements(t, sites)?;
+    preprocessing.ensure_available(required)?;
+    let consumed_before = preprocessing.consumed;
+    let capacity = result_slots(t);
+    let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
+    let rc = RoundConstants::load(t)?;
+    let mut ops = Rep3Ops {
+        net,
+        state: rep3_state,
+        pool: preprocessing,
+    };
+    let out = walk(&mut ops, t, states, &rc, outputs)?;
+    eyre::ensure!(
+        ops.pool.consumed - consumed_before == required,
+        "Poseidon2(t={t}) consumed {} masks, expected {required}",
+        ops.pool.consumed - consumed_before
+    );
+    Ok(out)
+}
+
+/// Compatibility full-trace entry point. Direct gadget callers retain the historical behavior:
+/// one fresh three-round preprocessing followed by the online permutation. VM execution uses the
+/// internal preprocessed twin so all Poseidon2 services in a run share one freshly prepared pool.
 #[cfg(feature = "rep3")]
 pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     t: usize,
@@ -723,23 +1039,34 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
     let sites = check_width(t, states.len())?;
-    let rc = RoundConstants::load(t)?;
-    let mut ops = Rep3Ops {
+    let mut preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, rep3_state)?;
+    let out = rep3_trace_preprocessed(t, states, net, rep3_state, &mut preprocessing)?;
+    preprocessing.ensure_consumed()?;
+    Ok(out)
+}
+
+/// Compatibility sparse-trace entry point; see [`rep3_trace`].
+#[cfg(feature = "rep3")]
+pub fn rep3_trace_requested<F: PrimeField, N: mpc_net::Network>(
+    t: usize,
+    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    net: &N,
+    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
+    result_requests: &[u32],
+    result_offsets: &[u32],
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+    let sites = check_width(t, states.len())?;
+    let mut preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, rep3_state)?;
+    let out = rep3_trace_requested_preprocessed(
+        t,
+        states,
         net,
-        state: rep3_state,
-        pool: None,
-    };
-    let traces = walk(&mut ops, t, states, &rc)?;
-    let mut out = Vec::with_capacity(sites * result_slots(t));
-    for site in &traces {
-        out.extend(emit_site(t, site));
-    }
-    eyre::ensure!(
-        out.len() == sites * result_slots(t),
-        "Poseidon2(t={t}) emitted {} values, expected {}",
-        out.len(),
-        sites * result_slots(t)
-    );
+        rep3_state,
+        &mut preprocessing,
+        result_requests,
+        result_offsets,
+    )?;
+    preprocessing.ensure_consumed()?;
     Ok(out)
 }
 
@@ -783,6 +1110,68 @@ mod tests {
     }
 
     #[test]
+    fn requested_trace_matches_filtering_full_trace_for_every_width() {
+        let sites = 3;
+        for t in SUPPORTED_WIDTHS {
+            let states: Vec<Fr> = (0..sites * t)
+                .map(|i| Fr::from((17 * i + 3) as u64))
+                .collect();
+            let full = plain_trace(t, &states).unwrap();
+            let capacity = result_slots(t);
+
+            let mut requests = Vec::new();
+            let mut offsets = vec![0u32];
+            // Site 0 requests everything, which checks that every layout path can address every
+            // logical slot. Site 1 is genuinely sparse and crosses all major section boundaries.
+            requests.extend((0..capacity).map(|slot| slot as u32));
+            offsets.push(requests.len() as u32);
+            let layout = Layout::new(t);
+            let mut sparse_site = vec![
+                0,
+                t - 1,
+                t,
+                layout.initial_matmul.saturating_sub(1),
+                layout.initial_matmul,
+                layout.full.saturating_sub(1),
+                layout.full,
+                layout.partial.saturating_sub(1),
+                layout.partial,
+                capacity - 1,
+            ];
+            sparse_site.extend((1..capacity).step_by(97));
+            sparse_site.sort_unstable();
+            sparse_site.dedup();
+            requests.extend(sparse_site.iter().map(|&slot| slot as u32));
+            offsets.push(requests.len() as u32);
+            // Site 2 deliberately requests nothing; it must still ride the same permutation batch.
+            offsets.push(requests.len() as u32);
+
+            let got = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+            let mut expected = full[..capacity].to_vec();
+            expected.extend(sparse_site.iter().map(|&slot| full[capacity + slot]));
+            assert_eq!(got, expected, "t={t}");
+        }
+    }
+
+    #[test]
+    fn requested_trace_validates_its_csr() {
+        let t = 3;
+        let states = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+        let capacity = result_slots(t) as u32;
+
+        assert!(plain_trace_requested(t, &states, &[0], &[0]).is_err());
+        assert!(plain_trace_requested(t, &states, &[0], &[1, 1]).is_err());
+        assert!(plain_trace_requested(t, &states, &[0], &[0, 0]).is_err());
+        assert!(plain_trace_requested(t, &states, &[1, 0], &[0, 2]).is_err());
+        assert!(plain_trace_requested(t, &states, &[capacity], &[0, 1]).is_err());
+
+        assert_eq!(
+            plain_trace_requested(t, &states, &[], &[0, 0]).unwrap(),
+            Vec::<Fr>::new()
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_width_and_ragged_input() {
         assert!(plain_trace(5, &[Fr::from(0u64); 5]).is_err());
         assert!(plain_trace::<Fr>(3, &[]).is_err());
@@ -808,7 +1197,13 @@ mod tests {
                 "t={t} diag (widths 2 and 3 have no diagonal)"
             );
             // Every constant this module holds must literally appear in the circuit file.
-            for c in rc.full1.iter().chain(&rc.full2).chain(&rc.partial).chain(&rc.diag) {
+            for c in rc
+                .full1
+                .iter()
+                .chain(&rc.full2)
+                .chain(&rc.partial)
+                .chain(&rc.diag)
+            {
                 let hex = format!("{:064x}", Into::<num_bigint::BigUint>::into(*c));
                 assert!(
                     src.contains(&hex),
@@ -834,6 +1229,170 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rep3")]
+    #[test]
+    fn rep3_requested_trace_matches_plain_filter() {
+        use crate::vm::gadgets::test_support::run3;
+
+        let t = 4;
+        let sites = 2;
+        let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 11)).collect();
+        let capacity = result_slots(t);
+        let requests: Vec<u32> = [0, 3, 4, capacity / 2, capacity - 1, 1, 97, capacity - 2]
+            .into_iter()
+            .map(|slot| slot as u32)
+            .collect();
+        let offsets = [0, 5, 8];
+        let expected = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+        let got = run3(&states, |net, state, shares| {
+            rep3_trace_requested(t, shares, net, state, &requests, &offsets)
+        });
+        assert_eq!(got, expected);
+    }
+
+    /// Exercises both internal entry points against their plain twins for every supported width.
+    /// The two calls deliberately share one exactly-sized pool: checking the cursor after each call
+    /// and exact exhaustion at the end pins the disjoint, consecutive slice contract.
+    #[cfg(feature = "rep3")]
+    #[test]
+    fn preprocessed_full_and_sparse_traces_share_disjoint_pool_slices_across_widths() {
+        use crate::vm::gadgets::test_support::run3;
+
+        let sites = 2;
+        for t in SUPPORTED_WIDTHS {
+            let states: Vec<Fr> = (0..sites * t)
+                .map(|i| Fr::from((13 * i + 5) as u64))
+                .collect();
+            let capacity = result_slots(t);
+            let requests: Vec<u32> = [0, t - 1, t, capacity / 2, capacity - 1, 1, 97, capacity - 2]
+                .into_iter()
+                .map(|slot| slot as u32)
+                .collect();
+            let offsets = [0, 5, 8];
+
+            let mut expected = plain_trace(t, &states).unwrap();
+            expected.extend(plain_trace_requested(t, &states, &requests, &offsets).unwrap());
+
+            let per_call = mask_elements(t, sites).unwrap();
+            let total = per_call.checked_mul(2).unwrap();
+            let got = run3(&states, |net, state, shares| {
+                let mut preprocessing = preprocess_rep3(total, net, state)?;
+                eyre::ensure!(
+                    preprocessing.consumed == 0,
+                    "fresh preprocessing pool must start unused"
+                );
+
+                let mut result =
+                    rep3_trace_preprocessed(t, shares, net, state, &mut preprocessing)?;
+                eyre::ensure!(
+                    preprocessing.consumed == per_call,
+                    "first Poseidon2 call consumed {} masks, expected {per_call}",
+                    preprocessing.consumed
+                );
+
+                result.extend(rep3_trace_requested_preprocessed(
+                    t,
+                    shares,
+                    net,
+                    state,
+                    &mut preprocessing,
+                    &requests,
+                    &offsets,
+                )?);
+                eyre::ensure!(
+                    preprocessing.consumed == total,
+                    "second Poseidon2 call ended at mask {}, expected {total}",
+                    preprocessing.consumed
+                );
+                preprocessing.ensure_consumed()?;
+                Ok(result)
+            });
+            assert_eq!(got, expected, "t={t}");
+        }
+    }
+
+    #[cfg(all(feature = "rep3", feature = "round-counting"))]
+    #[test]
+    fn preprocessing_costs_three_rounds_and_zero_budget_costs_none() {
+        use mpc_core::protocols::rep3::conversion::A2BType;
+
+        use crate::vm::gadgets::test_support::run3_counted_with_a2b;
+
+        let values = [Fr::from(1u64)];
+        let budget = mask_elements(16, 3).unwrap();
+        let (_, rounds) =
+            run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
+                let preprocessing = preprocess_rep3::<Fr, _>(budget, net, state)?;
+                eyre::ensure!(preprocessing.r.len() == budget);
+                eyre::ensure!(preprocessing.consumed == 0);
+                Ok(Vec::new())
+            });
+        assert_eq!(rounds.by_party, [3, 3, 3]);
+
+        let (_, zero_rounds) =
+            run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
+                let preprocessing = preprocess_rep3::<Fr, _>(0, net, state)?;
+                preprocessing.ensure_consumed()?;
+                Ok(Vec::new())
+            });
+        assert_eq!(zero_rounds.by_party, [0, 0, 0]);
+    }
+
+    /// Preparation is reset out of the counter before each internal call. Full and sparse traces
+    /// therefore pin the online cost alone: one opening for every full or partial s-box layer.
+    #[cfg(all(feature = "rep3", feature = "round-counting"))]
+    #[test]
+    fn preprocessed_full_and_sparse_online_costs_eight_plus_partial_rounds() {
+        use mpc_core::protocols::rep3::conversion::A2BType;
+
+        use crate::vm::gadgets::test_support::run3_counted_with_a2b;
+
+        for t in SUPPORTED_WIDTHS {
+            let states: Vec<Fr> = (0..t).map(|i| Fr::from(i as u64 + 19)).collect();
+            let budget = mask_elements(t, 1).unwrap();
+            let expected_online = 8 + partial_rounds(t);
+            let expected_full = plain_trace(t, &states).unwrap();
+
+            let (full, full_rounds) =
+                run3_counted_with_a2b(&states, A2BType::default(), |net, state, shares| {
+                    let mut preprocessing = preprocess_rep3(budget, net, state)?;
+                    net.reset();
+                    let result =
+                        rep3_trace_preprocessed(t, shares, net, state, &mut preprocessing)?;
+                    preprocessing.ensure_consumed()?;
+                    Ok(result)
+                });
+            assert_eq!(full, expected_full, "full t={t}");
+            assert_eq!(full_rounds.by_party, [expected_online; 3], "full t={t}");
+
+            let capacity = result_slots(t);
+            let requests: Vec<u32> = [0, t - 1, t, capacity / 2, capacity - 1]
+                .into_iter()
+                .map(|slot| slot as u32)
+                .collect();
+            let offsets = [0, requests.len() as u32];
+            let expected_sparse = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+            let (sparse, sparse_rounds) =
+                run3_counted_with_a2b(&states, A2BType::default(), |net, state, shares| {
+                    let mut preprocessing = preprocess_rep3(budget, net, state)?;
+                    net.reset();
+                    let result = rep3_trace_requested_preprocessed(
+                        t,
+                        shares,
+                        net,
+                        state,
+                        &mut preprocessing,
+                        &requests,
+                        &offsets,
+                    )?;
+                    preprocessing.ensure_consumed()?;
+                    Ok(result)
+                });
+            assert_eq!(sparse, expected_sparse, "sparse t={t}");
+            assert_eq!(sparse_rounds.by_party, [expected_online; 3], "sparse t={t}");
+        }
+    }
+
     /// Pins the round claim in `rep3_trace`'s doc: `3 + 8 + partial_rounds(t)`, the same for every
     /// site count in a batch.
     #[cfg(all(feature = "rep3", feature = "round-counting"))]
@@ -845,9 +1404,22 @@ mod tests {
             let expected_rounds = 3 + 8 + partial_rounds(t);
             for sites in [1, 3] {
                 let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
-                let (_, rounds) = run3_counted(&states, |net, state, shares| rep3_trace(t, shares, net, state));
+                let (_, rounds) = run3_counted(&states, |net, state, shares| {
+                    rep3_trace(t, shares, net, state)
+                });
                 assert_eq!(rounds, expected_rounds, "t={t} sites={sites}");
             }
         }
+
+        let t = 4;
+        let sites = 3;
+        let capacity = result_slots(t) as u32;
+        let requests = [0, capacity - 1, 1, capacity - 2];
+        let offsets = [0, 2, 2, 4];
+        let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
+        let (_, sparse_rounds) = run3_counted(&states, |net, state, shares| {
+            rep3_trace_requested(t, shares, net, state, &requests, &offsets)
+        });
+        assert_eq!(sparse_rounds, 3 + 8 + partial_rounds(t));
     }
 }

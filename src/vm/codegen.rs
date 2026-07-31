@@ -5,15 +5,15 @@
 //! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
 //! emission. See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
 
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 
 use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
 use crate::passes::mpc::domain::{compute_domains, signal_domain, Domain};
-use crate::passes::mpc::precompute_schedule::plan_precompute_batches;
+use crate::passes::mpc::precompute_schedule::{BatchPlan, plan_precompute_batches};
 
 use super::program::{
-    Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
-    SlotCounts, StoreEntry,
+    Bank, BatchKind, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, ResultTarget,
+    RoundEntry, SiteInput, SlotCounts, WitnessSource,
 };
 
 /// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a
@@ -57,11 +57,166 @@ struct Slot {
     index: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ZeroTestRevealPair {
+    zero_test_site: usize,
+    zero_test_node: usize,
+    reveal_site: usize,
+}
+
+#[derive(Debug)]
+struct ZeroTestRevealPlan {
+    source_plan: usize,
+    reveal_plan: usize,
+    anchor: usize,
+    pairs: Vec<ZeroTestRevealPair>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RuntimePlan {
+    Normal(usize),
+    IsZeroReveal(usize),
+}
+
+/// Finds whole scheduler batches that can be replaced by the circuit-preserving Rep3 shortcut.
+/// Staying at whole-batch granularity is intentionally conservative: a mixed Reveal batch or an
+/// IsZero batch with even one non-revealed result continues through the ordinary gadget paths.
+fn plan_zero_test_reveal_fusions<F: PrimeField>(
+    graph: &Graph<F>,
+    domains: &[Domain],
+    plans: &[BatchPlan],
+) -> Vec<ZeroTestRevealPlan> {
+    // The fused protocol is reviewed and tested for the project's BN254 deployment. Keep generic
+    // compilation untouched for any other field rather than silently opting it into a
+    // probabilistic zero test.
+    if F::MODULUS.to_bytes_le() != ark_bn254::Fr::MODULUS.to_bytes_le() {
+        return Vec::new();
+    }
+
+    let nodes = graph.nodes();
+    let sites = graph.precompute_sites();
+    let mut consumers = vec![0usize; nodes.len()];
+    for node in nodes {
+        for input in &node.inputs {
+            consumers[input.index()] += 1;
+        }
+    }
+    let mut site_plan = vec![usize::MAX; sites.len()];
+    for (plan_idx, plan) in plans.iter().enumerate() {
+        for &(site_id, _) in &plan.sites {
+            site_plan[site_id] = plan_idx;
+        }
+    }
+
+    let mut claimed_source = vec![false; plans.len()];
+    let mut fusions = Vec::new();
+    for (reveal_plan_idx, reveal_plan) in plans.iter().enumerate() {
+        if reveal_plan.domain != Domain::Shared
+            || reveal_plan.kind != (PrecomputeKind::Reveal { n: 1 })
+        {
+            continue;
+        }
+
+        let mut pairs = Vec::with_capacity(reveal_plan.sites.len());
+        let mut source_plan_idx = None;
+        let mut valid = !reveal_plan.sites.is_empty();
+        for &(reveal_site, reveal_node) in &reveal_plan.sites {
+            let Some(&zero_test_result) = nodes[reveal_node].inputs.first() else {
+                valid = false;
+                break;
+            };
+            if nodes[reveal_node].inputs.len() != 1
+                || !matches!(nodes[zero_test_result.index()].op, Op::PrecomputeResult(0))
+                || consumers[zero_test_result.index()] != 1
+            {
+                valid = false;
+                break;
+            }
+            let zero_test_node = nodes[zero_test_result.index()].inputs[0].index();
+            let Op::Precompute(zero_test_site_id) = nodes[zero_test_node].op else {
+                valid = false;
+                break;
+            };
+            let zero_test_site = zero_test_site_id.index();
+            let zero_test_kind = sites[zero_test_site].kind;
+            let expected_inputs = match zero_test_kind {
+                PrecomputeKind::IsZero => 1,
+                PrecomputeKind::IsEqual => 2,
+                _ => {
+                    valid = false;
+                    break;
+                }
+            };
+            // The fused service runs at the Reveal batch's anchor instead of the original
+            // zero-test anchor. Slot 0 is safe to bypass because its sole computational reader is
+            // this Reveal; every helper result (`inv` for IsZero; `isz.out`, `isz.in`, and
+            // `isz.inv` for IsEqual) must be witness-only, otherwise an earlier reader could
+            // observe its slot before the fused service fills it.
+            let other_result_has_reader = nodes.iter().enumerate().any(|(result_idx, result)| {
+                matches!(result.op, Op::PrecomputeResult(slot) if slot != 0)
+                    && result
+                        .inputs
+                        .first()
+                        .is_some_and(|input| input.index() == zero_test_node)
+                    && consumers[result_idx] != 0
+            });
+            if domains[zero_test_node] != Domain::Shared
+                || nodes[zero_test_node].inputs.len() != expected_inputs
+                || other_result_has_reader
+            {
+                valid = false;
+                break;
+            }
+            let this_source_plan = site_plan[zero_test_site];
+            if this_source_plan == usize::MAX
+                || source_plan_idx.is_some_and(|idx| idx != this_source_plan)
+            {
+                valid = false;
+                break;
+            }
+            source_plan_idx = Some(this_source_plan);
+            pairs.push(ZeroTestRevealPair {
+                zero_test_site,
+                zero_test_node,
+                reveal_site,
+            });
+        }
+        let Some(source_plan_idx) = source_plan_idx else {
+            continue;
+        };
+        let source_plan = &plans[source_plan_idx];
+        if !valid
+            || claimed_source[source_plan_idx]
+            || source_plan.domain != Domain::Shared
+            || !matches!(source_plan.kind, PrecomputeKind::IsZero | PrecomputeKind::IsEqual)
+            || source_plan.sites.len() != pairs.len()
+            || !source_plan.sites.iter().all(|&(site_id, _)| {
+                pairs
+                    .iter()
+                    .filter(|pair| pair.zero_test_site == site_id)
+                    .count()
+                    == 1
+            })
+        {
+            continue;
+        }
+        claimed_source[source_plan_idx] = true;
+        fusions.push(ZeroTestRevealPlan {
+            source_plan: source_plan_idx,
+            reveal_plan: reveal_plan_idx,
+            anchor: reveal_plan.anchor,
+            pairs,
+        });
+    }
+    fusions
+}
+
 /// Last node index (in graph order) that reads each value - a value with no reader at all keeps
 /// its own index (dead by construction only if `gc` missed it, which it shouldn't - see
 /// `Graph::gc`). A value referenced by `graph.outputs()` gets `nodes.len()` (never freed): its
-/// slot must still hold the right value after the instruction stream finishes, when `stores`
-/// reads it - freeing it mid-stream for reuse would let a later instruction clobber it.
+/// slot must still hold the right value after the instruction stream finishes, when the direct
+/// witness-source projection reads it - freeing it mid-stream would let a later instruction
+/// clobber it.
 fn compute_last_use<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
     let nodes = graph.nodes();
     let mut last_use: Vec<usize> = (0..nodes.len()).collect();
@@ -84,7 +239,11 @@ fn compute_last_use<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
 /// an earlier pass broke that invariant, which is exactly the case
 /// `Unsupported`-style errors elsewhere in this compiler exist to catch instead of silently
 /// mis-encoding.
-fn select_opcode(op: &Op<impl PrimeField>, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank, bool)> {
+fn select_opcode(
+    op: &Op<impl PrimeField>,
+    da: Domain,
+    db: Domain,
+) -> eyre::Result<(Opcode, Bank, bool)> {
     if da == Domain::Local || db == Domain::Local {
         eyre::bail!(
             "codegen: a Local-domain value reached {op:?} directly - it must only ever feed a \
@@ -135,6 +294,23 @@ fn precompute_result_bank(kind: PrecomputeKind, domain: Domain) -> eyre::Result<
     })
 }
 
+/// Selects the exact non-commutative subtraction opcode for an IsEqual source's
+/// `in[1] - in[0]`. An eligible source is Shared-domain, so public/public is deliberately not a
+/// case: that path stays on the ordinary IsEqual gadget.
+fn fused_equality_sub_opcode(lhs: Bank, rhs: Bank) -> eyre::Result<Opcode> {
+    match (lhs, rhs) {
+        (Bank::Shared, Bank::Shared) => Ok(Opcode::SubSS),
+        (Bank::Shared, Bank::Public) => Ok(Opcode::SubSP),
+        (Bank::Public, Bank::Shared) => Ok(Opcode::SubPS),
+        (Bank::Public, Bank::Public) => {
+            eyre::bail!("codegen: a public/public IsEqual reached the shared zero-test fusion")
+        }
+        (Bank::Local, _) | (_, Bank::Local) => {
+            eyre::bail!("codegen: a Local value reached the IsEqual/Reveal fusion")
+        }
+    }
+}
+
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `CoCircomCompiler::compile`) into a `Program`.
 pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
@@ -142,6 +318,24 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     let domain = compute_domains(graph);
     let mut last_use = compute_last_use(graph);
     let plans = plan_precompute_batches(graph, &domain);
+    let fusion_plans = plan_zero_test_reveal_fusions(graph, &domain, &plans);
+    let mut source_fusion = vec![None; plans.len()];
+    let mut reveal_fusion = vec![None; plans.len()];
+    for (fusion_idx, fusion) in fusion_plans.iter().enumerate() {
+        source_fusion[fusion.source_plan] = Some(fusion_idx);
+        reveal_fusion[fusion.reveal_plan] = Some(fusion_idx);
+    }
+    let mut runtime_plans = Vec::with_capacity(plans.len());
+    for plan_idx in 0..plans.len() {
+        if source_fusion[plan_idx].is_some() {
+            continue;
+        }
+        if let Some(fusion_idx) = reveal_fusion[plan_idx] {
+            runtime_plans.push(RuntimePlan::IsZeroReveal(fusion_idx));
+        } else {
+            runtime_plans.push(RuntimePlan::Normal(plan_idx));
+        }
+    }
 
     // A site's inputs must still hold their values when its *batch* runs, which is later than the
     // `Op::Precompute` node that reads them - so extend their lifetimes to the batch's anchor.
@@ -155,24 +349,34 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     // codegen test graphs never bound site inputs to outputs in the first place, which is why this
     // was already exercised (`site_input_slot_survives_until_its_batch_runs`, below) before it
     // became load-bearing on real circuits too.
-    for plan in &plans {
-        for &(_, site_node) in &plan.sites {
-            for input in &nodes[site_node].inputs {
-                last_use[input.index()] = last_use[input.index()].max(plan.anchor);
+    for runtime in &runtime_plans {
+        match *runtime {
+            RuntimePlan::Normal(plan_idx) => {
+                let plan = &plans[plan_idx];
+                for &(_, site_node) in &plan.sites {
+                    for input in &nodes[site_node].inputs {
+                        last_use[input.index()] = last_use[input.index()].max(plan.anchor);
+                    }
+                }
+            }
+            RuntimePlan::IsZeroReveal(fusion_idx) => {
+                let fusion = &fusion_plans[fusion_idx];
+                for pair in &fusion.pairs {
+                    for input in &nodes[pair.zero_test_node].inputs {
+                        last_use[input.index()] = last_use[input.index()].max(fusion.anchor);
+                    }
+                }
             }
         }
     }
-    debug_assert!(
-        plans.iter().all(|plan| plan.sites.iter().all(|&(_, site_node)| nodes[site_node]
-            .inputs
-            .iter()
-            .all(|input| last_use[input.index()] >= plan.anchor))),
-        "a precompute site's input must survive at least until its batch's anchor"
-    );
     // Batch indices anchored at each node, emitted right after that node is processed.
     let mut batches_at: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    for (batch_idx, plan) in plans.iter().enumerate() {
-        batches_at[plan.anchor].push(batch_idx);
+    for (batch_idx, runtime) in runtime_plans.iter().enumerate() {
+        let anchor = match *runtime {
+            RuntimePlan::Normal(plan_idx) => plans[plan_idx].anchor,
+            RuntimePlan::IsZeroReveal(fusion_idx) => fusion_plans[fusion_idx].anchor,
+        };
+        batches_at[anchor].push(batch_idx);
     }
 
     // --- Phase A: reserved (non-recycled) regions ---
@@ -228,36 +432,49 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
          request list below depends on it"
     );
 
-    let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.precompute_sites().len());
-    for (site_id, site) in graph.precompute_sites().iter().enumerate() {
-        let results = u32::try_from(live_slots[site_id].len())
-            .expect("precompute site has more live results than fit into u32");
-        match precompute_result_bank(site.kind, site_domains[site_id])? {
-            Bank::Public => {
-                site_result_base.push(Slot {
-                    bank: Bank::Public,
-                    index: p_next,
-                });
-                p_next += results;
-            }
-            Bank::Shared => {
-                site_result_base.push(Slot {
-                    bank: Bank::Shared,
-                    index: s_next,
-                });
-                s_next += results;
-            }
-            Bank::Local => unreachable!("precompute_result_bank never returns Local"),
+    let mut fused_equality_site = vec![false; graph.precompute_sites().len()];
+    for fusion in &fusion_plans {
+        for pair in &fusion.pairs {
+            fused_equality_site[pair.zero_test_site] =
+                graph.precompute_sites()[pair.zero_test_site].kind == PrecomputeKind::IsEqual;
         }
     }
 
-    // Node-indexed physical slot for every surviving `PrecomputeResult`, so the arm below never
-    // does `base + logical_slot` arithmetic - which stops holding the moment slots are sparse.
+    // Node-indexed physical slot for every surviving `PrecomputeResult`. Fused IsEqual trace
+    // slots 0 (`out`) and 1 (`isz.out`) are the same value, so they deliberately resolve to the
+    // same physical slot. This both avoids a duplicate CSR request and preserves the original
+    // four-slot witness layout through two aliases. Every other result remains one physical slot.
     let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
-    for (site_id, base) in site_result_base.iter().enumerate() {
-        for (pos, &node_idx) in live_nodes[site_id].iter().enumerate() {
-            result_phys[node_idx] =
-                Some(base.index + u32::try_from(pos).expect("site has more live results than fit into u32"));
+    let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.precompute_sites().len());
+    for (site_id, site) in graph.precompute_sites().iter().enumerate() {
+        let bank = precompute_result_bank(site.kind, site_domains[site_id])?;
+        let base = match bank {
+            Bank::Public => p_next,
+            Bank::Shared => s_next,
+            Bank::Local => unreachable!("precompute_result_bank never returns Local"),
+        };
+        site_result_base.push(Slot { bank, index: base });
+
+        let mut physical_count = 0u32;
+        let mut equality_out = None;
+        for (&logical, &node_idx) in live_slots[site_id].iter().zip(&live_nodes[site_id]) {
+            let phys = if fused_equality_site[site_id] && matches!(logical, 0 | 1) {
+                *equality_out.get_or_insert_with(|| {
+                    let phys = base + physical_count;
+                    physical_count += 1;
+                    phys
+                })
+            } else {
+                let phys = base + physical_count;
+                physical_count += 1;
+                phys
+            };
+            result_phys[node_idx] = Some(phys);
+        }
+        match bank {
+            Bank::Public => p_next += physical_count,
+            Bank::Shared => s_next += physical_count,
+            Bank::Local => unreachable!("precompute_result_bank never returns Local"),
         }
     }
 
@@ -332,6 +549,18 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
 
     // One entry per PrecomputeId, filled as each Op::Precompute node is walked.
     let mut site_inputs: Vec<Vec<SiteInput>> = vec![Vec::new(); graph.precompute_sites().len()];
+    // The existing fused service always consumes one Shared zero-test input per site. IsZero uses
+    // its original input; IsEqual records the difference slot emitted at the Reveal anchor below.
+    let mut fusion_inputs: Vec<Vec<SiteInput>> = fusion_plans
+        .iter()
+        .map(|fusion| Vec::with_capacity(fusion.pairs.len()))
+        .collect();
+    // A witness-dead IsEqual `isz.in` has no reserved result slot. Its anchor-time subtraction
+    // therefore uses a recyclable Shared temporary, released immediately after the fused service.
+    let mut fusion_temporaries: Vec<Vec<Option<u32>>> = fusion_plans
+        .iter()
+        .map(|fusion| Vec::with_capacity(fusion.pairs.len()))
+        .collect();
 
     let mut i = 0usize;
     while i < nodes.len() {
@@ -346,19 +575,46 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 let (opcode, dst_bank, swap) = select_opcode(&node.op, da, db)?;
                 let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
                 let sb = slot[node.inputs[1].index()].expect("operand not yet resolved");
-                let (a, b) = if swap { (sb.index, sa.index) } else { (sa.index, sb.index) };
+                let (a, b) = if swap {
+                    (sb.index, sa.index)
+                } else {
+                    (sa.index, sb.index)
+                };
                 let dst = match dst_bank {
                     Bank::Public => p_alloc.alloc(),
                     Bank::Shared => s_alloc.alloc(),
                     Bank::Local => unreachable!("Add/Sub/Mul never produce a Local result"),
                 };
-                instructions.push(Instruction { op: opcode, dst, a, b });
+                instructions.push(Instruction {
+                    op: opcode,
+                    dst,
+                    a,
+                    b,
+                });
                 slot[i] = Some(Slot {
                     bank: dst_bank,
                     index: dst,
                 });
-                free_if_dead(node.inputs[0], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
-                free_if_dead(node.inputs[1], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(
+                    node.inputs[0],
+                    i,
+                    &last_use,
+                    &mut slot,
+                    &mut p_alloc,
+                    &mut s_alloc,
+                    p_reserved_end,
+                    s_reserved_end,
+                );
+                free_if_dead(
+                    node.inputs[1],
+                    i,
+                    &last_use,
+                    &mut slot,
+                    &mut p_alloc,
+                    &mut s_alloc,
+                    p_reserved_end,
+                    s_reserved_end,
+                );
             }
             Op::MulLocal => {
                 let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
@@ -384,11 +640,30 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     bank: Bank::Local,
                     index: dst,
                 });
-                free_if_dead(node.inputs[0], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
-                free_if_dead(node.inputs[1], i, &last_use, &mut slot, &mut p_alloc, &mut s_alloc, p_reserved_end, s_reserved_end);
+                free_if_dead(
+                    node.inputs[0],
+                    i,
+                    &last_use,
+                    &mut slot,
+                    &mut p_alloc,
+                    &mut s_alloc,
+                    p_reserved_end,
+                    s_reserved_end,
+                );
+                free_if_dead(
+                    node.inputs[1],
+                    i,
+                    &last_use,
+                    &mut slot,
+                    &mut p_alloc,
+                    &mut s_alloc,
+                    p_reserved_end,
+                    s_reserved_end,
+                );
             }
             Op::Round(round_id) => {
-                let operand_start = u32::try_from(round_operands.len()).expect("too many round operands");
+                let operand_start =
+                    u32::try_from(round_operands.len()).expect("too many round operands");
                 for &input in &node.inputs {
                     let s = slot[input.index()].expect("round operand not yet resolved");
                     if s.bank != Bank::Local {
@@ -400,13 +675,15 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     round_operands.push(s.index);
                     l_alloc.free(s.index, 0);
                 }
-                let len = u32::try_from(node.inputs.len()).expect("round has more slots than fit into u32");
+                let len = u32::try_from(node.inputs.len())
+                    .expect("round has more slots than fit into u32");
 
                 // round_schedule guarantees a Round node is immediately followed by exactly `len`
                 // RoundResult(0..len) nodes, in slot order - see its own module doc, and
                 // docs/ARCHITECTURE.md, "MPC lowering". Codegen relies on the same guarantee its
                 // own producer already asserts, rather than re-deriving the mapping some other way.
-                let result_start = u32::try_from(round_results.len()).expect("too many round results");
+                let result_start =
+                    u32::try_from(round_results.len()).expect("too many round results");
                 for k in 0..node.inputs.len() {
                     let result_idx = i + 1 + k;
                     let expected_k = u32::try_from(k).unwrap();
@@ -491,9 +768,10 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     unreachable!("Graph::verify guarantees PrecomputeResult's input is Precompute");
                 };
                 let base = site_result_base[site_id.index()];
-                let phys = result_phys[i]
-                    .expect("every PrecomputeResult node that survives to codegen was counted \
-                             into live_slots/live_nodes above");
+                let phys = result_phys[i].expect(
+                    "every PrecomputeResult node that survives to codegen was counted \
+                             into live_slots/live_nodes above",
+                );
                 slot[i] = Some(Slot {
                     bank: base.bank,
                     index: phys,
@@ -503,6 +781,54 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         // Every batch anchored here is serviced now: all of its sites' inputs are resolved, and
         // `plan_precompute_batches` has checked that nothing reads its results before this point.
         for &batch_idx in &batches_at[i] {
+            if let RuntimePlan::IsZeroReveal(fusion_idx) = runtime_plans[batch_idx] {
+                let fusion = &fusion_plans[fusion_idx];
+                debug_assert!(fusion_inputs[fusion_idx].is_empty());
+                debug_assert!(fusion_temporaries[fusion_idx].is_empty());
+                for pair in &fusion.pairs {
+                    let source_kind = graph.precompute_sites()[pair.zero_test_site].kind;
+                    if source_kind == PrecomputeKind::IsZero {
+                        fusion_inputs[fusion_idx].push(site_inputs[pair.zero_test_site][0]);
+                        fusion_temporaries[fusion_idx].push(None);
+                        continue;
+                    }
+
+                    debug_assert_eq!(source_kind, PrecomputeKind::IsEqual);
+                    let inputs = &site_inputs[pair.zero_test_site];
+                    debug_assert_eq!(inputs.len(), 2);
+                    // circomlib's IsEqual feeds exactly `in[1] - in[0]` to its child IsZero. The
+                    // sign is witness-visible in logical trace slot 2, so operand order is not an
+                    // interchangeable implementation detail even though the equality bit is.
+                    let lhs = inputs[1];
+                    let rhs = inputs[0];
+                    let opcode = fused_equality_sub_opcode(lhs.bank, rhs.bank)?;
+                    let witness_diff = live_slots[pair.zero_test_site]
+                        .binary_search(&2)
+                        .ok()
+                        .map(|pos| {
+                            result_phys[live_nodes[pair.zero_test_site][pos]]
+                                .expect("every live IsEqual result has a physical slot")
+                        });
+                    let (dst, temporary) = match witness_diff {
+                        Some(dst) => (dst, None),
+                        None => {
+                            let dst = s_alloc.alloc();
+                            (dst, Some(dst))
+                        }
+                    };
+                    instructions.push(Instruction {
+                        op: opcode,
+                        dst,
+                        a: lhs.slot,
+                        b: rhs.slot,
+                    });
+                    fusion_inputs[fusion_idx].push(SiteInput {
+                        bank: Bank::Shared,
+                        slot: dst,
+                    });
+                    fusion_temporaries[fusion_idx].push(temporary);
+                }
+            }
             instructions.push(Instruction {
                 op: Opcode::Precompute,
                 dst: 0,
@@ -510,19 +836,47 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 b: 0,
             });
             // Site inputs were pinned to this anchor by the liveness extension above, so this is
-            // where they become recyclable.
-            for &(_, site_node) in &plans[batch_idx].sites {
-                for &input in &nodes[site_node].inputs {
-                    free_if_dead(
-                        input,
-                        i,
-                        &last_use,
-                        &mut slot,
-                        &mut p_alloc,
-                        &mut s_alloc,
-                        p_reserved_end,
-                        s_reserved_end,
-                    );
+            // where they become recyclable. A fused service retains the original IsZero operand
+            // or both original IsEqual operands, not the intermediate result passed to Reveal.
+            match runtime_plans[batch_idx] {
+                RuntimePlan::Normal(plan_idx) => {
+                    for &(_, site_node) in &plans[plan_idx].sites {
+                        for &input in &nodes[site_node].inputs {
+                            free_if_dead(
+                                input,
+                                i,
+                                &last_use,
+                                &mut slot,
+                                &mut p_alloc,
+                                &mut s_alloc,
+                                p_reserved_end,
+                                s_reserved_end,
+                            );
+                        }
+                    }
+                }
+                RuntimePlan::IsZeroReveal(fusion_idx) => {
+                    for (pair, temporary) in fusion_plans[fusion_idx]
+                        .pairs
+                        .iter()
+                        .zip(&fusion_temporaries[fusion_idx])
+                    {
+                        for &input in &nodes[pair.zero_test_node].inputs {
+                            free_if_dead(
+                                input,
+                                i,
+                                &last_use,
+                                &mut slot,
+                                &mut p_alloc,
+                                &mut s_alloc,
+                                p_reserved_end,
+                                s_reserved_end,
+                            );
+                        }
+                        if let Some(temp) = *temporary {
+                            s_alloc.free(temp, s_reserved_end);
+                        }
+                    }
                 }
             }
         }
@@ -530,18 +884,88 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     }
 
     // --- Assemble the planned batches; slot lists follow each plan's own site order ---
-    let batches: Vec<PrecomputeBatch> = plans
+    let batches: Vec<PrecomputeBatch> = runtime_plans
         .iter()
-        .map(|plan| {
+        .map(|runtime| {
+            if let RuntimePlan::IsZeroReveal(fusion_idx) = *runtime {
+                let fusion = &fusion_plans[fusion_idx];
+                let input_slots = fusion_inputs[fusion_idx].clone();
+                let mut result_requests = Vec::new();
+                let mut result_offsets = Vec::with_capacity(fusion.pairs.len() + 1);
+                let mut result_targets = Vec::new();
+                result_offsets.push(0);
+                for pair in &fusion.pairs {
+                    let source_site = pair.zero_test_site;
+                    let source_kind = graph.precompute_sites()[source_site].kind;
+                    debug_assert_eq!(site_result_base[source_site].bank, Bank::Shared);
+                    let mut equality_out_requested = false;
+                    for (pos, &logical) in live_slots[source_site].iter().enumerate() {
+                        let canonical = match (source_kind, logical) {
+                            (PrecomputeKind::IsZero, 0) => Some(0),
+                            (PrecomputeKind::IsZero, 1) => Some(1),
+                            (PrecomputeKind::IsEqual, 0 | 1) => {
+                                if equality_out_requested {
+                                    None
+                                } else {
+                                    equality_out_requested = true;
+                                    Some(0)
+                                }
+                            }
+                            // `isz.in` was written directly by the Sub instruction at this
+                            // fusion's anchor, so the service must not overwrite it.
+                            (PrecomputeKind::IsEqual, 2) => None,
+                            (PrecomputeKind::IsEqual, 3) => Some(1),
+                            _ => unreachable!("planner only fuses well-shaped IsZero/IsEqual sites"),
+                        };
+                        let Some(canonical) = canonical else {
+                            continue;
+                        };
+                        result_requests.push(canonical);
+                        result_targets.push(ResultTarget {
+                            bank: Bank::Shared,
+                            slot: result_phys[live_nodes[source_site][pos]]
+                                .expect("every live source result has a physical slot"),
+                        });
+                    }
+
+                    let reveal_base = site_result_base[pair.reveal_site];
+                    debug_assert_eq!(reveal_base.bank, Bank::Public);
+                    for (pos, &logical) in live_slots[pair.reveal_site].iter().enumerate() {
+                        debug_assert_eq!(logical, 0);
+                        result_requests.push(2 + logical);
+                        result_targets.push(ResultTarget {
+                            bank: Bank::Public,
+                            slot: result_phys[live_nodes[pair.reveal_site][pos]]
+                                .expect("every live Reveal result has a physical slot"),
+                        });
+                    }
+                    result_offsets.push(
+                        u32::try_from(result_requests.len()).expect("too many fused results"),
+                    );
+                }
+                return PrecomputeBatch {
+                    kind: BatchKind::IsZeroReveal,
+                    sites: fusion.pairs.len(),
+                    input_slots,
+                    result_requests,
+                    result_offsets,
+                    result_targets,
+                };
+            }
+
+            let RuntimePlan::Normal(plan_idx) = *runtime else {
+                unreachable!("fused runtime plan returned above")
+            };
+            let plan = &plans[plan_idx];
             let mut input_slots = Vec::new();
             // Site-contiguous, ascending within a site: `result_requests[lo..hi]` (via
             // `result_offsets[site]..result_offsets[site + 1]`) is the sorted list of logical
-            // slots this site actually needs, and `result_slots[lo..hi]` their destinations - two
+            // slots this site actually needs, and `result_targets[lo..hi]` their destinations - two
             // sites in one batch may now have different live counts, which is exactly why a flat
             // `sites * capacity` shape (recovered by division) no longer works.
             let mut result_requests = Vec::new();
             let mut result_offsets = Vec::with_capacity(plan.sites.len() + 1);
-            let mut result_slots = Vec::new();
+            let mut result_targets = Vec::new();
             result_offsets.push(0u32);
             for &(site_id, _) in &plan.sites {
                 input_slots.extend_from_slice(&site_inputs[site_id]);
@@ -553,42 +977,78 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                 );
                 for (pos, &logical) in live_slots[site_id].iter().enumerate() {
                     result_requests.push(logical);
-                    result_slots.push(base.index + u32::try_from(pos).expect("checked above"));
+                    result_targets.push(ResultTarget {
+                        bank: base.bank,
+                        slot: result_phys[live_nodes[site_id][pos]]
+                            .expect("every live precompute result has a physical slot"),
+                    });
                 }
                 result_offsets.push(
                     u32::try_from(result_requests.len()).expect("too many precompute results"),
                 );
             }
             PrecomputeBatch {
-                kind: plan.kind,
+                kind: BatchKind::Precompute(plan.kind),
                 sites: plan.sites.len(),
-                result_bank: precompute_result_bank(plan.kind, plan.domain)
-                    .expect("already validated while reserving site_result_base"),
                 input_slots,
                 result_requests,
                 result_offsets,
-                result_slots,
+                result_targets,
             }
         })
         .collect();
 
-    // --- Stores: every circuit output/signal, read back once the stream (and precompute phase)
-    // have both run.
-    let mut stores = Vec::with_capacity(graph.outputs().len());
-    for &(signal, value) in graph.outputs() {
-        let s = slot[value.index()].expect("output value not yet resolved");
-        if s.bank == Bank::Local {
-            eyre::bail!(
-                "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
-                 reshared (Op::Round) first; this is a lowering invariant violation"
-            );
+    // Build a compile-time signal -> source table, then immediately project it into witness order.
+    // This retains today's last-binding-wins behavior for the (normally unique) signal bindings,
+    // without carrying the oversized signal address space into runtime.
+    // Pass/codegen unit tests intentionally use hand-built graphs without a witness projection.
+    // Preserve that diagnostic-only contract without requiring their synthetic signal metadata to
+    // describe inputs that no runtime will ever project.
+    let witness_sources = if graph.signal_to_witness.is_empty() {
+        Vec::new()
+    } else {
+        let mut signal_sources = vec![None; graph.num_signals];
+        *signal_sources
+            .get_mut(0)
+            .ok_or_else(|| eyre::eyre!("codegen: witness-bearing graph has no constant-one signal"))? =
+            Some(WitnessSource::One);
+        for &(signal, value) in graph.outputs() {
+            let s = slot[value.index()].expect("output value not yet resolved");
+            if s.bank == Bank::Local {
+                eyre::bail!(
+                    "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
+                     reshared (Op::Round) first; this is a lowering invariant violation"
+                );
+            }
+            let signal_index = signal.index() + 1;
+            let destination = signal_sources.get_mut(signal_index).ok_or_else(|| {
+                eyre::eyre!("codegen: output signal {signal_index} exceeds num_signals={}", graph.num_signals)
+            })?;
+            *destination = Some(WitnessSource::Slot {
+                bank: s.bank,
+                slot: s.index,
+            });
         }
-        stores.push(StoreEntry {
-            bank: s.bank,
-            slot: s.index,
-            signal: signal.index() as u32,
-        });
-    }
+        for input_index in 0..graph.num_inputs {
+            let signal = graph.num_outputs + input_index + 1;
+            let destination = signal_sources.get_mut(signal).ok_or_else(|| {
+                eyre::eyre!("codegen: input signal {signal} exceeds num_signals={}", graph.num_signals)
+            })?;
+            *destination = Some(WitnessSource::Input(
+                u32::try_from(input_index).expect("input index does not fit into u32"),
+            ));
+        }
+        graph
+            .signal_to_witness
+            .iter()
+            .map(|&signal| {
+                signal_sources
+                    .get(signal)
+                    .and_then(|source| *source)
+                    .unwrap_or(WitnessSource::Zero)
+            })
+            .collect()
+    };
 
     Ok(Program {
         instructions,
@@ -599,11 +1059,8 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         round_operands,
         round_results,
         precompute_batches: batches,
-        stores,
-        signal_to_witness: graph.signal_to_witness.clone(),
+        witness_sources,
         num_inputs: graph.num_inputs,
-        num_outputs: graph.num_outputs,
-        num_signals: graph.num_signals,
         slots: SlotCounts {
             public: p_alloc.next,
             shared: s_alloc.next,
@@ -640,7 +1097,8 @@ fn free_if_dead(
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::Fr;
+    use ark_bn254::{Fq, Fr};
+    use ark_ff::Field;
 
     use super::*;
     use crate::ir::{Node, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx};
@@ -725,6 +1183,26 @@ mod tests {
         }
     }
 
+    fn isequal_site() -> PrecomputeSite {
+        PrecomputeSite {
+            kind: PrecomputeKind::IsEqual,
+            header: "IsEqual_0".to_owned(),
+            num_inputs: 2,
+            num_outputs: 1,
+            num_intermediates: 3,
+        }
+    }
+
+    fn reveal_site(n: usize) -> PrecomputeSite {
+        PrecomputeSite {
+            kind: PrecomputeKind::Reveal { n },
+            header: format!("TACEO_REVEAL_{n}"),
+            num_inputs: n,
+            num_outputs: n,
+            num_intermediates: 0,
+        }
+    }
+
     fn lowered_graph(
         nodes: Vec<Node<Fr>>,
         outputs: Vec<(SignalIdx, ValueId)>,
@@ -777,6 +1255,691 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sole_shared_iszero_output_revealed_once_is_fused_at_codegen() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1: IsZero
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2: out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(1)]), // 3: inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 4: Reveal
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5: revealed
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(5)),
+                (SignalIdx::new(2), ValueId::new(2)),
+                (SignalIdx::new(3), ValueId::new(3)),
+            ],
+            vec![iszero_site(), reveal_site(1)],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 1);
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.kind, BatchKind::IsZeroReveal);
+        assert_eq!(batch.sites, 1);
+        assert_eq!(batch.result_requests, vec![0, 1, 2]);
+        assert_eq!(
+            batch
+                .result_targets
+                .iter()
+                .map(|target| target.bank)
+                .collect::<Vec<_>>(),
+            vec![Bank::Shared, Bank::Shared, Bank::Public]
+        );
+    }
+
+    #[test]
+    fn isequal_trace_maps_to_the_existing_iszero_reveal_service() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(5)), vec![]), // 0: in[0]
+            Node::new(Op::Input(SignalIdx::new(6)), vec![]), // 1: in[1]
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2: IsEqual
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(2)]), // 4: isz.out
+            Node::new(Op::PrecomputeResult(2), vec![ValueId::new(2)]), // 5: isz.in
+            Node::new(Op::PrecomputeResult(3), vec![ValueId::new(2)]), // 6: isz.inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 7: Reveal
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(7)]), // 8: revealed
+        ];
+        let mut graph = Graph::from_parts(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(3)),
+                (SignalIdx::new(1), ValueId::new(4)),
+                (SignalIdx::new(2), ValueId::new(5)),
+                (SignalIdx::new(3), ValueId::new(6)),
+                (SignalIdx::new(4), ValueId::new(8)),
+            ],
+            vec![isequal_site(), reveal_site(1)],
+            (0..8).collect(),
+            vec![],
+            vec![],
+            2,
+            5,
+            8,
+        );
+        graph.mark_lowered();
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 1);
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.kind, BatchKind::IsZeroReveal);
+        assert_eq!(batch.result_requests, vec![0, 1, 2]);
+        assert_eq!(batch.input_slots.len(), 1);
+        let difference = program
+            .instructions
+            .iter()
+            .find(|instruction| instruction.op == Opcode::SubSS)
+            .expect("fused IsEqual must materialize isz.in");
+        assert_eq!(batch.input_slots[0].slot, difference.dst);
+        assert_eq!(batch.result_targets[0].bank, Bank::Shared);
+        assert_eq!(batch.result_targets[1].bank, Bank::Shared);
+        assert_eq!(batch.result_targets[2].bank, Bank::Public);
+        assert_eq!(difference.dst, batch.result_targets[0].slot + 1);
+        assert_eq!(batch.result_targets[1].slot, difference.dst + 1);
+        assert_eq!(program.slots.shared, 5, "two inputs plus out/diff/inv");
+
+        let values = [Fr::from(10u64), Fr::from(4u64)];
+        let inputs = program.classify_inputs(&values, |value| value);
+        let witness = crate::vm::Machine::run(
+            &program,
+            &mut crate::vm::driver::plain::PlainDriver,
+            &inputs,
+        )
+        .unwrap();
+        let difference = values[1] - values[0];
+        assert_eq!(
+            &witness[1..6],
+            &[
+                Fr::from(0u64),
+                Fr::from(0u64),
+                difference,
+                difference.inverse().unwrap(),
+                Fr::from(0u64),
+            ]
+        );
+    }
+
+    #[test]
+    fn isequal_fusion_preserves_circom_subtraction_direction_for_all_operand_domains() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: a (Shared)
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b (Shared)
+            Node::new(Op::Constant(Fr::from(9u64)), vec![]), // 2: p (Public)
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 3: b - a => SubSS
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(
+                Op::Precompute(PrecomputeId::new(1)),
+                vec![ValueId::new(2), ValueId::new(0)],
+            ), // 5: a - p => SubSP
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+            Node::new(
+                Op::Precompute(PrecomputeId::new(2)),
+                vec![ValueId::new(0), ValueId::new(2)],
+            ), // 7: p - a => SubPS
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(7)]), // 8
+            Node::new(Op::Precompute(PrecomputeId::new(3)), vec![ValueId::new(4)]), // 9
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(9)]), // 10
+            Node::new(Op::Precompute(PrecomputeId::new(4)), vec![ValueId::new(6)]), // 11
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(11)]), // 12
+            Node::new(Op::Precompute(PrecomputeId::new(5)), vec![ValueId::new(8)]), // 13
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(13)]), // 14
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(10)),
+                (SignalIdx::new(2), ValueId::new(12)),
+                (SignalIdx::new(3), ValueId::new(14)),
+            ],
+            vec![
+                isequal_site(),
+                isequal_site(),
+                isequal_site(),
+                reveal_site(1),
+                reveal_site(1),
+                reveal_site(1),
+            ],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        let input_slot = |input_index| {
+            program
+                .inputs
+                .iter()
+                .find(|binding| binding.input_index == input_index)
+                .unwrap()
+                .slot
+        };
+        let a = input_slot(0);
+        let b = input_slot(1);
+        let subs: Vec<_> = program
+            .instructions
+            .iter()
+            .filter(|instruction| {
+                matches!(instruction.op, Opcode::SubSS | Opcode::SubSP | Opcode::SubPS)
+            })
+            .collect();
+        assert_eq!(subs.len(), 3);
+        assert_eq!((subs[0].op, subs[0].a, subs[0].b), (Opcode::SubSS, b, a));
+        assert_eq!((subs[1].op, subs[1].a, subs[1].b), (Opcode::SubSP, a, 0));
+        assert_eq!((subs[2].op, subs[2].a, subs[2].b), (Opcode::SubPS, 0, a));
+        assert_eq!(
+            program.precompute_batches[0]
+                .input_slots
+                .iter()
+                .map(|input| input.slot)
+                .collect::<Vec<_>>(),
+            subs.iter().map(|instruction| instruction.dst).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn witness_dead_isequal_difference_uses_and_releases_a_temporary_slot() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: component out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(2)]), // 4: aliased out
+            // Logical slot 2 (`isz.in`) is deliberately absent, while slot 3 survives: this is
+            // the sparse shape that requires both a temporary difference and `result_phys`.
+            Node::new(Op::PrecomputeResult(3), vec![ValueId::new(2)]), // 5: inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 6
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 8: after fusion
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(7)),
+                (SignalIdx::new(2), ValueId::new(4)),
+                (SignalIdx::new(3), ValueId::new(5)),
+                (SignalIdx::new(4), ValueId::new(8)),
+            ],
+            vec![isequal_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        let sub = program
+            .instructions
+            .iter()
+            .find(|instruction| instruction.op == Opcode::SubSS)
+            .unwrap();
+        let add = program
+            .instructions
+            .iter()
+            .find(|instruction| instruction.op == Opcode::AddSS)
+            .unwrap();
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.input_slots[0].slot, sub.dst);
+        assert_eq!(batch.result_requests, vec![0, 1, 2]);
+        assert_eq!(batch.result_targets[1].slot, batch.result_targets[0].slot + 1);
+        assert_eq!(add.dst, sub.dst, "the temporary must be reusable after the service");
+    }
+
+    #[test]
+    fn two_eligible_iszero_reveal_pairs_fuse_as_one_batch() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 2: IsZero(x)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: x.out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(2)]), // 4: x.inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(1)]), // 5: IsZero(y)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6: y.out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(5)]), // 7: y.inv
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(3)]), // 8: Reveal(x.out)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(8)]),              // 9
+            Node::new(Op::Precompute(PrecomputeId::new(3)), vec![ValueId::new(6)]), // 10: Reveal(y.out)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(10)]),             // 11
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(9)),
+                (SignalIdx::new(2), ValueId::new(4)),
+                (SignalIdx::new(3), ValueId::new(11)),
+                (SignalIdx::new(4), ValueId::new(7)),
+            ],
+            vec![iszero_site(), iszero_site(), reveal_site(1), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 1);
+        let batch = &program.precompute_batches[0];
+        assert_eq!(batch.kind, BatchKind::IsZeroReveal);
+        assert_eq!(batch.sites, 2);
+        assert_eq!(batch.result_offsets, vec![0, 3, 6]);
+        assert_eq!(batch.result_requests, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn partially_revealed_iszero_batch_remains_unfused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 2: IsZero(x)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: x.out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(2)]), // 4: x.inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(1)]), // 5: IsZero(y)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6: y.out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(5)]), // 7: y.inv
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(3)]), // 8: Reveal(x.out)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(8)]),              // 9
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(9)),
+                (SignalIdx::new(2), ValueId::new(4)),
+                (SignalIdx::new(3), ValueId::new(6)),
+                (SignalIdx::new(4), ValueId::new(7)),
+            ],
+            vec![iszero_site(), iszero_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert_eq!(
+            program.precompute_batches[0].kind,
+            BatchKind::Precompute(PrecomputeKind::IsZero)
+        );
+        assert_eq!(program.precompute_batches[0].sites, 2);
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn reveal_consuming_iszero_inverse_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1: IsZero
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2: out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(1)]), // 3: inv
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4: Reveal(inv)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5: revealed inv
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(5)),
+                (SignalIdx::new(2), ValueId::new(2)),
+                (SignalIdx::new(3), ValueId::new(3)),
+            ],
+            vec![iszero_site(), reveal_site(1)],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn iszero_with_an_extra_computational_consumer_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2: out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(1)]), // 3: inv
+            Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]), // 4: extra reader
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(6)),
+                (SignalIdx::new(2), ValueId::new(3)),
+                (SignalIdx::new(3), ValueId::new(4)),
+            ],
+            vec![iszero_site(), reveal_site(1)],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn iszero_inverse_with_a_computational_consumer_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2: out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(1)]), // 3: inv
+            Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: inv reader
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(6)),
+                (SignalIdx::new(2), ValueId::new(4)),
+            ],
+            vec![iszero_site(), reveal_site(1)],
+            1,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn public_iszero_reveal_path_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0: public x
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(1)]), // 3
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(5)),
+                (SignalIdx::new(2), ValueId::new(3)),
+            ],
+            vec![iszero_site(), reveal_site(1)],
+            0,
+        );
+        let program = compile(&graph).unwrap();
+
+        assert_eq!(program.precompute_batches.len(), 2);
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn public_isequal_reveal_path_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(4u64)), vec![]), // 0
+            Node::new(Op::Constant(Fr::from(4u64)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(5))],
+            vec![isequal_site(), reveal_site(1)],
+            0,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn partially_revealed_isequal_batch_remains_unfused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(
+                Op::Precompute(PrecomputeId::new(1)),
+                vec![ValueId::new(1), ValueId::new(0)],
+            ), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(3)]), // 6
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(7)),
+                (SignalIdx::new(2), ValueId::new(5)),
+            ],
+            vec![isequal_site(), isequal_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+        assert!(program.precompute_batches.iter().any(|batch| {
+            batch.kind == BatchKind::Precompute(PrecomputeKind::IsEqual) && batch.sites == 2
+        }));
+    }
+
+    #[test]
+    fn mixed_iszero_and_isequal_reveal_batch_remains_unfused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: IsZero.out
+            Node::new(
+                Op::Precompute(PrecomputeId::new(1)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5: IsEqual.out
+            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(3)]), // 6
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Precompute(PrecomputeId::new(3)), vec![ValueId::new(5)]), // 8
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(8)]), // 9
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(7)),
+                (SignalIdx::new(2), ValueId::new(9)),
+            ],
+            vec![iszero_site(), isequal_site(), reveal_site(1), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn reveal_consuming_isequal_non_output_result_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: component out
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(2)]), // 4: child IsZero.out
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(4)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(6)),
+                (SignalIdx::new(2), ValueId::new(3)),
+            ],
+            vec![isequal_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn isequal_with_an_extra_computational_consumer_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: extra reader
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(6)),
+                (SignalIdx::new(2), ValueId::new(4)),
+            ],
+            vec![isequal_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn isequal_helper_with_a_computational_consumer_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3: out
+            Node::new(Op::PrecomputeResult(2), vec![ValueId::new(2)]), // 4: isz.in
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(0)]), // 5: helper reader
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 6
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(7)),
+                (SignalIdx::new(2), ValueId::new(5)),
+            ],
+            vec![isequal_site(), reveal_site(1)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn wide_reveal_of_isequal_outputs_is_not_fused() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(
+                Op::Precompute(PrecomputeId::new(1)),
+                vec![ValueId::new(1), ValueId::new(0)],
+            ), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(
+                Op::Precompute(PrecomputeId::new(2)),
+                vec![ValueId::new(3), ValueId::new(5)],
+            ), // 6: Reveal(2)
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::PrecomputeResult(1), vec![ValueId::new(6)]), // 8
+        ];
+        let graph = lowered_graph(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(7)),
+                (SignalIdx::new(2), ValueId::new(8)),
+            ],
+            vec![isequal_site(), isequal_site(), reveal_site(2)],
+            2,
+        );
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
+    #[test]
+    fn non_bn254_isequal_reveal_path_is_not_fused() {
+        let nodes: Vec<Node<Fq>> = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
+            Node::new(
+                Op::Precompute(PrecomputeId::new(0)),
+                vec![ValueId::new(0), ValueId::new(1)],
+            ), // 2
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+        ];
+        let mut graph: Graph<Fq> = Graph::from_parts(
+            nodes,
+            vec![(SignalIdx::new(0), ValueId::new(5))],
+            vec![isequal_site(), reveal_site(1)],
+            vec![],
+            vec![],
+            vec![],
+            2,
+            1,
+            6,
+        );
+        graph.mark_lowered();
+        let program = compile(&graph).unwrap();
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
+    }
+
     /// Codegen remains safe for a valid topological graph that was not level-sorted: an early
     /// result consumer closes the active batch instead of making a later independent site move the
     /// batch anchor past that consumer.
@@ -800,7 +1963,10 @@ mod tests {
         );
         let program = compile(&graph).unwrap();
         assert_eq!(program.precompute_batches.len(), 2);
-        assert!(program.precompute_batches.iter().all(|batch| batch.sites == 1));
+        assert!(program
+            .precompute_batches
+            .iter()
+            .all(|batch| batch.sites == 1));
     }
 
     /// Dependent sites can't share a driver call, and each batch's instruction must precede anything
@@ -815,7 +1981,7 @@ mod tests {
             // Reading site 0's result forces site 1 into a later stage.
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]), // 3
             Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]),  // 5
             Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(0)]), // 6
         ];
         let graph = lowered_graph(
@@ -845,7 +2011,7 @@ mod tests {
         );
 
         // Batch 0's result slot must be written before any instruction reads it.
-        let result_slot = program.precompute_batches[0].result_slots[0];
+        let result_slot = program.precompute_batches[0].result_targets[0].slot;
         let first_reader = program
             .instructions
             .iter()
@@ -875,12 +2041,12 @@ mod tests {
             // A computed value whose only graph reader is site 0's Precompute node.
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 2
             Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(2)]), // 3
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]),  // 4
             // Site 1 is defined later, so the shared batch is anchored past node 3 - the window in
             // which node 2's slot must not be recycled.
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(0)]), // 5
             Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(5)]), // 6
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(6)]),  // 7
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(7)]), // 8
         ];
         let graph = lowered_graph(
@@ -890,7 +2056,11 @@ mod tests {
             2,
         );
         let program = compile(&graph).unwrap();
-        assert_eq!(program.precompute_batches.len(), 1, "both sites are stage 0");
+        assert_eq!(
+            program.precompute_batches.len(),
+            1,
+            "both sites are stage 0"
+        );
         let batch = &program.precompute_batches[0];
         let batch_pos = program
             .instructions
@@ -973,16 +2143,27 @@ mod tests {
 
         assert_eq!(program.precompute_batches.len(), 1);
         let batch = &program.precompute_batches[0];
-        assert_eq!(batch.result_requests, vec![0, 2], "requests logical slots 0 and 2 only");
-        assert_eq!(batch.result_offsets, vec![0, 2], "one site, both its requests");
         assert_eq!(
-            batch.result_slots.len(),
+            batch.result_requests,
+            vec![0, 2],
+            "requests logical slots 0 and 2 only"
+        );
+        assert_eq!(
+            batch.result_offsets,
+            vec![0, 2],
+            "one site, both its requests"
+        );
+        assert_eq!(
+            batch.result_targets.len(),
             2,
             "the reserved region is 2 wide (the live count), not the site's capacity of 3"
         );
         // The two surviving results must land at adjacent physical slots (base, base + 1), not at
         // their original logical indices 0 and 2.
-        assert_eq!(batch.result_slots[1], batch.result_slots[0] + 1);
+        assert_eq!(
+            batch.result_targets[1].slot,
+            batch.result_targets[0].slot + 1
+        );
     }
 
     /// A `Local` value feeding a site is a lowering-invariant violation, not a circuit shape.

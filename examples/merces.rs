@@ -51,6 +51,20 @@ fn default_scenario(main: &str) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PartyMetrics {
+    preprocessing_rounds: usize,
+    online_rounds: usize,
+    bytes_sent: usize,
+    bytes_recv: usize,
+}
+
+impl PartyMetrics {
+    fn combined_rounds(self) -> usize {
+        self.preprocessing_rounds + self.online_rounds
+    }
+}
+
 /// Reads a zkey for proving, in whichever of the two formats this repo uses: `.arks.zkey` is the
 /// merces ceremony key (ark-serialized, uncompressed - see `tests/merces.rs`'s `ceremony_zkey`),
 /// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g. the checked-in
@@ -85,18 +99,25 @@ fn main() -> eyre::Result<()> {
     install_tracing();
     let root = env!("CARGO_MANIFEST_DIR");
     let mut args = std::env::args().skip(1);
-    let arg = args.next().unwrap_or_else(|| "transfer_arity4_batch1".to_owned());
+    let arg = args
+        .next()
+        .unwrap_or_else(|| "transfer_arity4_batch1".to_owned());
     let is_merces_main = default_scenario(&arg).is_some();
     // A merces main takes a scenario name as its second arg (defaulting per `default_scenario`);
     // any other circuit has no scenario, so its second arg (if any) is the zkey path instead.
     let scenario_name = is_merces_main
-        .then(|| args.next().or_else(|| default_scenario(&arg).map(str::to_owned)))
+        .then(|| {
+            args.next()
+                .or_else(|| default_scenario(&arg).map(str::to_owned))
+        })
         .flatten();
     let zkey_arg = args.next();
 
     let mut config = CompilerConfig::default();
     config.version = "2.2.2".to_owned();
-    config.link_library.push(format!("{root}/circuits/libs/").into());
+    config
+        .link_library
+        .push(format!("{root}/circuits/libs/").into());
     config
         .link_library
         .push(format!("{root}/circuits/merces/").into());
@@ -140,7 +161,9 @@ fn main() -> eyre::Result<()> {
             println!("scenario: {name} ({})", s.note);
             s.values(&graph.input_list)?
         }
-        None => (0..graph.num_inputs).map(|i| Fr::from(i as u64 + 1)).collect(),
+        None => (0..graph.num_inputs)
+            .map(|i| Fr::from(i as u64 + 1))
+            .collect(),
     };
 
     let t = Instant::now();
@@ -168,26 +191,51 @@ fn main() -> eyre::Result<()> {
 
     let zkey_path = zkey_arg.or_else(|| default_zkey_path(root, &arg, is_merces_main));
     let zkey = zkey_path.as_deref().and_then(|p| {
-        std::fs::metadata(p).is_ok().then(|| read_zkey(p)).or_else(|| {
-            println!("note: no zkey at {p} - skipping prove+verify.");
-            None
-        })
+        std::fs::metadata(p)
+            .is_ok()
+            .then(|| read_zkey(p))
+            .or_else(|| {
+                println!("note: no zkey at {p} - skipping prove+verify.");
+                None
+            })
     });
 
     let t = Instant::now();
-    let (rep3, measured_rounds, bytes_sent, bytes_recv, proof) = run_rep3(&program, &values, zkey.as_ref());
-    println!("rep3:    {:.2?}  (3 parties over an in-process LocalNetwork)", t.elapsed());
+    let (rep3, party_metrics, proof) = run_rep3(&program, &values, zkey.as_ref());
+    let preprocessing_rounds = party_metrics.map(|metrics| metrics.preprocessing_rounds);
+    let online_rounds = party_metrics.map(|metrics| metrics.online_rounds);
+    let combined_rounds = party_metrics.map(PartyMetrics::combined_rounds);
+    let max_preprocessing_rounds = preprocessing_rounds.iter().copied().max().unwrap_or(0);
+    let max_online_rounds = online_rounds.iter().copied().max().unwrap_or(0);
+    let max_combined_rounds = combined_rounds.iter().copied().max().unwrap_or(0);
+    let online_gadget_rounds = max_online_rounds.saturating_sub(summary.rounds);
     println!(
-        "  rounds={measured_rounds} measured  ({} reshare + {} gadget-internal)",
-        summary.rounds,
-        measured_rounds.saturating_sub(summary.rounds),
+        "rep3:    {:.2?}  (3 parties over an in-process LocalNetwork)",
+        t.elapsed()
     );
-    println!("  bytes sent={bytes_sent} recv={bytes_recv}  (party 0)");
+    println!(
+        "  preprocessing rounds={preprocessing_rounds:?} by party, max={max_preprocessing_rounds}"
+    );
+    println!(
+        "  online rounds={online_rounds:?} by party, max={max_online_rounds}  ({} reshare + {online_gadget_rounds} gadget-internal)",
+        summary.rounds,
+    );
+    println!(
+        "  combined rounds={combined_rounds:?} by party, max={max_combined_rounds}"
+    );
+    for (party, metrics) in party_metrics.iter().enumerate() {
+        println!(
+            "  party {party}: combined bytes sent={} recv={}",
+            metrics.bytes_sent, metrics.bytes_recv
+        );
+    }
 
     if rep3 != plain {
         eyre::bail!("rep3 and plain witnesses disagree - this is a bug, not a configuration issue");
     }
-    println!("\nwitnesses agree: the rep3 driver reconstructs exactly what the plain one computes.");
+    println!(
+        "\nwitnesses agree: the rep3 driver reconstructs exactly what the plain one computes."
+    );
 
     if let Some((vk, proof, public)) = proof {
         Groth16::<Bn254>::verify(&vk, &proof, &public[1..]).unwrap_or_else(|e| {
@@ -202,7 +250,8 @@ fn main() -> eyre::Result<()> {
 }
 
 /// Three real parties, each with its own connection and correlated randomness. Returns the
-/// reconstructed witness, party 0's measured round count, its sent/received byte totals (summed
+/// reconstructed witness, all parties' preprocessing/online round counts and combined
+/// witness-extension byte totals (`Rep3State::new` setup excluded; each party's bytes are summed
 /// across its two peer connections - see `vm::counting_net`), and, if a zkey was given, party 0's
 /// verifying key/proof/public-inputs.
 fn run_rep3(
@@ -211,10 +260,12 @@ fn run_rep3(
     zkey: Option<&(ConstraintMatrices<Fr>, ProvingKey<Bn254>)>,
 ) -> (
     Vec<Fr>,
-    usize,
-    usize,
-    usize,
-    Option<(co_groth16::VerifyingKey<Bn254>, co_groth16::Proof<Bn254>, Vec<Fr>)>,
+    [PartyMetrics; 3],
+    Option<(
+        co_groth16::VerifyingKey<Bn254>,
+        co_groth16::Proof<Bn254>,
+        Vec<Fr>,
+    )>,
 ) {
     let mut rng = thread_rng();
     let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
@@ -232,9 +283,7 @@ fn run_rep3(
 
     let results: Vec<(
         Vec<Rep3PrimeFieldShare<Fr>>,
-        usize,
-        usize,
-        usize,
+        PartyMetrics,
         Option<(co_groth16::Proof<Bn254>, Vec<Fr>)>,
     )> = std::thread::scope(|scope| {
         let mut proving0 = proving_nets0.map(|n| n.into_iter());
@@ -250,8 +299,15 @@ fn run_rep3(
                 scope.spawn(move || {
                     let net = CountingNet::new(net);
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let (setup_sent, setup_recv) = net
+                        .get_connection_stats()
+                        .iter()
+                        .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
                     net.reset();
-                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    let mut driver =
+                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let preprocessing_rounds = net.rounds();
+                    net.reset();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];
@@ -259,12 +315,14 @@ fn run_rep3(
                         s
                     });
                     let witness = Machine::run(program, &mut driver, &inputs).unwrap();
-                    let witness_rounds = net.rounds();
+                    let online_rounds = net.rounds();
                     let full_witness = witness.clone();
-                    let (bytes_sent, bytes_recv) = net
+                    let (total_sent, total_recv) = net
                         .get_connection_stats()
                         .iter()
                         .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
+                    let bytes_sent = total_sent.saturating_sub(setup_sent);
+                    let bytes_recv = total_recv.saturating_sub(setup_recv);
 
                     let proof = zkey.map(|(matrices, pkey)| {
                         let n_pub = matrices.num_instance_variables;
@@ -285,7 +343,16 @@ fn run_rep3(
                         (proof, public_inputs)
                     });
 
-                    (full_witness, witness_rounds, bytes_sent, bytes_recv, proof)
+                    (
+                        full_witness,
+                        PartyMetrics {
+                            preprocessing_rounds,
+                            online_rounds,
+                            bytes_sent,
+                            bytes_recv,
+                        },
+                        proof,
+                    )
                 })
             })
             .collect::<Vec<_>>()
@@ -294,11 +361,9 @@ fn run_rep3(
             .collect()
     });
 
-    let [(w0, rounds, bytes_sent, bytes_recv, proof0), (w1, ..), (w2, ..)]: [(
+    let [(w0, metrics0, proof0), (w1, metrics1, _), (w2, metrics2, _)]: [(
         Vec<Rep3PrimeFieldShare<Fr>>,
-        usize,
-        usize,
-        usize,
+        PartyMetrics,
         Option<(co_groth16::Proof<Bn254>, Vec<Fr>)>,
     ); 3] = results.try_into().unwrap();
 
@@ -309,9 +374,7 @@ fn run_rep3(
 
     (
         combine_field_elements(&w0, &w1, &w2),
-        rounds,
-        bytes_sent,
-        bytes_recv,
+        [metrics0, metrics1, metrics2],
         proof,
     )
 }

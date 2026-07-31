@@ -15,8 +15,8 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crate::ir::PrecomputeKind;
 
 use super::program::{
-    Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
-    SlotCounts, StoreEntry,
+    Bank, BatchKind, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, ResultTarget,
+    RoundEntry, SiteInput, SlotCounts, WitnessSource,
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
@@ -27,9 +27,11 @@ const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// per site's full reserved capacity to one entry per *requested* (witness-live) slot - a
 /// version-4 reader has no way to tell the two shapes apart from length alone, so accepting it
 /// under version 5's semantics would silently scatter a batch's results into the wrong slots.
-/// `Machine::run` deliberately has no compatibility shim: accepting either older layout could
-/// produce a plausible-looking wrong witness.
-const VERSION: u32 = 5;
+/// Version 6 adds VM-only [`BatchKind`] services, banked [`ResultTarget`]s, and witness-ordered
+/// [`WitnessSource`] entries in place of the runtime-sized signal store/projection tables.
+/// `Machine::run` deliberately has no compatibility shim: accepting an older layout could produce
+/// a plausible-looking wrong witness.
+const VERSION: u32 = 6;
 
 impl Opcode {
     fn to_u8(self) -> u8 {
@@ -97,7 +99,9 @@ fn write_u32_vec<W: Write>(w: &mut W, values: &[u32]) -> eyre::Result<()> {
 
 fn read_u32_vec<R: Read>(r: &mut R) -> eyre::Result<Vec<u32>> {
     let len = r.read_u64::<LittleEndian>()?;
-    (0..len).map(|_| Ok(r.read_u32::<LittleEndian>()?)).collect()
+    (0..len)
+        .map(|_| Ok(r.read_u32::<LittleEndian>()?))
+        .collect()
 }
 
 impl PrecomputeKind {
@@ -141,9 +145,31 @@ impl PrecomputeKind {
     }
 }
 
+impl BatchKind {
+    fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
+        match self {
+            BatchKind::Precompute(kind) => {
+                w.write_u8(0)?;
+                kind.write(w)?;
+            }
+            BatchKind::IsZeroReveal => w.write_u8(1)?,
+        }
+        Ok(())
+    }
+
+    fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
+        Ok(match r.read_u8()? {
+            0 => BatchKind::Precompute(PrecomputeKind::read(r)?),
+            1 => BatchKind::IsZeroReveal,
+            other => eyre::bail!("unknown BatchKind tag {other}"),
+        })
+    }
+}
+
 impl<F: PrimeField> Program<F> {
     /// Serializes this program. See the module doc for the exact format.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
+        self.validate()?;
         w.write_all(MAGIC)?;
         w.write_u32::<LittleEndian>(VERSION)?;
 
@@ -188,8 +214,7 @@ impl<F: PrimeField> Program<F> {
         for batch in &self.precompute_batches {
             batch.kind.write(w)?;
             w.write_u64::<LittleEndian>(batch.sites as u64)?;
-            w.write_u8(batch.result_bank.to_u8())?;
-            // Banked, like `stores` - a site input may be a `Public` slot (a literal the circuit
+            // Banked, like a `WitnessSource::Slot` - a site input may be a `Public` slot (a literal the circuit
             // passed to the gadget), not only a share. See `SiteInput`.
             w.write_u64::<LittleEndian>(batch.input_slots.len() as u64)?;
             for input in &batch.input_slots {
@@ -198,24 +223,31 @@ impl<F: PrimeField> Program<F> {
             }
             write_u32_vec(w, &batch.result_requests)?;
             write_u32_vec(w, &batch.result_offsets)?;
-            write_u32_vec(w, &batch.result_slots)?;
+            w.write_u64::<LittleEndian>(batch.result_targets.len() as u64)?;
+            for target in &batch.result_targets {
+                w.write_u8(target.bank.to_u8())?;
+                w.write_u32::<LittleEndian>(target.slot)?;
+            }
         }
 
-        w.write_u64::<LittleEndian>(self.stores.len() as u64)?;
-        for store in &self.stores {
-            w.write_u8(store.bank.to_u8())?;
-            w.write_u32::<LittleEndian>(store.slot)?;
-            w.write_u32::<LittleEndian>(store.signal)?;
-        }
-
-        w.write_u64::<LittleEndian>(self.signal_to_witness.len() as u64)?;
-        for &idx in &self.signal_to_witness {
-            w.write_u64::<LittleEndian>(idx as u64)?;
+        w.write_u64::<LittleEndian>(self.witness_sources.len() as u64)?;
+        for source in &self.witness_sources {
+            match *source {
+                WitnessSource::One => w.write_u8(0)?,
+                WitnessSource::Zero => w.write_u8(3)?,
+                WitnessSource::Input(input) => {
+                    w.write_u8(1)?;
+                    w.write_u32::<LittleEndian>(input)?;
+                }
+                WitnessSource::Slot { bank, slot } => {
+                    w.write_u8(2)?;
+                    w.write_u8(bank.to_u8())?;
+                    w.write_u32::<LittleEndian>(slot)?;
+                }
+            }
         }
 
         w.write_u64::<LittleEndian>(self.num_inputs as u64)?;
-        w.write_u64::<LittleEndian>(self.num_outputs as u64)?;
-        w.write_u64::<LittleEndian>(self.num_signals as u64)?;
 
         w.write_u32::<LittleEndian>(self.slots.public)?;
         w.write_u32::<LittleEndian>(self.slots.shared)?;
@@ -228,9 +260,15 @@ impl<F: PrimeField> Program<F> {
     pub fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
-        eyre::ensure!(&magic == MAGIC, "not a circom-mpc-compiler program (bad magic)");
+        eyre::ensure!(
+            &magic == MAGIC,
+            "not a circom-mpc-compiler program (bad magic)"
+        );
         let version = r.read_u32::<LittleEndian>()?;
-        eyre::ensure!(version == VERSION, "unsupported program format version {version}");
+        eyre::ensure!(
+            version == VERSION,
+            "unsupported program format version {version}"
+        );
 
         let instr_count = r.read_u64::<LittleEndian>()?;
         let mut instructions = Vec::with_capacity(instr_count as usize);
@@ -287,71 +325,85 @@ impl<F: PrimeField> Program<F> {
         let batch_count = r.read_u64::<LittleEndian>()?;
         let mut batches = Vec::with_capacity(batch_count as usize);
         for _ in 0..batch_count {
-            let kind = PrecomputeKind::read(r)?;
+            let kind = BatchKind::read(r)?;
             let sites = r.read_u64::<LittleEndian>()? as usize;
-            let result_bank = Bank::from_u8(r.read_u8()?)?;
-            eyre::ensure!(
-                result_bank != Bank::Local,
-                "precompute batch result bank cannot be Local"
-            );
+            eyre::ensure!(sites > 0, "precompute batch has no sites");
             let input_count = r.read_u64::<LittleEndian>()?;
             let mut input_slots = Vec::with_capacity(input_count as usize);
             for _ in 0..input_count {
                 let bank = Bank::from_u8(r.read_u8()?)?;
+                eyre::ensure!(bank != Bank::Local, "precompute input bank cannot be Local");
                 let slot = r.read_u32::<LittleEndian>()?;
                 input_slots.push(SiteInput { bank, slot });
             }
             let result_requests = read_u32_vec(r)?;
             let result_offsets = read_u32_vec(r)?;
-            let result_slots = read_u32_vec(r)?;
+            let target_count = r.read_u64::<LittleEndian>()?;
+            let mut result_targets = Vec::with_capacity(target_count as usize);
+            for _ in 0..target_count {
+                let bank = Bank::from_u8(r.read_u8()?)?;
+                eyre::ensure!(bank != Bank::Local, "precompute result bank cannot be Local");
+                let slot = r.read_u32::<LittleEndian>()?;
+                result_targets.push(ResultTarget { bank, slot });
+            }
+            let expected_offsets = sites
+                .checked_add(1)
+                .ok_or_else(|| eyre::eyre!("precompute batch site count overflows"))?;
             eyre::ensure!(
-                result_offsets.len() == sites + 1,
+                result_offsets.len() == expected_offsets,
                 "precompute batch result_offsets has {} entries, expected sites + 1 = {}",
                 result_offsets.len(),
-                sites + 1
+                expected_offsets
             );
             eyre::ensure!(
-                result_requests.len() == result_slots.len(),
-                "precompute batch result_requests ({}) and result_slots ({}) must have the same \
+                result_requests.len() == result_targets.len(),
+                "precompute batch result_requests ({}) and result_targets ({}) must have the same \
                  length - one destination per requested slot",
                 result_requests.len(),
-                result_slots.len()
+                result_targets.len()
+            );
+            eyre::ensure!(
+                result_offsets.first() == Some(&0)
+                    && result_offsets.last().copied() == Some(result_requests.len() as u32)
+                    && result_offsets.windows(2).all(|w| w[0] <= w[1]),
+                "precompute batch has invalid CSR result offsets"
             );
             batches.push(PrecomputeBatch {
                 kind,
                 sites,
-                result_bank,
                 input_slots,
                 result_requests,
                 result_offsets,
-                result_slots,
+                result_targets,
             });
         }
 
-        let store_count = r.read_u64::<LittleEndian>()?;
-        let mut stores = Vec::with_capacity(store_count as usize);
-        for _ in 0..store_count {
-            let bank = Bank::from_u8(r.read_u8()?)?;
-            let slot = r.read_u32::<LittleEndian>()?;
-            let signal = r.read_u32::<LittleEndian>()?;
-            stores.push(StoreEntry { bank, slot, signal });
-        }
-
         let witness_count = r.read_u64::<LittleEndian>()?;
-        let mut signal_to_witness = Vec::with_capacity(witness_count as usize);
+        let mut witness_sources = Vec::with_capacity(witness_count as usize);
         for _ in 0..witness_count {
-            signal_to_witness.push(r.read_u64::<LittleEndian>()? as usize);
+            let source = match r.read_u8()? {
+                0 => WitnessSource::One,
+                1 => WitnessSource::Input(r.read_u32::<LittleEndian>()?),
+                2 => WitnessSource::Slot {
+                    bank: Bank::from_u8(r.read_u8()?)?,
+                    slot: r.read_u32::<LittleEndian>()?,
+                },
+                3 => WitnessSource::Zero,
+                other => eyre::bail!("unknown WitnessSource tag {other}"),
+            };
+            if let WitnessSource::Slot { bank, .. } = source {
+                eyre::ensure!(bank != Bank::Local, "witness source bank cannot be Local");
+            }
+            witness_sources.push(source);
         }
 
         let num_inputs = r.read_u64::<LittleEndian>()? as usize;
-        let num_outputs = r.read_u64::<LittleEndian>()? as usize;
-        let num_signals = r.read_u64::<LittleEndian>()? as usize;
 
         let public = r.read_u32::<LittleEndian>()?;
         let shared = r.read_u32::<LittleEndian>()?;
         let local = r.read_u32::<LittleEndian>()?;
 
-        Ok(Program {
+        let program = Program {
             instructions,
             constants,
             input_domains,
@@ -360,17 +412,16 @@ impl<F: PrimeField> Program<F> {
             round_operands,
             round_results,
             precompute_batches: batches,
-            stores,
-            signal_to_witness,
+            witness_sources,
             num_inputs,
-            num_outputs,
-            num_signals,
             slots: SlotCounts {
                 public,
                 shared,
                 local,
             },
-        })
+        };
+        program.validate()?;
+        Ok(program)
     }
 }
 
@@ -382,13 +433,13 @@ mod tests {
     use crate::vm::Machine;
     use crate::{CoCircomCompiler, CompilerConfig};
 
-    /// Compiles a circuit with both a genuine MPC round (multiplier2's `out <== a*b` is secret x
-    /// secret) and a precomputation site, so the round-trip covers every table in `Program`, not
-    /// just the instruction stream.
+    /// Compiles one fixture through the public path used by serialized programs.
     fn program(circuit: &str) -> super::Program<Fr> {
         let root = env!("CARGO_MANIFEST_DIR");
         let mut config = CompilerConfig::default();
-        config.link_library.push(format!("{root}/circuits/libs/").into());
+        config
+            .link_library
+            .push(format!("{root}/circuits/libs/").into());
         CoCircomCompiler::<Bn254>::compile(format!("{root}/circuits/{circuit}.circom"), config)
             .unwrap()
     }
@@ -402,6 +453,18 @@ mod tests {
     #[test]
     fn round_trips_a_program_with_a_round_byte_identically() {
         let original = program("multiplier2");
+        assert_eq!(
+            original.witness_sources.first(),
+            Some(&super::WitnessSource::One)
+        );
+        assert!(original
+            .witness_sources
+            .iter()
+            .any(|source| matches!(source, super::WitnessSource::Input(_))));
+        assert!(original
+            .witness_sources
+            .iter()
+            .any(|source| matches!(source, super::WitnessSource::Slot { .. })));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
@@ -422,23 +485,85 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_a_public_precompute_batch() {
-        let original = program("precomputation_public_test");
-        assert!(
-            original
-                .precompute_batches
-                .iter()
-                .all(|batch| batch.result_bank == super::Bank::Public)
-        );
+    fn round_trips_an_unbound_zero_witness_source() {
+        let original = program("loop_unrolling");
+        assert!(original
+            .witness_sources
+            .iter()
+            .any(|source| *source == super::WitnessSource::Zero));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
-        assert!(
-            read_back
-                .precompute_batches
-                .iter()
-                .all(|batch| batch.result_bank == super::Bank::Public)
+        assert!(read_back
+            .witness_sources
+            .iter()
+            .any(|source| *source == super::WitnessSource::Zero));
+
+        let inputs: Vec<_> = (1..=original.num_inputs).map(|i| Fr::from(i as u64)).collect();
+        assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
+    }
+
+    #[test]
+    fn round_trips_a_fused_iszero_reveal_batch() {
+        let original = program("precomputation_iszero_reveal_test");
+        assert_eq!(original.precompute_batches.len(), 1);
+        assert_eq!(
+            original.precompute_batches[0].kind,
+            super::BatchKind::IsZeroReveal
         );
+        assert_eq!(original.precompute_batches[0].sites, 2);
+        let mut bytes = Vec::new();
+        original.write(&mut bytes).unwrap();
+        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+
+        assert_eq!(
+            read_back.precompute_batches[0].kind,
+            super::BatchKind::IsZeroReveal
+        );
+        assert_eq!(read_back.precompute_batches[0].sites, 2);
+        let inputs = [Fr::from(0u64), Fr::from(7u64)];
+        assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
+    }
+
+    #[test]
+    fn round_trips_a_fused_isequal_reveal_batch_without_changing_version_six() {
+        assert_eq!(super::VERSION, 6);
+        let original = program("precomputation_isequal_reveal_test");
+        assert_eq!(original.precompute_batches.len(), 1);
+        assert_eq!(
+            original.precompute_batches[0].kind,
+            super::BatchKind::IsZeroReveal
+        );
+        assert_eq!(original.precompute_batches[0].sites, 3);
+        let mut bytes = Vec::new();
+        original.write(&mut bytes).unwrap();
+        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+
+        assert_eq!(
+            read_back.precompute_batches[0].kind,
+            super::BatchKind::IsZeroReveal
+        );
+        assert_eq!(read_back.precompute_batches[0].sites, 3);
+        let inputs = [Fr::from(10u64), Fr::from(4u64), Fr::from(7u64)];
+        assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
+    }
+
+    #[test]
+    fn round_trips_a_public_precompute_batch() {
+        let original = program("precomputation_public_test");
+        assert!(original
+            .precompute_batches
+            .iter()
+            .flat_map(|batch| &batch.result_targets)
+            .all(|target| target.bank == super::Bank::Public));
+        let mut bytes = Vec::new();
+        original.write(&mut bytes).unwrap();
+        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        assert!(read_back
+            .precompute_batches
+            .iter()
+            .flat_map(|batch| &batch.result_targets)
+            .all(|target| target.bank == super::Bank::Public));
         let inputs = [Fr::from(0u64), Fr::from(9u64)];
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
     }
@@ -476,5 +601,26 @@ mod tests {
     fn read_rejects_bad_magic() {
         let err = super::Program::<Fr>::read(&mut [0u8; 16].as_slice()).unwrap_err();
         assert!(err.to_string().contains("bad magic"), "{err}");
+    }
+
+    #[test]
+    fn validation_rejects_out_of_range_witness_and_batch_targets() {
+        let mut invalid_witness = program("multiplier2");
+        invalid_witness.witness_sources[1] = super::WitnessSource::Slot {
+            bank: super::Bank::Shared,
+            slot: invalid_witness.slots.shared,
+        };
+        assert!(invalid_witness.validate().is_err());
+        assert!(invalid_witness.write(&mut Vec::new()).is_err());
+
+        let mut invalid_batch = program("precomputation_iszero_test");
+        invalid_batch.precompute_batches[0].result_targets[0].slot =
+            invalid_batch.slots.shared;
+        assert!(invalid_batch.validate().is_err());
+
+        let mut invalid_poseidon = program("precomputation_poseidon2_test");
+        invalid_poseidon.precompute_batches[0].kind =
+            super::BatchKind::Precompute(crate::ir::PrecomputeKind::Poseidon2 { t: 5 });
+        assert!(invalid_poseidon.validate().is_err());
     }
 }

@@ -45,7 +45,11 @@ const CT_BITS_MINUS_ONE: [bool; 254] = [
 
 /// The 519-slot result trace for one `AliasCheck` site, given its 254 inputs (`in[0..254]`).
 pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
-    assert_eq!(input.len(), 254, "AliasCheck input must be 254 field elements");
+    assert_eq!(
+        input.len(),
+        254,
+        "AliasCheck input must be 254 field elements"
+    );
     let ct_bits = &CT_BITS_MINUS_ONE;
 
     let mut b = F::from(u128::MAX);
@@ -95,14 +99,14 @@ pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
 /// round cost.
 ///
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
-/// The bit decomposition (`a2y2b_many` then `bit_inject_many`) is batched the same way.
+/// The strategy-selected A2B conversion and `bit_inject_many` are batched the same way.
 #[cfg(feature = "rep3")]
 pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
-    use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, arithmetic, conversion};
+    use mpc_core::protocols::rep3::{arithmetic, conversion, Rep3PrimeFieldShare};
     use num_bigint::BigUint;
     use num_traits::One;
 
@@ -173,7 +177,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     }
 
     // One a2b across every site's sum, then one combined bit-injection.
-    let a2b = conversion::a2y2b_many(&sums, net, state)?;
+    let a2b = super::a2b_many_selector(&sums, net, state)?;
     let mut all_bit_shares = Vec::with_capacity(sites * 135);
     for a_bits in &a2b {
         all_bit_shares.extend((0..135).map(|i| (a_bits >> i) & BigUint::one()));
@@ -200,9 +204,10 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 #[cfg(all(test, feature = "rep3"))]
 mod tests {
     use ark_bn254::Fr;
+    use mpc_core::protocols::rep3::conversion::A2BType;
 
     use super::*;
-    use crate::vm::gadgets::test_support::run3;
+    use crate::vm::gadgets::test_support::run3_with_a2b;
 
     #[test]
     fn rep3_agrees_with_plain_across_two_sites() {
@@ -215,32 +220,52 @@ mod tests {
             expected.extend(plain_trace(site));
         }
 
-        let got = run3(&input, |net, state, shares| rep3_trace(shares, net, state));
-        assert_eq!(got, expected);
+        for strategy in [A2BType::Yao, A2BType::Direct] {
+            let got = run3_with_a2b(&input, strategy, |net, state, shares| {
+                rep3_trace(shares, net, state)
+            });
+            assert_eq!(got, expected, "strategy={strategy:?}");
+        }
     }
 
-    /// Pins the round count: one batched 127-way `mul_vec`, one `a2y2b_many` across the whole
-    /// batch, then one `bit_inject_many` - independent of site count. The exact number inherits
-    /// `a2y2b_many`'s own (a garbled-circuit conversion, not pinned here), but it must not scale
-    /// with the number of sites.
+    /// Pins the round count: one batched 127-way `mul_vec`, one strategy-selected A2B across the
+    /// whole batch, then one `bit_inject_many` - independent of site count.
     #[cfg(feature = "round-counting")]
     #[test]
     fn rep3_cost_is_independent_of_site_count() {
-        use crate::vm::gadgets::test_support::run3_counted;
+        use crate::vm::gadgets::test_support::run3_counted_with_a2b;
 
         let input_for = |sites: usize| -> Vec<Fr> {
             let mut input = Vec::new();
             for i in 0..sites {
-                input.extend(super::num2bits::plain_trace(Fr::from(123_456_789u64 + i as u64), 254));
+                input.extend(super::num2bits::plain_trace(
+                    Fr::from(123_456_789u64 + i as u64),
+                    254,
+                ));
             }
             input
         };
 
-        let (_, rounds_one) =
-            run3_counted(&input_for(1), |net, state, shares| rep3_trace(shares, net, state));
-        let (_, rounds_two) =
-            run3_counted(&input_for(2), |net, state, shares| rep3_trace(shares, net, state));
+        let mut max_by_strategy = Vec::new();
+        for strategy in [A2BType::Yao, A2BType::Direct] {
+            let (_, rounds_one) =
+                run3_counted_with_a2b(&input_for(1), strategy, |net, state, shares| {
+                    rep3_trace(shares, net, state)
+                });
+            let (_, rounds_two) =
+                run3_counted_with_a2b(&input_for(2), strategy, |net, state, shares| {
+                    rep3_trace(shares, net, state)
+                });
 
-        assert_eq!(rounds_one, rounds_two, "round count must not scale with site count");
+            assert_eq!(
+                rounds_one.by_party, rounds_two.by_party,
+                "strategy={strategy:?}"
+            );
+            max_by_strategy.push(rounds_one.max());
+        }
+        assert!(
+            max_by_strategy[0] < max_by_strategy[1],
+            "Yao must remain the lower-round A2B strategy"
+        );
     }
 }
