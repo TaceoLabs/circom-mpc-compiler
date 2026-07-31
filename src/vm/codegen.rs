@@ -11,9 +11,10 @@ use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
 use crate::passes::mpc::domain::{compute_domains, signal_domain, Domain};
 use crate::passes::mpc::precompute_schedule::plan_precompute_batches;
 
+use super::gadgets;
 use super::program::{
     Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
-    SlotCounts, StoreEntry,
+    SlotCounts, WitnessSource,
 };
 
 /// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a
@@ -572,23 +573,55 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         })
         .collect();
 
-    // --- Stores: every circuit output/signal, read back once the stream (and precompute phase)
-    // have both run.
-    let mut stores = Vec::with_capacity(graph.outputs().len());
-    for &(signal, value) in graph.outputs() {
-        let s = slot[value.index()].expect("output value not yet resolved");
-        if s.bank == Bank::Local {
-            eyre::bail!(
-                "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
-                 reshared (Op::Round) first; this is a lowering invariant violation"
-            );
+    // This program's entire offline s-box preprocessing budget - see `Program::sbox_randomness`.
+    // Only a genuinely `Shared` `Poseidon2` batch calls the rep3 gadget at all; a `Public` one runs
+    // the deterministic plain trace, which has no correlated randomness to prepare.
+    let sbox_randomness: u64 = batches
+        .iter()
+        .filter(|batch| batch.result_bank == Bank::Shared)
+        .filter_map(|batch| match batch.kind {
+            PrecomputeKind::Poseidon2 { t } => {
+                Some(gadgets::poseidon2::sbox_randomness_budget(t, batch.sites))
+            }
+            _ => None,
+        })
+        .sum();
+
+    // --- Witness sources: a compile-time signal -> source table, immediately projected into
+    // witness order - so the oversized (`num_signals`-wide) table exists only here, never at
+    // runtime. Hand-built graphs (pass/codegen unit tests) leave `signal_to_witness` empty and get
+    // an empty `witness_sources` back, the same "no projection to build" convention
+    // `passes::dead_signals` already uses.
+    let witness_sources = if graph.signal_to_witness.is_empty() {
+        Vec::new()
+    } else {
+        let mut signal_sources: Vec<Option<WitnessSource>> = vec![None; graph.num_signals];
+        signal_sources[0] = Some(WitnessSource::One);
+        for &(signal, value) in graph.outputs() {
+            let s = slot[value.index()].expect("output value not yet resolved");
+            if s.bank == Bank::Local {
+                eyre::bail!(
+                    "codegen: a Local (MulLocal) value reached a circuit output directly - it must \
+                     be reshared (Op::Round) first; this is a lowering invariant violation"
+                );
+            }
+            signal_sources[signal.index() + 1] =
+                Some(WitnessSource::Slot { bank: s.bank, slot: s.index });
         }
-        stores.push(StoreEntry {
-            bank: s.bank,
-            slot: s.index,
-            signal: signal.index() as u32,
-        });
-    }
+        // Main's own circuit inputs are never `graph.outputs()` entries (only a *nested*
+        // subcomponent's own input signal is - see `docs/ARCHITECTURE.md`, "Precomputation"), so
+        // they'd otherwise never reach this table at all.
+        for input_index in 0..graph.num_inputs {
+            let signal = graph.num_outputs + input_index;
+            signal_sources[signal + 1] =
+                Some(WitnessSource::Input(input_index as u32));
+        }
+        graph
+            .signal_to_witness
+            .iter()
+            .map(|&idx| signal_sources[idx].unwrap_or(WitnessSource::Zero))
+            .collect()
+    };
 
     Ok(Program {
         instructions,
@@ -599,11 +632,9 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         round_operands,
         round_results,
         precompute_batches: batches,
-        stores,
-        signal_to_witness: graph.signal_to_witness.clone(),
+        sbox_randomness,
+        witness_sources,
         num_inputs: graph.num_inputs,
-        num_outputs: graph.num_outputs,
-        num_signals: graph.num_signals,
         slots: SlotCounts {
             public: p_alloc.next,
             shared: s_alloc.next,

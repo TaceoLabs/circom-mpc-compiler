@@ -135,6 +135,7 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                     let mut driver = Rep3Driver::new(&net, &mut state);
+                    driver.preprocess(program.sbox_randomness).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];
@@ -162,7 +163,7 @@ fn witness_extension_agrees(main: &str, scenario: &str) {
     let plain = plain_witness(program, &values);
     assert_eq!(
         plain.len(),
-        program.signal_to_witness.len(),
+        program.witness_sources.len(),
         "{main}/{scenario}: witness length"
     );
 
@@ -213,6 +214,76 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
             "{main}: {sites} sites collapsed into only {shared_batches} MPC-driver batches - \
              batching regressed"
         );
+    }
+}
+
+/// Runs `values` through real 3-party rep3 exactly like [`run_rep3`], but over a `CountingNet`, so
+/// the *maximum* over all three parties' measured round counts can be asserted - the same
+/// discipline `examples/merces.rs` uses, and the correct one: an asymmetric protocol (e.g. a
+/// garbled-circuit A2B, which this program's `IsZero`/`Num2Bits`/`AliasCheck` batches use) can have
+/// parties finish in different round counts, and the critical path is whichever party is slowest,
+/// not party 0 specifically. `Rep3Driver::preprocess` runs (spending the s-box budget's 3 rounds)
+/// before the counter is reset, so setup - PRF handshake and preprocessing alike - never lands in
+/// the count, only `Machine::run`'s own cost does.
+#[cfg(feature = "round-counting")]
+fn measured_rounds(program: &Program<Fr>, values: &[Fr]) -> usize {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+
+    let mut rng = thread_rng();
+    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
+        .input_domains
+        .iter()
+        .zip(values)
+        .filter(|(bank, _)| matches!(bank, Bank::Shared))
+        .map(|(_, &v)| share_field_element(v, &mut rng))
+        .collect();
+
+    let networks = LocalNetwork::new(3);
+    let rounds: Vec<usize> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let secret_shares = &secret_shares;
+                scope.spawn(move || {
+                    let net = CountingNet::new(net);
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let mut driver = Rep3Driver::new(&net, &mut state);
+                    driver.preprocess(program.sbox_randomness).unwrap();
+                    net.reset();
+                    let mut next = 0;
+                    let inputs = program.classify_inputs(values, |_v| {
+                        let s = secret_shares[next][party];
+                        next += 1;
+                        s
+                    });
+                    Machine::run(program, &mut driver, &inputs).unwrap();
+                    net.rounds()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+    rounds.into_iter().max().expect("3 parties")
+}
+
+/// Pins the whole-circuit measured round count `docs/ARCHITECTURE.md` documents for both mains -
+/// the all-party maximum, since an asymmetric protocol (the Yao A2B `iszero`/`num2bits`/
+/// `aliascheck` all use) can have parties finish in different round counts. Both mains measure
+/// identically - "round-count-flat in transaction count" - so one constant covers both; any
+/// scenario works, since the claim is about circuit shape, not values.
+#[cfg(feature = "round-counting")]
+#[test]
+fn measured_round_count_is_seventy_two_for_both_mains() {
+    for (main, scenario) in [
+        ("transfer_arity4_batch1", "deposit"),
+        ("transfer_arity4_batch8", "full_batch"),
+    ] {
+        let (program, _) = compiled(main);
+        let values = scenario_values(main, scenario);
+        assert_eq!(measured_rounds(program, &values), 72, "{main}");
     }
 }
 
@@ -292,7 +363,7 @@ fn proves_and_verifies(main: &str, scenario: &str) {
         .and_then(|s| s.values(input_list))
         .unwrap_or_else(|e| panic!("{main}/{scenario}: {e}"));
     assert_eq!(
-        program.signal_to_witness.len(),
+        program.witness_sources.len(),
         matrices.num_instance_variables + matrices.num_witness_variables,
         "{main}: this compiler's witness length disagrees with the zkey's - they were not built \
          from the same compilation"
@@ -326,6 +397,7 @@ fn proves_and_verifies(main: &str, scenario: &str) {
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&ext_net, A2BType::default()).unwrap();
                     let mut driver = Rep3Driver::new(&ext_net, &mut state);
+                    driver.preprocess(program.sbox_randomness).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];

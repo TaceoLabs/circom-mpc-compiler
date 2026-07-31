@@ -1,8 +1,10 @@
 //! Runs rep3 witness extension over a genuine TLS network - one process per party, started
 //! separately (potentially on different machines). Unlike `examples/merces.rs`, which runs all
 //! three parties in one process over an in-process `LocalNetwork`, this binary is the tool for
-//! measuring real network behavior: connection and correlated-randomness setup happen once and are
-//! excluded from every timed run, so `--runs` reports witness-extension time alone.
+//! measuring real network behavior: connection and rep3 PRF setup happen once and are excluded from
+//! every timed run. `SboxPool` preprocessing, by contrast, is spent fresh before each run (its
+//! budget is sized for exactly one `Machine::run` and never rewinds), but still lands outside that
+//! run's timed region, so `--runs` reports witness-extension time alone either way.
 //!
 //! Sweeps a set of batch sizes (`--batches`, default `1,8,16,32`) in one process, so the network
 //! and rep3 randomness setup is paid once for the whole sweep rather than once per size. Inputs are
@@ -273,6 +275,13 @@ fn bench_batch(
         s
     });
 
+    // Built once and reused across every run below (`Rep3Driver`'s own doc: a caller can reuse the
+    // same connection/rep3 state across several `Machine::run` calls without re-running the PRF
+    // setup). The `SboxPool` it holds is a different story - it's sized for exactly one
+    // `Machine::run` and its consumption cursor never rewinds, so each run below preprocesses its
+    // own pool from scratch.
+    let mut driver = Rep3Driver::new(net, state);
+
     // A representative single run's rounds/bytes for the summary table - reported alongside every
     // run's own line below, and not summed across `runs` since they don't vary run to run.
     let mut last_rounds = 0;
@@ -281,11 +290,14 @@ fn bench_batch(
 
     let mut wall_times = Vec::with_capacity(runs);
     for i in 0..runs {
+        // A fresh pool per run: spent here, ahead of the barrier and both snapshots below, so its
+        // 3 rounds land only in the cumulative counters, never in this run's timing or its
+        // rounds/bytes delta - the same discipline the one-time setup above already follows.
+        driver.preprocess(program.sbox_randomness)?;
         barrier(net)?;
         let stats_before = net.get_connection_stats();
         let rounds_before = net.rounds();
         let t = Instant::now();
-        let mut driver = Rep3Driver::new(net, state);
         Machine::run(&program, &mut driver, &inputs)?;
         let elapsed = t.elapsed();
         net.flush()?;

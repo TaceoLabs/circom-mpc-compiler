@@ -16,7 +16,7 @@ use crate::ir::PrecomputeKind;
 
 use super::program::{
     Bank, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, RoundEntry, SiteInput,
-    SlotCounts, StoreEntry,
+    SlotCounts, WitnessSource,
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
@@ -27,9 +27,16 @@ const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// per site's full reserved capacity to one entry per *requested* (witness-live) slot - a
 /// version-4 reader has no way to tell the two shapes apart from length alone, so accepting it
 /// under version 5's semantics would silently scatter a batch's results into the wrong slots.
-/// `Machine::run` deliberately has no compatibility shim: accepting either older layout could
-/// produce a plausible-looking wrong witness.
-const VERSION: u32 = 5;
+/// Version 6 adds the `PrecomputeKind::IsZeroRevealed`/`IsEqualRevealed` tags (see
+/// `passes::mpc::declassify_zero_test`) and `Program::sbox_randomness` (see
+/// `vm::gadgets::poseidon2`'s offline s-box preprocessing). Version 7 replaces `stores` +
+/// `signal_to_witness` + `num_outputs` + `num_signals` with `witness_sources`, one entry per final
+/// witness position rather than a signal-indexed table plus a separate projection - a version-6
+/// reader has no signal-indexed layout to reconstruct this from, since the program no longer
+/// carries one.
+/// `Machine::run` deliberately has no compatibility shim: accepting an older layout under a newer
+/// version's semantics could produce a plausible-looking wrong witness.
+const VERSION: u32 = 7;
 
 impl Opcode {
     fn to_u8(self) -> u8 {
@@ -118,6 +125,8 @@ impl PrecomputeKind {
                 w.write_u8(5)?;
                 w.write_u32::<LittleEndian>(*n as u32)?;
             }
+            PrecomputeKind::IsZeroRevealed => w.write_u8(6)?,
+            PrecomputeKind::IsEqualRevealed => w.write_u8(7)?,
         }
         Ok(())
     }
@@ -136,7 +145,42 @@ impl PrecomputeKind {
             5 => PrecomputeKind::Reveal {
                 n: r.read_u32::<LittleEndian>()? as usize,
             },
+            6 => PrecomputeKind::IsZeroRevealed,
+            7 => PrecomputeKind::IsEqualRevealed,
             other => eyre::bail!("unknown PrecomputeKind tag {other}"),
+        })
+    }
+}
+
+impl WitnessSource {
+    fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
+        match *self {
+            WitnessSource::One => w.write_u8(0)?,
+            WitnessSource::Zero => w.write_u8(1)?,
+            WitnessSource::Input(i) => {
+                w.write_u8(2)?;
+                w.write_u32::<LittleEndian>(i)?;
+            }
+            WitnessSource::Slot { bank, slot } => {
+                w.write_u8(3)?;
+                w.write_u8(bank.to_u8())?;
+                w.write_u32::<LittleEndian>(slot)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
+        Ok(match r.read_u8()? {
+            0 => WitnessSource::One,
+            1 => WitnessSource::Zero,
+            2 => WitnessSource::Input(r.read_u32::<LittleEndian>()?),
+            3 => {
+                let bank = Bank::from_u8(r.read_u8()?)?;
+                let slot = r.read_u32::<LittleEndian>()?;
+                WitnessSource::Slot { bank, slot }
+            }
+            other => eyre::bail!("unknown WitnessSource tag {other}"),
         })
     }
 }
@@ -144,6 +188,8 @@ impl PrecomputeKind {
 impl<F: PrimeField> Program<F> {
     /// Serializes this program. See the module doc for the exact format.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
+        self.validate()?;
+
         w.write_all(MAGIC)?;
         w.write_u32::<LittleEndian>(VERSION)?;
 
@@ -201,21 +247,14 @@ impl<F: PrimeField> Program<F> {
             write_u32_vec(w, &batch.result_slots)?;
         }
 
-        w.write_u64::<LittleEndian>(self.stores.len() as u64)?;
-        for store in &self.stores {
-            w.write_u8(store.bank.to_u8())?;
-            w.write_u32::<LittleEndian>(store.slot)?;
-            w.write_u32::<LittleEndian>(store.signal)?;
-        }
+        w.write_u64::<LittleEndian>(self.sbox_randomness)?;
 
-        w.write_u64::<LittleEndian>(self.signal_to_witness.len() as u64)?;
-        for &idx in &self.signal_to_witness {
-            w.write_u64::<LittleEndian>(idx as u64)?;
+        w.write_u64::<LittleEndian>(self.witness_sources.len() as u64)?;
+        for source in &self.witness_sources {
+            source.write(w)?;
         }
 
         w.write_u64::<LittleEndian>(self.num_inputs as u64)?;
-        w.write_u64::<LittleEndian>(self.num_outputs as u64)?;
-        w.write_u64::<LittleEndian>(self.num_signals as u64)?;
 
         w.write_u32::<LittleEndian>(self.slots.public)?;
         w.write_u32::<LittleEndian>(self.slots.shared)?;
@@ -328,30 +367,21 @@ impl<F: PrimeField> Program<F> {
             });
         }
 
-        let store_count = r.read_u64::<LittleEndian>()?;
-        let mut stores = Vec::with_capacity(store_count as usize);
-        for _ in 0..store_count {
-            let bank = Bank::from_u8(r.read_u8()?)?;
-            let slot = r.read_u32::<LittleEndian>()?;
-            let signal = r.read_u32::<LittleEndian>()?;
-            stores.push(StoreEntry { bank, slot, signal });
-        }
+        let sbox_randomness = r.read_u64::<LittleEndian>()?;
 
         let witness_count = r.read_u64::<LittleEndian>()?;
-        let mut signal_to_witness = Vec::with_capacity(witness_count as usize);
+        let mut witness_sources = Vec::with_capacity(witness_count as usize);
         for _ in 0..witness_count {
-            signal_to_witness.push(r.read_u64::<LittleEndian>()? as usize);
+            witness_sources.push(WitnessSource::read(r)?);
         }
 
         let num_inputs = r.read_u64::<LittleEndian>()? as usize;
-        let num_outputs = r.read_u64::<LittleEndian>()? as usize;
-        let num_signals = r.read_u64::<LittleEndian>()? as usize;
 
         let public = r.read_u32::<LittleEndian>()?;
         let shared = r.read_u32::<LittleEndian>()?;
         let local = r.read_u32::<LittleEndian>()?;
 
-        Ok(Program {
+        let program = Program {
             instructions,
             constants,
             input_domains,
@@ -360,17 +390,17 @@ impl<F: PrimeField> Program<F> {
             round_operands,
             round_results,
             precompute_batches: batches,
-            stores,
-            signal_to_witness,
+            sbox_randomness,
+            witness_sources,
             num_inputs,
-            num_outputs,
-            num_signals,
             slots: SlotCounts {
                 public,
                 shared,
                 local,
             },
-        })
+        };
+        program.validate()?;
+        Ok(program)
     }
 }
 

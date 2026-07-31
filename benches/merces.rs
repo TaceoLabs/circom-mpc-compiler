@@ -121,6 +121,12 @@ fn run_rep3(
             .map(|(party, (net, state))| {
                 scope.spawn(move || {
                     let mut driver = Rep3Driver::new(net, state);
+                    // Conservative, not the deployment model this bench otherwise measures
+                    // (`networks`/`states` are built once, outside every timed run, above): a real
+                    // caller preprocesses once per connection, not once per `run_rep3` call, but
+                    // `Rep3Driver` (and its `SboxPool`) doesn't outlive one call here, so this pays
+                    // the offline 3 rounds on every iteration rather than amortizing them.
+                    driver.preprocess(program.sbox_randomness).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];

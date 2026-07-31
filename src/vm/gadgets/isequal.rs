@@ -71,6 +71,37 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     Ok(results)
 }
 
+/// The [`super::iszero::rep3_trace_revealed`] twin, for
+/// [`crate::ir::PrecomputeKind::IsEqualRevealed`] sites. The subtraction is still free, so this
+/// costs exactly what one revealed `IsZero` batch costs - one round, not `IsZero`'s normal 11.
+#[cfg(feature = "rep3")]
+pub fn rep3_trace_revealed<F: PrimeField, N: mpc_net::Network>(
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    net: &N,
+    state: &mut mpc_core::protocols::rep3::Rep3State,
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+    use mpc_core::protocols::rep3::arithmetic;
+
+    eyre::ensure!(
+        inputs.len().is_multiple_of(2),
+        "is_equal_traces: {} inputs is not a multiple of 2",
+        inputs.len()
+    );
+    let diffs: Vec<_> = inputs
+        .chunks_exact(2)
+        .map(|pair| arithmetic::sub(pair[1], pair[0]))
+        .collect();
+    let iszero = super::iszero::rep3_trace_revealed(&diffs, net, state)?;
+
+    let mut results = Vec::with_capacity(diffs.len() * RESULTS_PER_SITE);
+    for (site, diff) in diffs.into_iter().enumerate() {
+        let out = iszero[site * 2];
+        let inv = iszero[site * 2 + 1];
+        results.extend_from_slice(&[out, out, diff, inv]);
+    }
+    Ok(results)
+}
+
 #[cfg(all(test, feature = "rep3"))]
 mod tests {
     use ark_bn254::Fr;

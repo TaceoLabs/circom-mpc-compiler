@@ -71,11 +71,13 @@ pub(crate) mod test_support {
         run_networked(LocalNetwork::new(3), values, f).0
     }
 
-    /// [`run_networked`] over a [`CountingNet`]-wrapped `LocalNetwork`, additionally returning party
-    /// 0's measured round count for `f` alone - what the per-gadget round-count tests assert
-    /// against. The counter is reset right after `Rep3State::new`'s one-time correlated-randomness
-    /// setup (2 rounds, spent before `f` ever runs), so the count reflects the gadget, not the
-    /// harness.
+    /// [`run_networked`] over a [`CountingNet`]-wrapped `LocalNetwork`, additionally returning the
+    /// *maximum* of the three parties' measured round counts for `f` alone - the round-count tests'
+    /// asymmetric protocols (a garbled-circuit A2B has a distinguished garbler and evaluator) can
+    /// have parties finish in different round counts, and the critical path is whichever party is
+    /// slowest, not party 0 specifically. The counter is reset right after `Rep3State::new`'s
+    /// one-time correlated-randomness setup (2 rounds, spent before `f` ever runs), so the count
+    /// reflects the gadget, not the harness.
     #[cfg(feature = "round-counting")]
     pub(crate) fn run3_counted(
         values: &[Fr],
@@ -91,6 +93,7 @@ pub(crate) mod test_support {
             net.reset();
             f(net, state, shares)
         });
-        (result, networks[0].rounds())
+        let rounds = networks.iter().map(CountingNet::rounds).max().expect("3 parties");
+        (result, rounds)
     }
 }

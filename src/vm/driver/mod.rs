@@ -62,15 +62,55 @@ pub trait VmDriver<F: PrimeField> {
     /// order); returns `sites * (t + intermediates)` shares (each site's permuted state then its
     /// trace), matching `ir::PrecomputeKind::Poseidon2`'s result layout.
     fn poseidon2_traces(&mut self, t: usize, states: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
+    /// The sparse twin of [`Self::poseidon2_traces`]: `result_requests`/`result_offsets` are
+    /// `PrecomputeBatch::result_requests`/`result_offsets`' own CSR table (site-major, each row
+    /// strictly ascending), and the return value is exactly that requested subset, in the same
+    /// order - a caller that already has the CSR table on hand (`Machine::run_batch`) should prefer
+    /// this over `poseidon2_traces` + filtering. The default implementation *is* that filtering, so
+    /// a third-party `VmDriver` keeps compiling without implementing sparsity itself; the two
+    /// built-in drivers override it with a genuinely sparse gadget
+    /// (`vm::gadgets::poseidon2::{plain,rep3}_trace_requested`) that skips materializing the
+    /// witness-dead majority of a real batch's trace, rather than computing it and throwing it away.
+    fn poseidon2_requested_traces(
+        &mut self,
+        t: usize,
+        states: &[Self::Share],
+        result_requests: &[u32],
+        result_offsets: &[u32],
+    ) -> eyre::Result<Vec<Self::Share>> {
+        let sites = result_offsets.len().saturating_sub(1);
+        let full = self.poseidon2_traces(t, states)?;
+        eyre::ensure!(
+            sites > 0 && full.len().is_multiple_of(sites),
+            "poseidon2_requested_traces: {} full-trace values is not an even multiple of {sites} sites",
+            full.len()
+        );
+        let capacity = full.len() / sites;
+        let mut selected = Vec::with_capacity(result_requests.len());
+        for site in 0..sites {
+            let site_full = &full[site * capacity..(site + 1) * capacity];
+            let lo = result_offsets[site] as usize;
+            let hi = result_offsets[site + 1] as usize;
+            selected.extend(result_requests[lo..hi].iter().map(|&r| site_full[r as usize].clone()));
+        }
+        Ok(selected)
+    }
     /// `inputs` is one share per site; returns `sites * n` shares (bit decompositions, in order).
     fn num2bits_traces(&mut self, n: usize, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is one share per site; returns `sites * 2` shares (`is_zero`, then the masked-
     /// inverse helper, per site).
     fn is_zero_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
+    /// The 1-round twin of [`Self::is_zero_traces`], for `ir::PrecomputeKind::IsZeroRevealed` sites
+    /// - only ever chosen by `passes::mpc::declassify_zero_test`, and only when the site's `out` is
+    /// revealed immediately after. Same result shape as `is_zero_traces`; see
+    /// `vm::gadgets::iszero::rep3_trace_revealed` for the protocol and its leak argument.
+    fn is_zero_revealed_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is `sites * 2` shares (`[in[0], in[1]]` per site); returns `sites * 4` - see
     /// `ir::PrecomputeKind::IsEqual`. Delegates to `is_zero_traces` on the differences, so batching
     /// stays uniform across kinds rather than being special-cased in `Machine::run`.
     fn is_equal_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
+    /// The [`Self::is_zero_revealed_traces`] twin, for `ir::PrecomputeKind::IsEqualRevealed`.
+    fn is_equal_revealed_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
     /// `ir::PrecomputeKind::AliasCheck`'s doc for the exact layout.
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;

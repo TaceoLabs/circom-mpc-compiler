@@ -175,10 +175,11 @@ fn main() -> eyre::Result<()> {
     });
 
     let t = Instant::now();
-    let (rep3, measured_rounds, bytes_sent, bytes_recv, proof) = run_rep3(&program, &values, zkey.as_ref());
+    let (rep3, rounds_by_party, bytes_sent, bytes_recv, proof) = run_rep3(&program, &values, zkey.as_ref());
+    let measured_rounds = rounds_by_party.into_iter().max().expect("3 parties");
     println!("rep3:    {:.2?}  (3 parties over an in-process LocalNetwork)", t.elapsed());
     println!(
-        "  rounds={measured_rounds} measured  ({} reshare + {} gadget-internal)",
+        "  rounds={rounds_by_party:?} measured, {measured_rounds} max  ({} reshare + {} gadget-internal)",
         summary.rounds,
         measured_rounds.saturating_sub(summary.rounds),
     );
@@ -202,7 +203,9 @@ fn main() -> eyre::Result<()> {
 }
 
 /// Three real parties, each with its own connection and correlated randomness. Returns the
-/// reconstructed witness, party 0's measured round count, its sent/received byte totals (summed
+/// reconstructed witness, each party's own measured round count (an asymmetric protocol - e.g. a
+/// garbled-circuit A2B - can have parties finish in different round counts, so the critical path is
+/// the maximum over all three, not party 0's alone), party 0's sent/received byte totals (summed
 /// across its two peer connections - see `vm::counting_net`), and, if a zkey was given, party 0's
 /// verifying key/proof/public-inputs.
 fn run_rep3(
@@ -211,7 +214,7 @@ fn run_rep3(
     zkey: Option<&(ConstraintMatrices<Fr>, ProvingKey<Bn254>)>,
 ) -> (
     Vec<Fr>,
-    usize,
+    [usize; 3],
     usize,
     usize,
     Option<(co_groth16::VerifyingKey<Bn254>, co_groth16::Proof<Bn254>, Vec<Fr>)>,
@@ -250,8 +253,12 @@ fn run_rep3(
                 scope.spawn(move || {
                     let net = CountingNet::new(net);
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    net.reset();
                     let mut driver = Rep3Driver::new(&net, &mut state);
+                    // Spends the s-box preprocessing budget's 3 rounds here, before any input is
+                    // bound - resetting the counter only after this (not before) is what actually
+                    // measures those rounds as off the critical path, not merely moved around.
+                    driver.preprocess(program.sbox_randomness).unwrap();
+                    net.reset();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];
@@ -294,7 +301,7 @@ fn run_rep3(
             .collect()
     });
 
-    let [(w0, rounds, bytes_sent, bytes_recv, proof0), (w1, ..), (w2, ..)]: [(
+    let [(w0, rounds0, bytes_sent, bytes_recv, proof0), (w1, rounds1, ..), (w2, rounds2, ..)]: [(
         Vec<Rep3PrimeFieldShare<Fr>>,
         usize,
         usize,
@@ -309,7 +316,7 @@ fn run_rep3(
 
     (
         combine_field_elements(&w0, &w1, &w2),
-        rounds,
+        [rounds0, rounds1, rounds2],
         bytes_sent,
         bytes_recv,
         proof,

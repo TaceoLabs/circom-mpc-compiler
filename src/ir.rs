@@ -139,6 +139,17 @@ pub enum PrecomputeKind {
     /// exactly what circomlib's `IsEqual` does (`in[1] - in[0] ==> isz.in`), so the gadget is a thin
     /// wrapper over the `IsZero` one rather than a separate implementation.
     IsEqual,
+    /// The 1-round twin of [`Self::IsZero`]. Never produced by the frontend - only
+    /// `passes::mpc::declassify_zero_test` rewrites a site into this kind, and only when it finds
+    /// the site's `out` result fed directly into a [`Self::Reveal`] site. The cheap rep3 protocol
+    /// (`vm::gadgets::iszero::rep3_trace_revealed`, one `mul_open_vec`) leaks exactly the bit that
+    /// reveal already publishes to every party, and nothing else - see `docs/ARCHITECTURE.md`,
+    /// "Precomputation". Same trace shape as `IsZero` (`expected_results()` is still 2); only the
+    /// protocol differs.
+    IsZeroRevealed,
+    /// The [`Self::IsZeroRevealed`] twin of [`Self::IsEqual`], chosen by the same pass under the
+    /// same condition.
+    IsEqualRevealed,
     /// Proves a 254-bit decomposition is a canonical (non-aliased) representative.
     AliasCheck,
     /// Declassifies `n` values: opens them to every MPC party in the clear if they were `Shared`,
@@ -202,8 +213,9 @@ impl PrecomputeKind {
             }
             // n output bits, no intermediates.
             PrecomputeKind::Num2Bits { n } => Some(n),
-            // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
-            PrecomputeKind::IsZero => Some(2),
+            // 1 output (is_zero) + 1 intermediate (the masked-inverse helper). Same layout for the
+            // revealed variant - it's the same site, only the rep3 protocol computing it differs.
+            PrecomputeKind::IsZero | PrecomputeKind::IsZeroRevealed => Some(2),
             // circomlib's `IsEqual` is `[out][in[0], in[1]]` plus a whole `IsZero` subcomponent
             // (`[out][in][inv]`). Result slots skip the site's own inputs, so that's 1 output + 3
             // subtree signals: `[out, isz.out, isz.in, isz.inv]`. Cross-checked directly against
@@ -211,7 +223,7 @@ impl PrecomputeKind {
             //
             // `isz.in` is `in[1] - in[0]`, *not* `in[0] - in[1]` - `out` is the same either way, but
             // `isz.in` is a real witness slot, so the sign is load-bearing.
-            PrecomputeKind::IsEqual => Some(4),
+            PrecomputeKind::IsEqual | PrecomputeKind::IsEqualRevealed => Some(4),
             // No outputs. AliasCheck's whole subtree is its subcomponent CompConstant: its own
             // 254 input signals (copies of AliasCheck's `in`, per circom's `==>` semantics) + 1
             // output signal (`out <== num2bits.out[127]`, still a genuine witness signal despite
@@ -457,6 +469,13 @@ impl<F: PrimeField> Graph<F> {
     /// order the runtime must supply traces in. See `docs/ARCHITECTURE.md`, "Precomputation".
     pub fn precompute_sites(&self) -> &[PrecomputeSite] {
         &self.precompute_sites
+    }
+
+    /// Mutable access to every precomputation site, for a lowering pass that only needs to relabel
+    /// a site's `kind` (`passes::mpc::declassify_zero_test`) without touching any node - a lighter
+    /// mutation than `Graph::rewrite` is built for, since nothing about node count or order changes.
+    pub(crate) fn precompute_sites_mut(&mut self) -> &mut [PrecomputeSite] {
+        &mut self.precompute_sites
     }
 
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {

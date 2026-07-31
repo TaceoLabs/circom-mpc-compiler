@@ -61,6 +61,16 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
         poseidon2::plain_trace(t, states)
     }
 
+    fn poseidon2_requested_traces(
+        &mut self,
+        t: usize,
+        states: &[F],
+        result_requests: &[u32],
+        result_offsets: &[u32],
+    ) -> eyre::Result<Vec<F>> {
+        poseidon2::plain_trace_requested(t, states, result_requests, result_offsets)
+    }
+
     fn num2bits_traces(&mut self, n: usize, inputs: &[F]) -> eyre::Result<Vec<F>> {
         Ok(inputs
             .iter()
@@ -72,8 +82,18 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
         Ok(inputs.iter().flat_map(|&x| iszero::plain_trace(x)).collect())
     }
 
+    // Same values as `is_zero_traces`/`is_equal_traces` - only a real rep3 driver's protocol
+    // differs for the revealed variant, and `PlainDriver` has nothing to reveal or leak.
+    fn is_zero_revealed_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
+        self.is_zero_traces(inputs)
+    }
+
     fn is_equal_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
         isequal::plain_trace(inputs)
+    }
+
+    fn is_equal_revealed_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
+        self.is_equal_traces(inputs)
     }
 
     fn alias_check_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {

@@ -54,6 +54,7 @@ fn run_rep3(program: &circom_mpc_compiler::vm::Program<Fr>, values: &[Fr]) -> Ve
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                     let mut driver = Rep3Driver::new(&net, &mut state);
+                    driver.preprocess(program.sbox_randomness).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];
@@ -106,6 +107,31 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
             Machine::run(&program, &mut driver, &inputs).unwrap()
         };
         assert_eq!(run_rep3(&program, &values), plain, "inputs {values:?}");
+    }
+}
+
+/// The `RangeCheckWithOutputFlag` shape standalone: `IsZero` immediately followed by
+/// `TACEO_REVEAL(1)` of its `out`. Regression test for `passes::mpc::declassify_zero_test`,
+/// independent of the merces mains (which need real inputs and, for a full prove+verify, a zkey).
+#[test]
+fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
+    use circom_mpc_compiler::ir::PrecomputeKind;
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+
+    let program = CoCircomCompiler::<Bn254>::compile(
+        circuit_path("precomputation_iszero_reveal_test"),
+        config(),
+    )
+    .unwrap();
+    assert_eq!(program.precompute_batches.len(), 2, "IsZero and Reveal stay separate batches");
+    assert_eq!(program.precompute_batches[0].kind, PrecomputeKind::IsZeroRevealed);
+
+    for value in [Fr::from(0u64), Fr::from(1u64), Fr::from(7u64)] {
+        let plain = {
+            let inputs = program.classify_inputs(&[value], |v| v);
+            Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+        };
+        assert_eq!(run_rep3(&program, &[value]), plain, "input {value}");
     }
 }
 

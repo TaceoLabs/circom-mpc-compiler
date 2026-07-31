@@ -7,7 +7,7 @@ use ark_ff::PrimeField;
 use crate::ir::PrecomputeKind;
 
 use super::driver::VmDriver;
-use super::program::{Bank, Opcode, PrecomputeBatch, Program};
+use super::program::{Bank, Opcode, PrecomputeBatch, Program, WitnessSource};
 
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
@@ -58,6 +58,11 @@ impl Machine {
         driver: &mut D,
         inputs: &[InputValue<F, D::Share>],
     ) -> eyre::Result<Vec<D::Share>> {
+        // Every `Program` field is `pub`, so a caller can construct or edit one without going
+        // through `codegen::compile` - catch a malformed value here, before it reaches unchecked
+        // indexing below.
+        program.validate()?;
+
         eyre::ensure!(
             inputs.len() == program.num_inputs,
             "expected {} inputs, got {}",
@@ -182,37 +187,29 @@ impl Machine {
             "program ended with MulLocal instructions not followed by Reshare"
         );
 
-        // Signal 0 is the reserved always-true constant; every genuine `SignalIdx` `s` lands at
-        // `s + 1` - `Program::signal_to_witness` already indexes into this same, offset-by-one
-        // array.
-        let mut signals: Vec<D::Share> = vec![D::Share::default(); program.num_signals];
-        signals[0] = driver.promote(F::one());
-        for store in &program.stores {
-            signals[store.signal as usize + 1] = match store.bank {
-                Bank::Public => driver.promote(public[store.slot as usize]),
-                Bank::Shared => shared[store.slot as usize].clone(),
-                Bank::Local => unreachable!("codegen never stores a Local value directly"),
-            };
-        }
-        // Main's own circuit inputs are never `graph.outputs()` entries (only a *nested*
-        // subcomponent's input signal is - see `frontend/inline.rs::inline_template`'s
-        // `TemplateOp::LocalSignal` arm), so they'd otherwise never reach `signals` at all - copy
-        // each one in directly from the caller-supplied `inputs`. Uses the original `inputs`
-        // argument (not a P/S-bank slot) so this covers an input whose `Op::Input` node `gc`
-        // dropped as dead too - still a genuine witness entry.
-        for (input_index, value) in inputs.iter().enumerate() {
-            let signal = program.num_outputs + input_index;
-            signals[signal + 1] = match value {
-                InputValue::Public(v) => driver.promote(*v),
-                InputValue::Secret(v) => v.clone(),
-            };
-        }
-
-        Ok(program
-            .signal_to_witness
+        // `Program::witness_sources` is already in witness order - build the output directly, one
+        // pass, no `num_signals`-sized intermediate array to project out of afterward.
+        program
+            .witness_sources
             .iter()
-            .map(|&idx| signals[idx].clone())
-            .collect())
+            .map(|source| {
+                Ok(match *source {
+                    WitnessSource::One => driver.promote(F::one()),
+                    WitnessSource::Zero => D::Share::default(),
+                    WitnessSource::Input(i) => match &inputs[i as usize] {
+                        InputValue::Public(v) => driver.promote(*v),
+                        InputValue::Secret(v) => v.clone(),
+                    },
+                    WitnessSource::Slot { bank: Bank::Public, slot } => {
+                        driver.promote(public[slot as usize])
+                    }
+                    WitnessSource::Slot { bank: Bank::Shared, slot } => shared[slot as usize].clone(),
+                    WitnessSource::Slot { bank: Bank::Local, .. } => {
+                        unreachable!("codegen never emits a Local witness source")
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Services one batched precomputation site group at its point in the instruction stream. A
@@ -254,11 +251,23 @@ impl Machine {
                     Ok(public[input.slot as usize])
                 })
                 .collect::<eyre::Result<_>>()?;
-            let results = Self::run_plain_batch(batch.kind, &inputs)?;
             eyre::ensure!(
                 batch.result_bank == Bank::Public,
                 "an all-public precompute batch's result bank must be Public"
             );
+            // Poseidon2's own gadget skips computing the witness-dead majority of a site's trace
+            // directly, rather than computing it in full and filtering afterward - see
+            // `docs/ARCHITECTURE.md`, "Result slots".
+            if let PrecomputeKind::Poseidon2 { t } = batch.kind {
+                let selected = super::gadgets::poseidon2::plain_trace_requested(
+                    t,
+                    &inputs,
+                    &batch.result_requests,
+                    &batch.result_offsets,
+                )?;
+                return Self::store_batch_results(batch, &selected, public);
+            }
+            let results = Self::run_plain_batch(batch.kind, &inputs)?;
             let selected = Self::select_requests(&results, batch)?;
             return Self::store_batch_results(batch, &selected, public);
         }
@@ -292,11 +301,24 @@ impl Machine {
             batch.result_bank == Bank::Shared,
             "precompute batch result bank cannot be Local"
         );
+        // Poseidon2 gets the sparse driver call directly, bypassing `select_requests` - see the
+        // all-public branch above and `docs/ARCHITECTURE.md`, "Result slots".
+        if let PrecomputeKind::Poseidon2 { t } = batch.kind {
+            let selected = driver.poseidon2_requested_traces(
+                t,
+                &inputs,
+                &batch.result_requests,
+                &batch.result_offsets,
+            )?;
+            return Self::store_batch_results(batch, &selected, shared);
+        }
         let results = match batch.kind {
-            PrecomputeKind::Poseidon2 { t } => driver.poseidon2_traces(t, &inputs)?,
+            PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
             PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
+            PrecomputeKind::IsZeroRevealed => driver.is_zero_revealed_traces(&inputs)?,
             PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
+            PrecomputeKind::IsEqualRevealed => driver.is_equal_revealed_traces(&inputs)?,
             PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
             PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
@@ -313,11 +335,11 @@ impl Machine {
                 .iter()
                 .flat_map(|&x| num2bits::plain_trace(x, n))
                 .collect(),
-            PrecomputeKind::IsZero => inputs
+            PrecomputeKind::IsZero | PrecomputeKind::IsZeroRevealed => inputs
                 .iter()
                 .flat_map(|&x| iszero::plain_trace(x))
                 .collect(),
-            PrecomputeKind::IsEqual => isequal::plain_trace(inputs)?,
+            PrecomputeKind::IsEqual | PrecomputeKind::IsEqualRevealed => isequal::plain_trace(inputs)?,
             PrecomputeKind::AliasCheck => {
                 eyre::ensure!(
                     inputs.len().is_multiple_of(254),

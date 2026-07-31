@@ -288,6 +288,19 @@ misclassifying `Public` as `Shared` only costs a missed optimization. This is wh
 knob populated only from an explicit caller decision (`fixtures::merces_mpc_public_inputs`, for the
 merces mains), never inferred from the graph.
 
+**`TACEO_REVEAL` is a third source, and `passes::mpc::declassify_zero_test` (see "The pipeline"
+below) is what it authorizes for `IsZero`/`IsEqual`.** Unlike `mpc_public_inputs`, this one *is*
+derived rather than supplied as a config knob - but the authority behind it is identical: a `Reveal`
+site reading a value is unambiguous proof every party is about to learn it, exactly as authoritative
+as an explicit `mpc_public_inputs` entry, just discoverable structurally (the site is right there in
+the graph) instead of needing a caller to name it. What differs from `mpc_public_inputs` is the
+*consequence* of choosing this rather than a graph rewrite: `mpc_public_inputs` changes which
+domain a value has, so a wrong entry is a soundness bug (see above). `declassify_zero_test` changes
+*which rep3 protocol computes an already-`Shared` value's trace* - domain is untouched, both
+protocols compute the identical field elements - so a wrong match here is a missed 29-round-to-1
+optimization, at worst, never a leak: see "Precomputation" / "Sites are typed, not opaque" for the
+protocol and the full leak argument.
+
 ### The cost model
 
 Lexicographic, and it settles every design choice below:
@@ -332,7 +345,19 @@ mirror-enum trap the deleted 37-variant `mpc_ir::Op` fell into (see "Non-goals")
 Unlike the classical passes, this is a lowering *sequence*, not a fixpoint - `PassManager` runs it
 once, after the classical passes converge, unconditionally at every `OptLevel`:
 
-1. **`domain.rs`** - not a registered `Pass`, but the shared domain-analysis library.
+1. **`declassify_zero_test.rs`** - relabels an `IsZero`/`IsEqual` site's `kind` to
+   `IsZeroRevealed`/`IsEqualRevealed` when its `out` result (`Op::PrecomputeResult(0)`) feeds
+   directly into a `Reveal` site's own inputs - one hop, no transitive reasoning through an
+   intervening linear op. See "Precomputation" / "Sites are typed, not opaque" below for the
+   protocol this unlocks and why it's sound. Not inferring a declassification: it only reads the one
+   `TACEO_REVEAL` call already in the source, the same authority `mpc_public_inputs` has (see "The
+   domain lattice" below) - just derived structurally instead of supplied as a config knob, since a
+   `Reveal` site reading a value is already unambiguous proof that value is about to be published.
+   Placed first because `kind` only feeds the batch key (`precompute_schedule`) and runtime dispatch
+   (`vm::machine`), both downstream of every pass here - not because order is load-bearing. Mutates
+   only `Graph::precompute_sites` (via `Graph::precompute_sites_mut`), no node, so unlike every other
+   pass in this pipeline it needs neither `Graph::rewrite` nor `Graph::rebuild_nodes`.
+2. **`domain.rs`** - not a registered `Pass`, but the shared domain-analysis library.
    `signal_domain` classifies an `Op::Input` as `Public` iff its signal falls in a
    `public_inputs`-named range of `input_list` (both already on `Graph`), else `Shared`; everything
    else is a lattice join over an op's inputs. In particular, a `Precompute` and all of its results
@@ -341,12 +366,12 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    equivalent old-space forward analysis for read-only consumers (batch planning, codegen, and
    diagnostics). It is not cached in `PassContext`: `EmitMany` invalidates an old-space array for a
    rewrite, while the read-only consumers are cheap and need the table only once.
-2. **`mul_split.rs`** - every `Mul` with two `Shared` operands becomes `MulLocal` + a **singleton**
+3. **`mul_split.rs`** - every `Mul` with two `Shared` operands becomes `MulLocal` + a **singleton**
    `Round` + `RoundResult(0)`, via `EmitMany`. A `Mul` with any `Public` operand is untouched (already
    free). Emitting a singleton round (rather than a bare `MulLocal`) keeps every intermediate graph
    state valid and is semantically one rep3 multiplication per product - so this pass alone, before
    `round_schedule` runs, is already a correct (if naive) lowering, independently testable.
-3. **`round_schedule.rs`** - the headline transform. Buckets every value by `passes::mpc::level`'s
+4. **`round_schedule.rs`** - the headline transform. Buckets every value by `passes::mpc::level`'s
    network-event level (see "The event axis" below - shared precomputation results advance it while
    all-public results stay at their input level), then merges every singleton round at the same
    level into one. ASAP scheduling, so the round count equals the circuit's multiplicative depth
@@ -362,7 +387,7 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    node at that depth. Building the buckets once keeps the pass linear in nodes plus levels instead
    of rescanning all nodes for every level.
    `Graph::rebuild_nodes` installs the result.
-4. **`Graph::mpc_summary`** - not a pass; a diagnostic method reporting rounds, total reshare
+5. **`Graph::mpc_summary`** - not a pass; a diagnostic method reporting rounds, total reshare
    elements, min/max slots per round, local muls, free public muls, and precomputation
    sites/batches. Exists so every claim above is falsifiable rather than asserted - see
    `tests/mpc_lowering.rs`, which
@@ -373,9 +398,10 @@ once, after the classical passes converge, unconditionally at every `OptLevel`:
    visibility into a precomputation batch's own internal round cost, which is a property of
    `vm::gadgets`, not of the graph. `examples/merces.rs` (`round-counting` feature,
    `vm::counting_net::CountingNet`) reports the *measured* total against a real 3-party run on the
-   merces circuits. Its counter is reset after rep3 state setup and snapshotted immediately after
-   `Machine::run`, so the difference from IR reshare rounds is gadget-internal witness-execution
-   work, not setup or the optional public-witness opening (see "Real-world target circuits" below).
+   merces circuits. Its counter is reset after rep3 state setup *and* `Rep3Driver::preprocess` (see
+   "Precomputation" below) and snapshotted immediately after `Machine::run`, so the difference from
+   IR reshare rounds is gadget-internal witness-execution work, not setup, offline preprocessing, or
+   the optional public-witness opening (see "Real-world target circuits" below).
 
 **Deliberately deferred, reason recorded instead of stubbed:** open sinking and `B2A(A2B(x))`
 cancellation/conversion minimization need `Div`, comparisons, or bitwise ops to exist - none do (see
@@ -467,7 +493,7 @@ just in the clear.
 
 ## Bytecode and the slot machine (`src/vm/`)
 
-Roadmap step 4 (see "Where this is headed"). `vm::codegen::compile` (not a `Pass` - it changes
+`vm::codegen::compile` (not a `Pass` - it changes
 representation, not the IR; called by `CoCircomCompiler::compile` after `PassManager` finishes) lowers
 a fully-passed `ir::Graph` into a `vm::Program`: a fixed-width instruction stream over three
 domain-typed slot banks, plus the side tables `vm::Machine::run` needs to execute it. This is a
@@ -546,7 +572,7 @@ this on a hand-built graph, the same way pass unit tests build one.
 A `BankAlloc` (bump counter + free list) per bank. Liveness is one pass, computed once up front: a
 value's last-use index is the last node (in graph order) that reads it, with **two** exceptions. A value
 `graph.outputs()` references gets `last_use = nodes.len()` (never freed), since its slot must still hold
-the right value when `stores` reads it after the instruction stream finishes. And a value read by a
+the right value when it's read into `Program::witness_sources` after the instruction stream finishes. And a value read by a
 precomputation site is extended to its *batch's anchor*, because the batch runs later than the
 `Op::Precompute` node that reads it - without that, the allocator could recycle a site's input slot in
 between and a later instruction would clobber the gadget's input.
@@ -570,10 +596,10 @@ constants (`0..constants.len()`), precompute results in their batch's `Public` o
 contiguous range per site, in site order, reserved before the main allocation loop), and
 `Shared`/`Public`-bank circuit inputs. Precompute slots must already exist wherever the main
 instruction stream, or another site, might read them. **A future optimization, not built:** a
-precompute result read only by `stores` could write directly into the final witness buffer, skipping
-its slot entirely - `passes::dead_signals` (below) already shrinks the region to the witness-live
-count, but a still-narrower one where nothing in the instruction stream itself reads the value
-remains unbuilt.
+precompute result read only by the final witness projection could write directly into the witness
+buffer, skipping its slot entirely - `passes::dead_signals` (below) already shrinks the region to the
+witness-live count, but a still-narrower one where nothing in the instruction stream itself reads the
+value remains unbuilt.
 
 **Each site's reserved region is sized to its witness-live result count, not its full
 `num_outputs + num_intermediates` capacity.** `vm::codegen::compile` scans every surviving
@@ -640,12 +666,15 @@ batch's own point in the stream rather than in an up-front phase). At a `Reshare
 `mul_local_vec` once for the complete round before the one batched reshare. An all-public
 `PrecomputeBatch` runs the plain deterministic gadget and writes its `Public` result slots; a
 shared-domain batch promotes any public inputs, calls the driver's MPC gadget, and writes `Shared`
-slots. The machine then builds the final signal array
-(index 0 = the reserved constant-`1` signal; every genuine `SignalIdx` `s` lands at `s + 1`) from
-`stores` plus - since a circuit's own top-level inputs are
-never `graph.outputs()` entries (see "Precomputation" for why: only a *nested* subcomponent's own
-input signal is) - directly from the caller-supplied `inputs`, and returns
-`signal_to_witness.iter().map(|&i| signals[i])`.
+slots. The machine then builds the final witness directly from `Program::witness_sources` - already
+in witness order, one entry per final witness position (`One`/`Zero`/`Input(i)`/`Slot { bank,
+slot }`; see "Bytecode and the slot machine" for how codegen builds it) - so there is no
+signal-indexed intermediate array to build and then project out of.
+
+`Program::validate` checks every instruction and side-table reference, bank/slot bound, round range,
+batch arity and CSR shape, and witness source, run at `Machine::run`'s own entry (and at
+`Program::write`/after `Program::read`, in `vm::serialize`) - every `Program` field is `pub`, so a
+malformed value reaches a typed error here instead of unchecked indexing further down.
 
 ### Proving (`vm/witness.rs`)
 
@@ -715,7 +744,7 @@ fixed 16-byte record per instruction (`u8` opcode + 3 bytes padding + three `u32
 one genuinely *staged* (two same-kind batches at different levels, so the format change below is covered
 by more than a single-batch program).
 
-`VERSION` is **5**. A version-1 program carries a batch table but no `Opcode::Precompute`
+`VERSION` is **7**. A version-1 program carries a batch table but no `Opcode::Precompute`
 instruction - it assumes a machine that services every batch up front, which the current
 `Machine::run` does not do. Reading a version-1 program under today's interleaved semantics would
 silently service zero batches and return a plausible-looking wrong witness, so the version check in
@@ -726,8 +755,13 @@ without being silently reclassified. Version 4 adds the `PrecomputeKind::Reveal`
 `PrecomputeBatch::result_requests`/`result_offsets` and changes `result_slots`' own meaning from one
 entry per site's full reserved capacity to one entry per requested (witness-live) slot - a
 version-4 reader has no way to tell the two shapes apart from length alone, so it would silently
-scatter a sparse batch's results into the wrong slots rather than fail. Old versions are rejected
-rather than guessed, in every case.
+scatter a sparse batch's results into the wrong slots rather than fail. Version 6 adds the
+`PrecomputeKind::IsZeroRevealed`/`IsEqualRevealed` tags (see `passes::mpc::declassify_zero_test`) and
+`Program::sbox_randomness` (see `vm::gadgets::poseidon2`'s offline s-box preprocessing). Version 7
+replaces `stores` + `signal_to_witness` + `num_outputs` + `num_signals` with `witness_sources`, one
+entry per final witness position rather than a signal-indexed table plus a separate projection - a
+version-6 reader has no signal-indexed layout to reconstruct this from, since the program no longer
+carries one. Old versions are rejected rather than guessed, in every case.
 
 ## Precomputation
 
@@ -828,6 +862,47 @@ are `Shared` (`needs_mpc`, not `batch.result_bank`, which is always `Public`, un
 kind where the two coincide) - an all-public reveal is simply the identity, `vm::gadgets` needs no
 entry for it at all.
 
+**`IsZeroRevealed`/`IsEqualRevealed`: a cheaper protocol for the same trace, chosen by the compiler
+rather than named in the source.** Unlike every other `PrecomputeKind`, these two never come from
+`frontend/build.rs` - `passes::mpc::declassify_zero_test` (see "MPC lowering" / "The pipeline"
+above) rewrites an ordinary `IsZero`/`IsEqual` site into its revealed twin when it finds the site's
+`out` result feeding a `Reveal` site's inputs directly, exactly the shape
+`server.circom:32-33`'s `RangeCheckWithOutputFlag` writes:
+
+```circom
+signal isZeroOut <== TACEO_PRECOMPUTATION_IsZero()(sum);
+signal revealed[1] <== TACEO_REVEAL(1)([isZeroOut]);
+```
+
+Same trace, same layout (`expected_results()` is still `2`/`4` - only the rep3 protocol computing it
+changes), so nothing about slot allocation, batching keys, or `Graph::verify` needs to know these
+exist as anything but two more `PrecomputeKind` values. **The protocol, and why it's sound.**
+Ordinary `IsZero` costs 11 rounds (`vm::gadgets::iszero::rep3_trace`: a Yao A2B conversion, then
+`is_zero_many` + `bit_inject_many` + `inv_vec`, each one round) to produce a value the very next
+site opens to every party anyway. `vm::gadgets` always converts via `conversion::a2y2b_many` (Yao)
+here rather than reading `Rep3State::a2b_type` and picking per-driver - not a design choice made
+casually: `mpc-core` exposes a vectorized A2B selector for neither strategy transparently (only
+`a2b_many`, Direct, and `a2y2b_many`, Yao, each a separate function; only the *single-value* `eq_bit`
+uses the state's own `a2b_selector`), and `arithmetic::eq_public_many` - the vectorized helper this
+gadget used before this section's changes - hardcodes the Direct path, silently costing 29 rounds
+regardless of what `Rep3State::a2b_type` requested. This module's cost model (see "The cost model")
+ranks network rounds first, so Yao is strictly the right unconditional choice at this layer; a
+caller's `a2b_type` still governs anything reached through `mpc-core`'s own selector directly. The
+revealed variant computes both `out` and `inv` from **one** `mul_open_vec`: for uniform secret `r`,
+opening `z = x * r` reveals `x == 0` (`z == 0 <=> x == 0`) and nothing more, since whenever `x != 0`,
+`z` is uniform over `F` independent of `x`. The one bit learned is exactly `out`, which the caller's
+`Reveal` site publishes regardless; `inv` falls out of the same open (`x⁻¹ = r * z⁻¹` when `z != 0`)
+rather than needing a second one. The `r == 0` case (probability `1/|F|`) mislabels a nonzero `x` as
+zero - a wrong witness that fails to verify, not a leak, the identical failure mode mpc-core's own
+`inv_vec` already accepts (it bails on `y == 0`). `vm::gadgets::iszero::rep3_trace_revealed` is the
+implementation; `vm::driver::rep3::Rep3Driver::{is_zero_revealed_traces,is_equal_revealed_traces}`
+the driver-level dispatch, `PlainDriver`'s twins delegating to the unchanged `plain_trace` (the
+value computed is identical - only a real rep3 driver's protocol differs). Measured effect,
+combined with `Rep3Driver::preprocess` (see "Poseidon2 traces" below) and the Yao A2B fix above: the
+6 genuinely-`Shared` batches at both merces server mains (see "Real-world target circuits" and
+"Known gaps" below) drop from 101 to 72 measured rounds - `RangeCheckWithOutputFlag` is exactly this
+shape, so both mains' `IsZero` site declassifies automatically, no circuit edit required.
+
 ### Result slots: a compile-time-resolved destination, not a positional list
 
 The recognized gadget component (e.g. `Poseidon2`, whether or not something wraps it) is the site, at
@@ -887,16 +962,17 @@ merces zero-pads (see "Sites are typed, not opaque" above); `isequal` delegates 
 entry at all: its all-public path is the identity and its shared path is `VmDriver::open`, both
 handled directly in `Machine::run_batch` (see "Sites are typed, not opaque").
 
-Every gadget still computes and returns each site's **full** `num_outputs + num_intermediates`
-trace unconditionally - nothing about the gadgets themselves changed to know which slots are
-witness-live. `Machine::run_batch::select_requests` is what bridges the two: it selects
-`PrecomputeBatch::result_requests`' subset out of that full per-site output (site-major, in request
-order) before `store_batch_results` writes it, so a batch's declared `result_slots` and the values
-actually stored line up 1:1 by construction rather than by a prefix-length coincidence. This is a
-temporary bridge - a gadget that skipped computing the witness-dead majority in the first place
-would waste neither the cycles nor the allocation, and is not yet built (see "Where this is
-headed"). A zero-length request is valid too (`Num2Bits(0)`, or any site every one of whose results
-turned out to be witness-dead), handled as an empty selection rather than chunking by zero.
+`Num2Bits`/`AliasCheck`/`IsZero`/`IsEqual` still compute and return each site's **full**
+`num_outputs + num_intermediates` trace unconditionally. `Machine::run_batch::select_requests` is
+what bridges the two: it selects `PrecomputeBatch::result_requests`' subset out of that full per-site
+output (site-major, in request order) before `store_batch_results` writes it, so a batch's declared
+`result_slots` and the values actually stored line up 1:1 by construction rather than by a
+prefix-length coincidence. A zero-length request is valid too (`Num2Bits(0)`, or any site every one of
+whose results turned out to be witness-dead), handled as an empty selection rather than chunking by
+zero. `Poseidon2` no longer needs this bridge (see "Poseidon2 traces"): its own gadget accepts the CSR
+request table directly and never materializes the witness-dead majority in the first place. The
+smaller gadgets keep the bridge because their witness-dead fraction is far smaller - not built for
+them, not because it couldn't be (see "Where this is headed").
 
 Sites are numbered in the order encountered during inlining (deterministic single-threaded
 traversal); this ordering has no runtime significance beyond being a stable, arbitrary key for
@@ -940,22 +1016,51 @@ witness length for `precomputation_poseidon2_test`.
 The module is three separated concerns, so the 2035-slot layout exists in exactly one place (unlike
 `gadgets/aliascheck`, which duplicates its much smaller layout between plain and rep3): an `Ops` trait
 (the arithmetic backend, implemented for plain field elements and for rep3 shares), a **layer-major**
-walker running every site in lock-step so a batch's s-boxes at one round are one call, and a single
-`emit_site` emitter holding the ordering above.
+walker running every site in lock-step so a batch's s-boxes at one round are one call, and an
+index-addressed `SiteOutput` sink holding the ordering above. `SiteOutput::destination(logical)` maps
+a logical layout position to where (if anywhere) to write it: `SiteOutput::all` maps identically (a
+full trace, `plain_trace`/`rep3_trace`); `SiteOutput::requested` binary-searches the batch's own
+ascending CSR request row (a sparse trace, `plain_trace_requested`/`rep3_trace_requested`), so a
+witness-dead position is simply never retained. `walk` computes every value identically either way -
+a later round depends on all of them, sparsity changes retention only, not computation or round
+count - so the sparse and full paths cannot drift apart; `requested_trace_matches_filtering_full_trace_for_every_width`
+pins that a sparse call equals filtering a full one, for every width. `Machine::run_batch` calls the
+sparse path directly for Poseidon2 (`VmDriver::poseidon2_requested_traces`) rather than going through
+`select_requests`' generic full-trace filter - see "Result slots" for why the smaller gadgets don't
+bother.
 
 **rep3: one round per s-box layer, not three.** `x²`, `x⁴`, `x⁵` are genuinely sequential as
 multiplications - from `{x, x²}` a second round only reaches degree 4 - so a naive layer costs 3 rounds,
-i.e. `3 · (8 + pr)` = 192 for `t=3`. Instead, with a fresh random `r` (and `r²..r⁵` prepared once per
-batch in 3 rounds, independent of batch size), publish `y = x - r` in **one** round; `x = y + r` then makes
+i.e. `3 · (8 + pr)` = 192 for `t=3`. Instead, with a fresh random `r` (and `r²..r⁵` prepared once,
+independent of batch size), publish `y = x - r` in **one** round; `x = y + r` then makes
 all three intermediates local linear combinations by binomial expansion. `y` is public and `r` uniform and
 unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp` trick extended to also emit
 `square` and `pow_4` - which is precisely why it composes with a *full* trace at no extra round cost, since
-mpc-core only ever needed `x⁵`. Total per batch: `3 + (8 + partial_rounds(t))` rounds - 67 for
-`t ∈ {2,3,4}`, 68 for `t ∈ {8,12,16}` - **independent of the number of sites**. The `r²..r⁵` prep
-happens exactly once per batch, in `Rep3Ops::prepare_sboxes`, *not* inside `sbox_layer` itself - each
-layer only slices a disjoint range out of that one pool. Measured, not just asserted, by
-`vm::gadgets::poseidon2::tests::rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites`
+mpc-core only ever needed `x⁵`. Online cost per batch: `8 + partial_rounds(t)` rounds - 64 for
+`t ∈ {2,3,4}`, 65 for `t ∈ {8,12,16}` - **independent of the number of sites**. Measured, not just
+asserted, by
+`vm::gadgets::poseidon2::tests::rep3_online_cost_is_eight_plus_partial_rounds_once_preprocessed`
 (needs the `round-counting` feature) via `vm::counting_net::CountingNet`.
+
+**The `r²..r⁵` prep is offline, not part of that online cost.** `r` and its powers depend on no
+secret input, so nothing about computing them ahead of time is unsound - only the *consumption*
+needs a fresh, disjoint slice per `(layer, element)` (reusing one `r` across two layers would leak
+`x₁ - x₂` from their two masked opens), which `SboxPool::consumed` still enforces regardless of when
+`prepare` ran. `vm::gadgets::poseidon2::SboxPool::prepare` spends this 3-round cost once, for a
+budget (`sbox_randomness_budget(t, sites)`, summed across every genuinely `Shared` Poseidon2 batch
+into `Program::sbox_randomness`) codegen already knows at compile time. `Rep3Driver::preprocess`
+is the call site: a caller runs it once *per* `Machine::run`, before that run's `Machine::run` binds
+any input - not merely before the call, *before the input exists* - so the 3 rounds leave the
+critical path entirely rather than merely moving within it. The pool this produces is good for
+exactly that one run: `consumed` never rewinds, so a driver reused across several runs (e.g.
+`src/bin/merces-net.rs`'s `--runs` sweep) must call `preprocess` again before each one, not just
+once up front. A driver whose `poseidon2_traces` runs before `preprocess` gets a typed error, not a
+panic or a silently empty pool. Combined offline + online cost, the same total as
+before this split, is separately pinned by
+`vm::gadgets::poseidon2::tests::rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites` -
+`3 + 8 + partial_rounds(t)`, 67 for `t ∈ {2,3,4}`, 68 for `t ∈ {8,12,16}` - so the split is provably
+just a relocation, not a different total. Measured effect on the merces mains (see "Real-world
+target circuits" and "Known gaps" below): 73 → 70 rounds.
 
 The 22 constant tables in `vm/gadgets/poseidon2_constants.rs` are transcribed verbatim from
 `poseidon2_constants.circom`, and a unit test re-extracts the hex from that circuit file at test time and
@@ -1089,6 +1194,40 @@ absent, so `cargo test` stays green on a fresh clone before either script has ru
   `passes::mpc::level` (see "Deliberately deferred" under "The event axis") is the other half of the
   same story - both would need a cost model over batch services that does not exist yet.
 
+  **Measured against merces, not just argued, and the win is small.** The planner places the 6
+  genuinely-`Shared` batches (see "Real-world target circuits") into 3 stages: stage 0 is
+  `Poseidon2 { t: 4 }` (7 sites) ∥ `Num2Bits { n: 254 }` (1 site); stage 1 is `AliasCheck` (1 site) ∥
+  `IsZeroRevealed` (1 site) ∥ `Reveal { n: 1 }` (7 sites); stage 2 is a second, dependent
+  `Reveal { n: 1 }` (1 site) alone. Per real 3-party rep3 run, each costs (independent of its own
+  site count - see the per-gadget round tests in `vm::gadgets`) `Poseidon2` 64 rounds (post-
+  `Rep3Driver::preprocess`; see "Poseidon2 traces"), `Num2Bits` 2, `AliasCheck` 3, `IsZeroRevealed` 1
+  (post-`declassify_zero_test`; see "Sites are typed, not opaque"), each `Reveal` 1 - summing to
+  exactly 72, `tests/merces.rs::measured_round_count_is_seventy_two_for_both_mains`'s pinned figure
+  and the `Machine::run` this section's premise describes (one `VmDriver` call after another, no
+  overlap). Grouped by stage, the best case (every same-stage pair's windows overlap, unlimited
+  lanes) is stage 0's max 64 (was sum 66) and stage 1's max 3 (was sum 5); stage 2 is `Reveal` alone
+  and cannot improve. `72 -> 68`, about 6%.
+
+  Even a hypothetical full dataflow scheduler - one that overlaps the entire independent
+  `Num2Bits -> AliasCheck -> IsZeroRevealed -> Reveal` chain (7 rounds across stages 0 and 1, none of
+  them `Poseidon2`) inside `Poseidon2`'s own 64-round window, which single-axis stage-based
+  scheduling (this section's premise) cannot express at all - lands at best at 65 (`max(64, 7)` for
+  stages 0-1, `+ 1` for stage 2's dependent `Reveal`, which cannot be pulled forward), i.e. **at most
+  ~10%**. Because `Poseidon2` already dominates stages 0-1 combined, there is nothing wide enough at
+  the same stage to hide behind it. That ceiling does not justify per-lane `Network`s
+  (`TlsNetwork::networks::<N>`/`Rep3State::fork` both already exist upstream for this), a `Program`
+  format bump, and a `Machine::run_lanes` gather/execute/scatter split - all real,
+  correctness-sensitive complexity (see "The domain lattice" for how easily a misclassification here
+  would be silent) - at today's circuit shape. Revisit if a future circuit's same-stage shared
+  batches are wider and more evenly sized than merces', where the max-vs-sum gap would be larger.
+
+  (An earlier revision of this section measured a 101-round baseline, before
+  `declassify_zero_test`/`Rep3Driver::preprocess` existed and before `run3_counted`/`measured_rounds`
+  were corrected to report the maximum over all three parties rather than party 0's own count alone
+  - the two counts are not directly comparable, since an asymmetric protocol like the Yao A2B
+  conversion `Num2Bits`/`AliasCheck`/ordinary `IsZero` all use can have party 0 finish before the
+  critical path does. `72` above is the first figure measured under the corrected methodology.)
+
 - **Only `Add`/`Sub`/`Mul` are supported at runtime.** Every other circom operator is a typed
   `Unsupported::Operator`/`NonConstantOperator` error (see "`Op<F>` is deliberately narrow" above).
   This is a large, deliberate step back in coverage, made to keep the runtime core small while pass
@@ -1197,10 +1336,10 @@ real 3-party rep3, with the two witnesses agreeing, and - with the ceremony zkey
 producing a co-groth16 proof against circom's own R1CS (`--O2`, the pinned fork) that verifies
 (`tests/merces.rs`). Shape, for scale:
 
-| | IR reshare rounds | sites | batch services | shared batch services | instructions | witness | measured rounds |
+| | IR reshare rounds | sites | batch services | shared batch services | instructions | witness | measured rounds (max across parties) |
 |---|---|---|---|---|---|---|---|
-| `transfer_arity4_batch1` | 0 | 127 | 60 | 6 | 1 908 | 17 545 | 101 |
-| `transfer_arity4_batch8` | 0 | 1 014 | 429 | 6 | 15 272 | 139 229 | 101 |
+| `transfer_arity4_batch1` | 0 | 127 | 60 | 6 | 1 908 | 17 545 | 72 |
+| `transfer_arity4_batch8` | 0 | 1 014 | 429 | 6 | 15 272 | 139 229 | 72 |
 
 Three things worth reading off that table, and the headline result of `CompilerConfig::mpc_public_inputs`
 plus `TACEO_REVEAL` together (see "The domain lattice", "Precomputation"). **IR reshare rounds are
@@ -1209,15 +1348,21 @@ commitment is declassified right after it's computed, every multiplication in bo
 out to be `Public x Shared` or `Public x Public` - free in this compiler's cost model - so
 `mul_split` never has anything to split. **The 6 batches that do need a real `VmDriver` call are the
 same 6 at both sizes** - a property of the circuit's `(kind, stage)` structure, not its transaction
-count - so the *measured* round count (`examples/merces.rs`, `round-counting` feature) is identical,
-101, at N=1 and N=8: **witness extension is round-count-flat in the transaction count**, not linear
-in it. `sites`/`batch services`/`instructions`/`witness` still scale with `N` (more transactions
-genuinely need more hash computations and witness entries), and that's an unavoidable, honest cost -
-just no longer a *round-count* one. Before this: IR reshare rounds were `10 * N + 16` - 26 at
-`batch1`, 96 at `batch8`, from the batch statement's UHF Horner chain over shared commitments (see
-"Known gaps" history below) - and `batch8`'s measured round count was 1 503 (96 reshare + 1 407
-gadget-internal). `benches/witness_extension.rs` measures both against `PlainDriver`, where rep3
-throughput now stays roughly flat (rather than dropping) from batch1 to batch8, for the same reason.
+count - so the *measured* round count (`examples/merces.rs`, `round-counting` feature;
+`tests/merces.rs::measured_round_count_is_seventy_two_for_both_mains` pins it) is identical, 72, at
+N=1 and N=8: **witness extension is round-count-flat in the transaction count**, not linear in it.
+`sites`/`batch services`/`instructions`/`witness` still scale with `N` (more transactions genuinely
+need more hash computations and witness entries), and that's an unavoidable, honest cost - just no
+longer a *round-count* one. Before this: IR reshare rounds were `10 * N + 16` - 26 at `batch1`, 96
+at `batch8`, from the batch statement's UHF Horner chain over shared commitments (see "Known gaps"
+history below) - and `batch8`'s measured round count was 1 503 (96 reshare + 1 407 gadget-internal,
+under the party-0-only measurement then in use). `benches/witness_extension.rs` measures both
+against `PlainDriver`, where rep3 throughput now stays roughly flat (rather than dropping) from
+batch1 to batch8, for the same reason. The 6 shared batches' own internal round cost dropped further
+still, after `IR reshare rounds` reached zero - see "Precomputation" ("Sites are typed, not opaque",
+"Poseidon2 traces") and "Known gaps" for `declassify_zero_test`, `Rep3Driver::preprocess`, and the
+Yao A2B fix together, and for why `72` (not the `101` an earlier revision of this doc recorded) is
+the first figure measured under today's corrected, max-over-parties methodology.
 
 Features these circuits are load-bearing for:
 
@@ -1331,21 +1476,44 @@ plain `Vec`s — a direct index beats hashing, and a map isn't buying anything t
    "Poseidon2 traces". `t=8`/`t=12` remain unverified in the same sense; a
    `precomputation_poseidon2_t{8,12}_test` fixture (or a real target circuit using those widths) would
    close that.
-4. Teach `vm::gadgets` to compute only the requested (witness-live) subset of a site's trace
+4. ~~Teach `vm::gadgets` to compute only the requested (witness-live) subset of a site's trace
    directly, instead of always computing the full `num_outputs + num_intermediates` and filtering
-   afterward (`Machine::run_batch::select_requests` - see "Result slots" and "Liveness-driven slot
-   allocation"). This would save real cycles and allocations, particularly in `poseidon2::walk` where
-   most of a full trace is now witness-dead, but needs `SiteTrace` restructured to carry computed
-   components rather than pre-assembled `Vec` blocks, since `emit_site`'s current block-assembly
-   already clones every value into place before any filtering could happen. Deferred because codegen's
-   own slot compaction (the same section) already delivers the memory win - shared-bank slots at
-   `transfer_arity4_batch8` dropped from 1 342 498 to 19 008 - leaving only the wasted-computation
-   cost, not a memory one, to justify this.
-5. Witness-indexed `Program::stores` (`StoreEntry.witness` instead of `.signal`, replacing
-   `Machine::run`'s `signals: Vec<Share>` - sized `num_signals` regardless of how few of those are
-   witness-live - with a `witness`-sized allocation built directly). Deferred: dozens of hand-built
-   test graphs across `codegen.rs`/`ir.rs`/`passes/*/tests` construct a `Graph` with an empty
-   `signal_to_witness`, relying on today's signal-indexed contract; redesigning it would need every
-   one of them rewritten to keep working, a large blast radius for a memory-only win on a number
-   (`num_signals`) that doesn't scale with round count - the actual optimization target - and was
-   already this large before any of the changes in this section.
+   afterward.~~ **Built, for Poseidon2** (see "Poseidon2 traces"): `SiteOutput`, an index-addressed
+   sink, replaces the old block-assembling `SiteTrace`/`emit_site` pair. `plain_trace_requested`/
+   `rep3_trace_requested` feed a batch's CSR request table straight into it; `walk` still computes
+   every value (a later round depends on all of them), but no longer assembles or retains
+   witness-dead trace blocks. `VmDriver::poseidon2_requested_traces` has a default implementation
+   (call `poseidon2_traces` and filter, i.e. today's bridge) so a third-party driver keeps compiling;
+   both built-in drivers override it with the genuinely sparse gadget. The smaller gadgets
+   (`Num2Bits`/`AliasCheck`/`IsZero`/`IsEqual`) still compute a full per-site trace and go through
+   `Machine::run_batch::select_requests` - their witness-dead fraction is smaller, so this wasn't
+   worth doing for all four at once.
+5. ~~Witness-indexed `Program::stores`.~~ **Built**: `WitnessSource::{One, Zero, Input, Slot}`
+   replaces `stores` + `signal_to_witness` + `num_outputs` + `num_signals`. Codegen builds a
+   compile-time signal-indexed table once inside `compile` and immediately projects it through
+   `graph.signal_to_witness` into `Program::witness_sources`, so the oversized table never reaches
+   `Machine::run`, which builds the witness-sized output directly, one pass. The blast-radius worry
+   that deferred this resolved itself: a hand-built `Graph` with an empty `signal_to_witness`
+   (dozens of pass/codegen unit tests) already projects to an empty `witness_sources`, the same
+   "nothing to build" convention `passes::dead_signals` uses - no test needed rewriting.
+6. A static round cost model over batch services - `PrecomputeKind::rep3_rounds() -> usize`
+   (`Poseidon2 { t }` → `8 + partial_rounds(t)` post-preprocessing, `Num2Bits`/`AliasCheck`/`Reveal`
+   their small fixed counts, `IsZeroRevealed`/`IsEqualRevealed` → 1, ordinary `IsZero`/`IsEqual` → 11,
+   the Yao A2B conversion `vm::gadgets` always picks - see "Sites are typed, not opaque"), feeding a
+   `MpcSummary::predicted_total_rounds` asserted against the measured total in `tests/merces.rs`.
+   Every number it would report is already pinned by an existing test (`vm::gadgets::poseidon2`'s
+   round-count tests, the per-gadget "independent of site count" tests), so this is cheap - not built
+   here because it's not needed to ship the two wins in this section, but it is exactly the "cost
+   model over batch services that does not exist yet" the "Shared batches ... run as sequential
+   driver calls" gap above and "The event axis"'s deferred ALAP/window scheduling both name as their
+   blocker. Building it would turn both of those from argued to mechanically checked.
+7. Fuse a declassified `IsZero`/`IsEqual` batch with the `Reveal` batch that immediately follows it
+   into one VM-only runtime service (a `BatchKind` alongside `PrecomputeKind`, banked per-result
+   `ResultTarget`s rather than one `result_bank` per batch, since the fused service writes both a
+   `Shared` `[out, inv]` pair and the `Public` revealed value together) - the graph, R1CS, and
+   witness layout stay untouched; only `vm::codegen`/`vm::machine` change. This would save the
+   `Reveal` batch's own round on top of `declassify_zero_test`'s win (see "Precomputation"),
+   dropping merces from 72 to 71 measured rounds. Not built here: the round it saves is one out of
+   72, smaller than either win already shipped in this section, and `BatchKind` would touch every
+   `PrecomputeBatch` consumer (`vm::codegen`, `vm::machine`, `vm::serialize`, `Program::validate`)
+   for a single-round return.

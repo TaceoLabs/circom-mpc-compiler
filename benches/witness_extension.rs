@@ -135,6 +135,9 @@ fn run_rep3(program: &Program<Fr>, values: &[Fr], shares: &[[Rep3PrimeFieldShare
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                     let mut driver = Rep3Driver::new(&net, &mut state);
+                    // Also a once-per-connection cost, like `Rep3State::new` above - included in
+                    // the timed region for the same reason.
+                    driver.preprocess(program.sbox_randomness).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];
@@ -165,7 +168,7 @@ fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("witness_extension");
     // Witness entries produced, so throughput is comparable across very different circuit sizes.
     for (case, program, values) in &prepared {
-        group.throughput(Throughput::Elements(program.signal_to_witness.len() as u64));
+        group.throughput(Throughput::Elements(program.witness_sources.len() as u64));
 
         group.bench_with_input(BenchmarkId::new("plain", case.name), &(), |b, ()| {
             b.iter(|| run_plain(program, values));
