@@ -9,14 +9,14 @@ use ark_ec::pairing::Pairing;
 use ark_ff::{PrimeField, Zero};
 use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, AssertBucket, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
+    AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
     LoadBucket, LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
 };
 use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{Arity, Op, PrecomputeKind, ValueId};
+use crate::ir::{Op, PrecomputeKind, ValueId};
 
 use super::error::Unsupported;
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
@@ -53,17 +53,11 @@ impl<F: PrimeField> TemplateOp<F> {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
             TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } => 1,
             // TemplateOp::Real is only ever built from Op::Input/Constant/Add/Sub/Mul here -
-            // Op::Precompute/PrecomputeResult are inlining-time-only ops (materialized by
-            // frontend/inline.rs) and Op::MulLocal/Round/RoundResult are lowering-time-only ops
-            // (materialized by passes/mpc/), never by this per-template build pass.
-            TemplateOp::Real(op) => match op.arity() {
-                Arity::Fixed(n) => n,
-                Arity::SiteInputs | Arity::RoundLen => {
-                    unreachable!(
-                        "TemplateOp::Real never wraps a precomputation or MPC-lowering op before inlining"
-                    )
-                }
-            },
+            // precomputation and MPC-lowering ops are materialized later, by inlining and
+            // passes/mpc respectively, never by this per-template build pass.
+            TemplateOp::Real(op) => op
+                .fixed_arity()
+                .expect("TemplateOp::Real never wraps a precomputation or MPC-lowering op"),
         }
     }
 }
@@ -541,10 +535,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    fn handle_assert_bucket(&mut self, _: &AssertBucket) -> Result<()> {
-        Ok(())
-    }
-
     fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) -> Result<ValueId> {
         tracing::trace!(
             "lowering {} at line: {}",
@@ -590,27 +580,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     "{} is a bin op",
                     removed.to_string()
                 );
-                let lhs = self.get_constant_operand(&compute_bucket.stack[0]);
-                let rhs = self.get_constant_operand(&compute_bucket.stack[1]);
+                let lhs = self.eval_constant_operand(&compute_bucket.stack[0]);
+                let rhs = self.eval_constant_operand(&compute_bucket.stack[1]);
                 match lhs.zip(rhs).and_then(|(l, r)| fold_binary(removed, l, r)) {
                     Some(folded) => Ok(self.push_constant_value(folded)),
                     None => Err(self.err_non_constant_operator(compute_bucket)),
                 }
             }
             _ => Err(self.err_operator(compute_bucket)),
-        }
-    }
-
-    /// Returns `Some(constant)` iff `inst` is already a resolved `Op::Constant` value - used by
-    /// [`Self::handle_compute_bucket`]'s compile-time folding for the removed operators. Unlike
-    /// [`Self::get_constant_value`] (which panics if the value isn't a compile-time constant, and
-    /// is used only for genuine address computation) this returns `None` so the caller can turn a
-    /// non-constant operand into a proper `Unsupported` error instead of panicking.
-    fn get_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
-        let value_id = self.expect_value(inst).ok()?;
-        match &self.nodes[value_id.index()].op {
-            TemplateOp::Real(Op::Constant(c)) => Some(*c),
-            _ => None,
         }
     }
 
@@ -777,10 +754,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             Instruction::Return(return_bucket) => {
                 Err(self.err_instruction("return", return_bucket.line))
             }
-            Instruction::Assert(assert_bucket) => {
-                self.handle_assert_bucket(assert_bucket)?;
-                Ok(None)
-            }
+            // `===` constraints do not affect witness extension.
+            Instruction::Assert(_) => Ok(None),
             Instruction::Log(log_bucket) => Err(self.err_instruction("log", log_bucket.line)),
             Instruction::Loop(loop_bucket) => {
                 self.handle_loop_bucket(loop_bucket)?;

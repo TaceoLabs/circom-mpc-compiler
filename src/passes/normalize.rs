@@ -27,148 +27,139 @@ use ark_ff::PrimeField;
 use crate::ir::{Graph, Node, Op, ValueId};
 
 use super::poly::Affine;
-use super::{Changed, Pass, PassContext};
 
-pub(super) struct Normalize;
-
-impl<F: PrimeField> Pass<F> for Normalize {
-    fn name(&self) -> &'static str {
-        "normalize"
+pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    let nodes = graph.nodes();
+    let old_len = nodes.len();
+    if old_len == 0 {
+        return Ok(false);
     }
 
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        let nodes = graph.nodes();
-        let old_len = nodes.len();
-        if old_len == 0 {
-            return Ok(false);
+    // Phase 1: which original ids must materialize, and each live original id's Affine form.
+    // An input occurrence is one use even when both operands name the same value. On its last
+    // use, the form is moved into its consumer; only fan-out (or the synthetic use retained for
+    // phase 2) requires a clone. This keeps a single-use chain from retaining every prefix.
+    let mut force = vec![false; old_len];
+    let mut remaining_uses = vec![0usize; old_len];
+    for node in nodes {
+        for input in &node.inputs {
+            remaining_uses[input.index()] += 1;
         }
-
-        // Phase 1: which original ids must materialize, and each live original id's Affine form.
-        // An input occurrence is one use even when both operands name the same value. On its last
-        // use, the form is moved into its consumer; only fan-out (or the synthetic use retained for
-        // phase 2) requires a clone. This keeps a single-use chain from retaining every prefix.
-        let mut force = vec![false; old_len];
-        let mut remaining_uses = vec![0usize; old_len];
-        for node in nodes {
-            for input in &node.inputs {
-                remaining_uses[input.index()] += 1;
+    }
+    for &(_, v) in graph.outputs() {
+        retain_for_materialization(v, &mut force, &mut remaining_uses);
+    }
+    let mut affine: Vec<Option<Affine<F>>> = Vec::with_capacity(old_len);
+    let mut self_atom = vec![false; old_len];
+    for (i, node) in nodes.iter().enumerate() {
+        let a = match &node.op {
+            Op::Constant(c) => Affine::constant(*c),
+            Op::Add => {
+                let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
+                let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
+                lhs.add(rhs)
             }
-        }
-        for &(_, v) in graph.outputs() {
-            retain_for_materialization(v, &mut force, &mut remaining_uses);
-        }
-        let mut affine: Vec<Option<Affine<F>>> = Vec::with_capacity(old_len);
-        let mut self_atom = vec![false; old_len];
-        for (i, node) in nodes.iter().enumerate() {
-            let a = match &node.op {
-                Op::Constant(c) => Affine::constant(*c),
-                Op::Add => {
-                    let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
-                    let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
-                    lhs.add(rhs)
+            Op::Sub => {
+                let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
+                let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
+                lhs.sub(rhs)
+            }
+            Op::Mul => {
+                let lhs_constant = affine[node.inputs[0].index()]
+                    .as_ref()
+                    .expect("normalize: missing live left operand")
+                    .as_constant();
+                let rhs_constant = affine[node.inputs[1].index()]
+                    .as_ref()
+                    .expect("normalize: missing live right operand")
+                    .as_constant();
+                if lhs_constant.is_none() && rhs_constant.is_none() {
+                    // Decide this before consuming either edge: on a last use, retaining the
+                    // operand adds the phase-2 ownership that prevents it being moved away.
+                    retain_for_materialization(node.inputs[0], &mut force, &mut remaining_uses);
+                    retain_for_materialization(node.inputs[1], &mut force, &mut remaining_uses);
                 }
-                Op::Sub => {
-                    let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
-                    let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
-                    lhs.sub(rhs)
-                }
-                Op::Mul => {
-                    let lhs_constant = affine[node.inputs[0].index()]
-                        .as_ref()
-                        .expect("normalize: missing live left operand")
-                        .as_constant();
-                    let rhs_constant = affine[node.inputs[1].index()]
-                        .as_ref()
-                        .expect("normalize: missing live right operand")
-                        .as_constant();
-                    if lhs_constant.is_none() && rhs_constant.is_none() {
-                        // Decide this before consuming either edge: on a last use, retaining the
-                        // operand adds the phase-2 ownership that prevents it being moved away.
-                        retain_for_materialization(node.inputs[0], &mut force, &mut remaining_uses);
-                        retain_for_materialization(node.inputs[1], &mut force, &mut remaining_uses);
-                    }
-                    let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
-                    let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
-                    if let Some(c) = lhs_constant {
-                        rhs.scale(c)
-                    } else if let Some(c) = rhs_constant {
-                        lhs.scale(c)
-                    } else {
-                        self_atom[i] = true;
-                        Affine::atom(ValueId::new(i))
-                    }
-                }
-                // Everything else (Input, Precompute, PrecomputeResult, and - defensively, since
-                // normalize runs before MPC lowering and should never actually see them -
-                // MulLocal/Round/RoundResult) is an opaque atom; every one of its own inputs must
-                // materialize, since it's about to become a real node referencing them directly.
-                _ => {
-                    for input in &node.inputs {
-                        retain_for_materialization(*input, &mut force, &mut remaining_uses);
-                    }
-                    for input in &node.inputs {
-                        drop(consume_affine(*input, &mut affine, &mut remaining_uses));
-                    }
+                let lhs = consume_affine(node.inputs[0], &mut affine, &mut remaining_uses);
+                let rhs = consume_affine(node.inputs[1], &mut affine, &mut remaining_uses);
+                if let Some(c) = lhs_constant {
+                    rhs.scale(c)
+                } else if let Some(c) = rhs_constant {
+                    lhs.scale(c)
+                } else {
                     self_atom[i] = true;
                     Affine::atom(ValueId::new(i))
                 }
-            };
-            // A dead form with no future or materialization use need not occupy a slot at all.
-            affine.push((remaining_uses[i] != 0).then_some(a));
-        }
-
-        // Phase 2: materialize exactly what's needed, in original order (every dependency - an
-        // atom a foldable form's terms reference, or a self-atom's own raw inputs - has a strictly
-        // smaller index, and is therefore already handled by the time we reach it).
-        let mut new_nodes: Vec<Node<F>> = Vec::with_capacity(old_len);
-        let mut materialized: Vec<Option<ValueId>> = vec![None; old_len];
-        for (i, node) in nodes.iter().enumerate() {
-            if self_atom[i] {
-                let remapped = node
-                    .inputs
-                    .iter()
-                    .map(|v| {
-                        materialized[v.index()].expect("normalize: input not yet materialized")
-                    })
-                    .collect();
-                materialized[i] = Some(push(&mut new_nodes, node.op.clone(), remapped));
-            } else if force[i] {
-                materialized[i] = Some(materialize_affine(
-                    affine[i]
-                        .as_ref()
-                        .expect("normalize: forced affine form was not retained"),
-                    &materialized,
-                    &mut new_nodes,
-                ));
             }
-            // else: purely absorbed into some later Affine, never materialized.
-        }
-
-        if new_nodes.len() > old_len {
-            // Guard: a wide, all-non-trivial-coefficient sum can in principle need as many Mul
-            // nodes as it has terms - revert rather than risk a pathological blow-up.
-            return Ok(false);
-        }
-
-        // Node count is only a growth guard, not a change detector: `x - x` and its replacement
-        // `0` both occupy one result node before the next GC pass. Compare structure and output
-        // remaps so equal-sized canonical rewrites are committed and an already-canonical graph
-        // still converges.
-        let nodes_unchanged = new_nodes.len() == old_len
-            && nodes
-                .iter()
-                .zip(&new_nodes)
-                .all(|(old, new)| old.op == new.op && old.inputs == new.inputs);
-        let outputs_unchanged = graph
-            .outputs()
-            .iter()
-            .all(|&(_, output)| materialized[output.index()] == Some(output));
-        let changed = !nodes_unchanged || !outputs_unchanged;
-        if changed {
-            graph.rebuild_nodes(new_nodes, &materialized);
-        }
-        Ok(changed)
+            // Everything else (Input, Precompute, PrecomputeResult, and - defensively, since
+            // normalize runs before MPC lowering and should never actually see them -
+            // MulLocal/Round/RoundResult) is an opaque atom; every one of its own inputs must
+            // materialize, since it's about to become a real node referencing them directly.
+            _ => {
+                for input in &node.inputs {
+                    retain_for_materialization(*input, &mut force, &mut remaining_uses);
+                }
+                for input in &node.inputs {
+                    drop(consume_affine(*input, &mut affine, &mut remaining_uses));
+                }
+                self_atom[i] = true;
+                Affine::atom(ValueId::new(i))
+            }
+        };
+        // A dead form with no future or materialization use need not occupy a slot at all.
+        affine.push((remaining_uses[i] != 0).then_some(a));
     }
+
+    // Phase 2: materialize exactly what's needed, in original order (every dependency - an
+    // atom a foldable form's terms reference, or a self-atom's own raw inputs - has a strictly
+    // smaller index, and is therefore already handled by the time we reach it).
+    let mut new_nodes: Vec<Node<F>> = Vec::with_capacity(old_len);
+    let mut materialized: Vec<Option<ValueId>> = vec![None; old_len];
+    for (i, node) in nodes.iter().enumerate() {
+        if self_atom[i] {
+            let remapped = node
+                .inputs
+                .iter()
+                .map(|v| {
+                    materialized[v.index()].expect("normalize: input not yet materialized")
+                })
+                .collect();
+            materialized[i] = Some(push(&mut new_nodes, node.op.clone(), remapped));
+        } else if force[i] {
+            materialized[i] = Some(materialize_affine(
+                affine[i]
+                    .as_ref()
+                    .expect("normalize: forced affine form was not retained"),
+                &materialized,
+                &mut new_nodes,
+            ));
+        }
+        // else: purely absorbed into some later Affine, never materialized.
+    }
+
+    if new_nodes.len() > old_len {
+        // Guard: a wide, all-non-trivial-coefficient sum can in principle need as many Mul
+        // nodes as it has terms - revert rather than risk a pathological blow-up.
+        return Ok(false);
+    }
+
+    // Node count is only a growth guard, not a change detector: `x - x` and its replacement
+    // `0` both occupy one result node before the next GC pass. Compare structure and output
+    // remaps so equal-sized canonical rewrites are committed and an already-canonical graph
+    // still converges.
+    let nodes_unchanged = new_nodes.len() == old_len
+        && nodes
+            .iter()
+            .zip(&new_nodes)
+            .all(|(old, new)| old.op == new.op && old.inputs == new.inputs);
+    let outputs_unchanged = graph
+        .outputs()
+        .iter()
+        .all(|&(_, output)| materialized[output.index()] == Some(output));
+    let changed = !nodes_unchanged || !outputs_unchanged;
+    if changed {
+        graph.rebuild_nodes(new_nodes, &materialized);
+    }
+    Ok(changed)
 }
 
 /// Adds one phase-2 use the first time a value is forced to materialize.
@@ -286,7 +277,7 @@ mod tests {
             Node::new(Op::Sub, vec![ValueId::new(2), ValueId::new(0)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
-        let changed = Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 1); // only x1 (Input 1) survives
@@ -316,7 +307,7 @@ mod tests {
             1,
             5,
         );
-        Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+        run(&mut graph).unwrap();
         graph.gc();
         // 4 inputs + one Add for (a+b) + one Add for (c+d) + one Mul = 7, unchanged in shape
         assert_eq!(graph.len(), 7);
@@ -334,7 +325,7 @@ mod tests {
         ];
         let mut graph = graph_of(nodes, ValueId::new(1));
 
-        let changed = Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert!(matches!(
             graph.nodes()[1].op,
@@ -343,7 +334,7 @@ mod tests {
         assert!(graph.nodes()[1].inputs.is_empty());
 
         let changed_again =
-            Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+            run(&mut graph).unwrap();
         assert!(!changed_again, "canonical zero must be a fixpoint");
     }
 
@@ -360,7 +351,7 @@ mod tests {
         ];
         let mut graph = graph_of(nodes, ValueId::new(4));
 
-        assert!(Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap());
+        assert!(run(&mut graph).unwrap());
         graph.gc();
         assert_eq!(graph.len(), 1);
         assert!(matches!(graph.nodes()[0].op, Op::Input(_)));
@@ -378,7 +369,7 @@ mod tests {
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
 
-        let changed = Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(!changed, "the already-canonical graph should be preserved");
         assert_eq!(
             graph.nodes()[3].inputs,
@@ -404,7 +395,7 @@ mod tests {
         }
         let mut graph = graph_of(nodes, sum);
 
-        let changed = Pass::run(&mut Normalize, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(!changed);
         assert_eq!(graph.len(), 2 * TERMS - 1);
     }

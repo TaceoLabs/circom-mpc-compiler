@@ -48,19 +48,9 @@ pub trait VmDriver<F: PrimeField> {
     fn sub_ps(&mut self, a: F, b: &Self::Share) -> Self::Share;
     fn mul_sp(&mut self, a: &Self::Share, b: F) -> Self::Share;
 
-    /// The free local half of a secret x secret product (`a*b + mask`, rep3's `local_mul_vec`) -
-    /// not a valid share on its own, only after `reshare`.
-    fn mul_local(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Local;
-    /// Vector form used once per scheduled round. The default preserves compatibility for simple
-    /// drivers; rep3 overrides it so mask allocation and Rayon dispatch happen once per round.
-    fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<Self::Local> {
-        assert_eq!(
-            a.len(),
-            b.len(),
-            "local product vectors must have equal length"
-        );
-        a.iter().zip(b).map(|(a, b)| self.mul_local(a, b)).collect()
-    }
+    /// The free local half of a whole round's secret x secret products (`a*b + mask` each, rep3's
+    /// `local_mul_vec`) - not valid shares on their own, only after `reshare`.
+    fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<Self::Local>;
     /// One batched network round: reshares every `Local` value together in a single message.
     fn reshare(&mut self, locals: &[Self::Local]) -> eyre::Result<Vec<Self::Share>>;
 
@@ -74,77 +64,18 @@ pub trait VmDriver<F: PrimeField> {
     /// The identity for `PlainDriver`, whose `Share` is already `F`.
     fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<F>>;
 
-    /// `states` is `sites * t` shares (one length-`t` state per site, concatenated, in site
-    /// order); returns `sites * (t + intermediates)` shares (each site's permuted state then its
-    /// trace), matching `ir::PrecomputeKind::Poseidon2`'s result layout.
-    fn poseidon2_traces(
-        &mut self,
-        t: usize,
-        states: &[Self::Share],
-    ) -> eyre::Result<Vec<Self::Share>>;
-    /// Request-aware Poseidon2 twin. `result_offsets` is a CSR row pointer with one row per site;
-    /// each row names the site's strictly ascending logical result slots. Results are returned in
-    /// that same site-major CSR order.
-    ///
-    /// The default keeps third-party drivers source-compatible by filtering their full trace.
-    /// Built-in drivers override it to avoid materializing witness-dead trace values.
+    /// Poseidon2 traces for a batch of sites. `states` is `sites * t` shares (one length-`t` state
+    /// per site, concatenated). `result_offsets` is a CSR row pointer with one row per site; each
+    /// row names the site's strictly ascending logical result slots (indices into
+    /// `ir::PrecomputeKind::Poseidon2`'s result layout). Results are returned in that same
+    /// site-major CSR order, so witness-dead trace values are never materialized.
     fn poseidon2_requested_traces(
         &mut self,
         t: usize,
         states: &[Self::Share],
         result_requests: &[u32],
         result_offsets: &[u32],
-    ) -> eyre::Result<Vec<Self::Share>> {
-        eyre::ensure!(
-            t != 0 && !states.is_empty() && states.len().is_multiple_of(t),
-            "Poseidon2 requested trace input must contain a non-zero whole number of sites"
-        );
-        let sites = states.len() / t;
-        eyre::ensure!(
-            result_offsets.len() == sites + 1,
-            "Poseidon2 request offsets has length {}, expected {}",
-            result_offsets.len(),
-            sites + 1
-        );
-        eyre::ensure!(
-            result_offsets[0] == 0 && result_offsets[sites] as usize == result_requests.len(),
-            "Poseidon2 request offsets do not span the request table"
-        );
-
-        let full = self.poseidon2_traces(t, states)?;
-        eyre::ensure!(
-            full.len().is_multiple_of(sites),
-            "Poseidon2 full trace has {} values for {sites} sites",
-            full.len()
-        );
-        let capacity = full.len() / sites;
-        let mut selected = Vec::with_capacity(result_requests.len());
-        for site in 0..sites {
-            let lo = result_offsets[site] as usize;
-            let hi = result_offsets[site + 1] as usize;
-            eyre::ensure!(
-                lo <= hi && hi <= result_requests.len(),
-                "Poseidon2 site {site} has invalid request range {lo}..{hi}"
-            );
-            let requests = &result_requests[lo..hi];
-            for pair in requests.windows(2) {
-                eyre::ensure!(
-                    pair[0] < pair[1],
-                    "Poseidon2 site {site} requests must be strictly ascending"
-                );
-            }
-            let site_full = &full[site * capacity..(site + 1) * capacity];
-            for &logical in requests {
-                let logical = logical as usize;
-                eyre::ensure!(
-                    logical < capacity,
-                    "Poseidon2 site {site} requested slot {logical}, capacity is {capacity}"
-                );
-                selected.push(site_full[logical].clone());
-            }
-        }
-        Ok(selected)
-    }
+    ) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is one share per site; returns `sites * n` shares (bit decompositions, in order).
     fn num2bits_traces(
         &mut self,
@@ -160,28 +91,7 @@ pub trait VmDriver<F: PrimeField> {
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],
-    ) -> eyre::Result<Vec<(Self::Share, Self::Share, F)>> {
-        let traces = self.is_zero_traces(inputs)?;
-        eyre::ensure!(
-            traces.len() == inputs.len() * 2,
-            "is_zero_traces returned {} values for {} inputs",
-            traces.len(),
-            inputs.len()
-        );
-        let is_zero: Vec<_> = traces.chunks_exact(2).map(|site| site[0].clone()).collect();
-        let revealed = self.open(&is_zero)?;
-        eyre::ensure!(
-            revealed.len() == inputs.len(),
-            "open returned {} values for {} IsZero sites",
-            revealed.len(),
-            inputs.len()
-        );
-        Ok(traces
-            .chunks_exact(2)
-            .zip(revealed)
-            .map(|(site, opened)| (site[0].clone(), site[1].clone(), opened))
-            .collect())
-    }
+    ) -> eyre::Result<Vec<(Self::Share, Self::Share, F)>>;
     /// `inputs` is `sites * 2` shares (`[in[0], in[1]]` per site); returns `sites * 4` - see
     /// `ir::PrecomputeKind::IsEqual`. Delegates to `is_zero_traces` on the differences, so batching
     /// stays uniform across kinds rather than being special-cased in `Machine::run`.

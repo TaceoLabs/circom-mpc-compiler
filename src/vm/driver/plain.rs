@@ -47,18 +47,14 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
         *a * b
     }
 
-    fn mul_local(&mut self, a: &F, b: &F) -> F {
-        *a * *b
+    fn mul_local_vec(&mut self, a: &[F], b: &[F]) -> Vec<F> {
+        a.iter().zip(b).map(|(a, b)| *a * *b).collect()
     }
 
     fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<F>> {
         // Nothing distinguishes "local" from "shared" for a single party - a round's k-th input
         // already *is* its k-th result. See docs/ARCHITECTURE.md, "MPC lowering".
         Ok(locals.to_vec())
-    }
-
-    fn poseidon2_traces(&mut self, t: usize, states: &[F]) -> eyre::Result<Vec<F>> {
-        poseidon2::plain_trace(t, states)
     }
 
     fn poseidon2_requested_traces(

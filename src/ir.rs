@@ -66,43 +66,16 @@ impl RoundId {
     }
 }
 
-/// What a [`RoundDesc`] batches. `Reshare` (one `net.reshare_many` call, rep3's `local_mul_vec` +
-/// `reshare_vec`) is the only kind produced today - see `docs/ARCHITECTURE.md`, "MPC lowering", for
-/// the domain lattice this implements. `Open` (for when `Div`/comparisons return, per the "Known
-/// gaps" roadmap) is a real future variant, not stubbed here - it has no producer yet, and this enum
-/// isn't public API, so there's nothing to keep source-compatible by pre-declaring it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RoundKind {
-    Reshare,
-}
-
-/// One batched MPC network round: every [`Op::MulLocal`] value that feeds this round's
+/// One batched MPC network round (a reshare): every [`Op::MulLocal`] value that feeds this round's
 /// [`Op::Round`] node reshares in the same message (`len` slots, one [`Op::RoundResult`] each).
 #[derive(Debug, Clone)]
 pub(crate) struct RoundDesc {
-    // Only ever `Reshare` today (see `RoundKind`) and only read back by pass unit tests so far -
-    // real second-kind dispatch arrives with `Open`.
-    #[allow(dead_code)]
-    pub(crate) kind: RoundKind,
     pub(crate) len: usize,
     /// This round's position in the circuit's **network-event** order - reshare rounds and
     /// precomputation batch services interleaved on one axis (see `passes::mpc::level`). Not the
-    /// same as multiplicative depth, which ignores batch services entirely and would put dependent
-    /// precomputation sites at the same position. Diagnostic only (`Graph::mpc_summary`), not
-    /// consulted structurally.
+    /// same as multiplicative depth. Diagnostic only, not consulted structurally.
     #[allow(dead_code)]
     pub(crate) level: usize,
-}
-
-/// Which lowering stage a [`Graph`] is in. Internal bookkeeping, not a config surface - every public
-/// entry point (`CoCircomCompiler::parse`) always returns `MpcLowered`; this exists so
-/// [`Graph::verify`] knows which invariants apply between passes, and so pass-level unit tests can
-/// build a `Plain` graph by hand without needing to run the whole lowering pipeline first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Stage {
-    #[default]
-    Plain,
-    MpcLowered,
 }
 
 /// The effect of MPC lowering, as reported by [`Graph::mpc_summary`]. Diagnostic - logged under
@@ -286,29 +259,16 @@ pub enum Op<F: PrimeField> {
     RoundResult(u32),
 }
 
-/// How many inputs a node's op requires. Almost every op has a fixed arity known without any
-/// other context; [`Op::Precompute`] is the sole exception (see [`PrecomputeSite`]), which is why
-/// this is a small enum rather than a bare `usize`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Arity {
-    Fixed(usize),
-    /// Equal to the `num_inputs` of the [`PrecomputeSite`] the node's [`PrecomputeId`] refers to -
-    /// only [`Graph::verify`] can check this, since it alone has access to the site table.
-    SiteInputs,
-    /// Equal to the `len` of the [`RoundDesc`] the node's [`RoundId`] refers to - only
-    /// [`Graph::verify`] can check this, for the same reason as [`Arity::SiteInputs`].
-    RoundLen,
-}
-
 impl<F: PrimeField> Op<F> {
-    /// The number of operands this op reads from other values in the graph.
-    pub(crate) fn arity(&self) -> Arity {
+    /// The number of operands this op reads, where that is context-free. `None` for
+    /// [`Op::Precompute`] (arity is its site's `num_inputs`) and [`Op::Round`] (its round's `len`);
+    /// only [`Graph::verify`] can check those, since it alone has the tables.
+    pub(crate) fn fixed_arity(&self) -> Option<usize> {
         match self {
-            Op::Input(_) | Op::Constant(_) => Arity::Fixed(0),
-            Op::Add | Op::Sub | Op::Mul | Op::MulLocal => Arity::Fixed(2),
-            Op::Precompute(_) => Arity::SiteInputs,
-            Op::PrecomputeResult(_) | Op::RoundResult(_) => Arity::Fixed(1),
-            Op::Round(_) => Arity::RoundLen,
+            Op::Input(_) | Op::Constant(_) => Some(0),
+            Op::Add | Op::Sub | Op::Mul | Op::MulLocal => Some(2),
+            Op::PrecomputeResult(_) | Op::RoundResult(_) => Some(1),
+            Op::Precompute(_) | Op::Round(_) => None,
         }
     }
 
@@ -337,9 +297,7 @@ pub struct Node<F: PrimeField> {
 
 impl<F: PrimeField> Node<F> {
     pub(crate) fn new(op: Op<F>, inputs: Vec<ValueId>) -> Self {
-        // Arity::SiteInputs can't be checked here - only Graph::verify has the site table to
-        // check it against.
-        if let Arity::Fixed(arity) = op.arity() {
+        if let Some(arity) = op.fixed_arity() {
             debug_assert_eq!(
                 inputs.len(),
                 arity,
@@ -389,9 +347,11 @@ pub struct Graph<F: PrimeField> {
     /// `docs/ARCHITECTURE.md`, "Precomputation".
     precompute_sites: Vec<PrecomputeSite>,
     /// Every batched MPC network round, indexed by [`RoundId`]. Empty until `passes::mpc` lowers
-    /// the graph. See `docs/ARCHITECTURE.md`, "MPC lowering".
+    /// the graph.
     rounds: Vec<RoundDesc>,
-    stage: Stage,
+    /// Whether MPC lowering has run. [`Graph::verify`] rejects MPC ops in a not-yet-lowered graph;
+    /// pass unit tests build plain graphs by hand without running the whole pipeline.
+    lowered: bool,
     pub signal_to_witness: Vec<usize>,
     pub input_list: InputList,
     pub public_inputs: Vec<String>,
@@ -427,7 +387,7 @@ impl<F: PrimeField> Graph<F> {
             outputs,
             precompute_sites,
             rounds: Vec::new(),
-            stage: Stage::Plain,
+            lowered: false,
             signal_to_witness,
             input_list,
             public_inputs,
@@ -493,10 +453,10 @@ impl<F: PrimeField> Graph<F> {
         self.rounds = rounds;
     }
 
-    /// Marks the graph as fully MPC-lowered. Called exactly once, by the `PassManager` after its
-    /// lowering-stage passes finish - see `docs/ARCHITECTURE.md`, "MPC lowering".
+    /// Marks the graph as MPC-lowered. Called once by the `PassManager`, right before its
+    /// lowering-stage passes run.
     pub(crate) fn mark_lowered(&mut self) {
-        self.stage = Stage::MpcLowered;
+        self.lowered = true;
     }
 
     /// Replaces the whole node list at once, remapping `outputs` through `remap` (`None` for a
@@ -624,20 +584,8 @@ impl<F: PrimeField> Graph<F> {
     /// Called once after the frontend builds the graph and, in debug builds, between every pass.
     pub(crate) fn verify(&self) -> eyre::Result<()> {
         for (i, node) in self.nodes.iter().enumerate() {
-            match node.op.arity() {
-                Arity::Fixed(arity) => {
-                    if node.inputs.len() != arity {
-                        eyre::bail!(
-                            "node {i} ({:?}) has {} inputs, expected {arity}",
-                            node.op,
-                            node.inputs.len(),
-                        );
-                    }
-                }
-                Arity::SiteInputs => {
-                    let Op::Precompute(site_id) = &node.op else {
-                        unreachable!("only Op::Precompute has Arity::SiteInputs");
-                    };
+            match &node.op {
+                Op::Precompute(site_id) => {
                     let site = self.precompute_sites.get(site_id.index()).ok_or_else(|| {
                         eyre::eyre!(
                             "node {i} references precompute site {} which does not exist",
@@ -653,10 +601,7 @@ impl<F: PrimeField> Graph<F> {
                         );
                     }
                 }
-                Arity::RoundLen => {
-                    let Op::Round(round_id) = &node.op else {
-                        unreachable!("only Op::Round has Arity::RoundLen");
-                    };
+                Op::Round(round_id) => {
                     let round = self.rounds.get(round_id.index()).ok_or_else(|| {
                         eyre::eyre!(
                             "node {i} references round {} which does not exist",
@@ -672,10 +617,19 @@ impl<F: PrimeField> Graph<F> {
                         );
                     }
                     // Every slot's mask comes from the local product that feeds it - a round with
-                    // no slots would have nothing to reshare. See docs/ARCHITECTURE.md, "MPC
-                    // lowering".
+                    // no slots would have nothing to reshare.
                     if round.len == 0 {
                         eyre::bail!("round {} has no slots", round_id.index());
+                    }
+                }
+                op => {
+                    let arity = op.fixed_arity().expect("non-table ops have a fixed arity");
+                    if node.inputs.len() != arity {
+                        eyre::bail!(
+                            "node {i} ({:?}) has {} inputs, expected {arity}",
+                            node.op,
+                            node.inputs.len(),
+                        );
                     }
                 }
             }
@@ -723,10 +677,8 @@ impl<F: PrimeField> Graph<F> {
                     );
                 }
             }
-            if self.stage == Stage::Plain
-                && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_))
-            {
-                eyre::bail!("node {i} ({:?}) is an MPC-lowering op but the graph is Stage::Plain", node.op);
+            if !self.lowered && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_)) {
+                eyre::bail!("node {i} ({:?}) is an MPC-lowering op but the graph is not lowered", node.op);
             }
             for input in &node.inputs {
                 if input.index() >= i {

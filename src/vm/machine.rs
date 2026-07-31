@@ -222,10 +222,7 @@ impl Machine {
                     );
                     let rstart = entry.result_start as usize;
                     for (k, r) in results.into_iter().enumerate() {
-                        let slot = program.round_results[rstart + k];
-                        if slot != u32::MAX {
-                            shared[slot as usize] = r;
-                        }
+                        shared[program.round_results[rstart + k] as usize] = r;
                     }
                 }
                 Opcode::Precompute => Self::run_batch(
@@ -325,11 +322,11 @@ impl Machine {
                     &batch.result_requests,
                     &batch.result_offsets,
                 )?;
-                return Self::store_batch_results_owned(batch, selected, Bank::Public, public);
+                return Self::store_batch_results(batch, selected, Bank::Public, public);
             }
             let results = Self::run_plain_batch(kind, &inputs)?;
             let selected = Self::select_requests(&results, batch)?;
-            return Self::store_batch_results(batch, &selected, Bank::Public, public);
+            return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
 
         // A site input isn't always a share - a circuit may pass a literal, which codegen resolves
@@ -351,7 +348,7 @@ impl Machine {
         if let PrecomputeKind::Reveal { .. } = kind {
             let opened = driver.open(&inputs)?;
             let selected = Self::select_requests(&opened, batch)?;
-            return Self::store_batch_results(batch, &selected, Bank::Public, public);
+            return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
         if let PrecomputeKind::Poseidon2 { t } = kind {
             let selected = driver.poseidon2_requested_traces(
@@ -360,7 +357,7 @@ impl Machine {
                 &batch.result_requests,
                 &batch.result_offsets,
             )?;
-            return Self::store_batch_results_owned(batch, selected, Bank::Shared, shared);
+            return Self::store_batch_results(batch, selected, Bank::Shared, shared);
         }
         let results = match kind {
             PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
@@ -371,7 +368,7 @@ impl Machine {
             PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
         let selected = Self::select_requests(&results, batch)?;
-        Self::store_batch_results(batch, &selected, Bank::Shared, shared)
+        Self::store_batch_results(batch, selected, Bank::Shared, shared)
     }
 
     fn run_is_zero_reveal_batch<F: PrimeField, D: VmDriver<F>>(
@@ -418,9 +415,6 @@ impl Machine {
                 .iter()
                 .zip(&batch.result_targets[lo..hi])
             {
-                if target.slot == u32::MAX {
-                    continue;
-                }
                 match logical {
                     0 => {
                         eyre::ensure!(target.bank == Bank::Shared, "IsZero.out must target Shared");
@@ -442,10 +436,12 @@ impl Machine {
     }
 
     fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        use super::gadgets::{aliascheck, isequal, iszero, num2bits, poseidon2};
+        use super::gadgets::{aliascheck, isequal, iszero, num2bits};
 
         Ok(match kind {
-            PrecomputeKind::Poseidon2 { t } => poseidon2::plain_trace(t, inputs)?,
+            PrecomputeKind::Poseidon2 { .. } => {
+                unreachable!("public Poseidon2 takes the requested-trace path in run_batch")
+            }
             PrecomputeKind::Num2Bits { n } => inputs
                 .iter()
                 .flat_map(|&x| num2bits::plain_trace(x, n))
@@ -508,36 +504,7 @@ impl Machine {
         Ok(selected)
     }
 
-    fn store_batch_results<T: Clone>(
-        batch: &PrecomputeBatch,
-        results: &[T],
-        expected_bank: Bank,
-        destination: &mut [T],
-    ) -> eyre::Result<()> {
-        eyre::ensure!(
-            results.len() == batch.result_targets.len(),
-            "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
-             slot)",
-            batch.kind,
-            results.len(),
-            batch.result_targets.len()
-        );
-        for (target, value) in batch.result_targets.iter().zip(results) {
-            eyre::ensure!(
-                target.bank == expected_bank,
-                "precompute batch ({:?}) result targets mixed banks unexpectedly",
-                batch.kind
-            );
-            if target.slot != u32::MAX {
-                destination[target.slot as usize] = value.clone();
-            }
-        }
-        Ok(())
-    }
-
-    /// Poseidon2 already returns exactly the CSR-requested values, so consume that vector while
-    /// scattering it into bank slots instead of cloning it through the generic full-trace bridge.
-    fn store_batch_results_owned<T>(
+    fn store_batch_results<T>(
         batch: &PrecomputeBatch,
         results: Vec<T>,
         expected_bank: Bank,
@@ -557,9 +524,7 @@ impl Machine {
                 "precompute batch ({:?}) result targets mixed banks unexpectedly",
                 batch.kind
             );
-            if target.slot != u32::MAX {
-                destination[target.slot as usize] = value;
-            }
+            destination[target.slot as usize] = value;
         }
         Ok(())
     }
@@ -643,7 +608,7 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn mul_local(&mut self, _a: &Fr, _b: &Fr) -> Fr {
+        fn mul_local_vec(&mut self, _a: &[Fr], _b: &[Fr]) -> Vec<Fr> {
             unreachable!("minimal panic fixture has no instructions")
         }
 
@@ -655,10 +620,12 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn poseidon2_traces(
+        fn poseidon2_requested_traces(
             &mut self,
             _t: usize,
             _states: &[Fr],
+            _result_requests: &[u32],
+            _result_offsets: &[u32],
         ) -> eyre::Result<Vec<Fr>> {
             unreachable!("minimal panic fixture has no instructions")
         }
@@ -672,6 +639,10 @@ mod tests {
         }
 
         fn is_zero_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+            unreachable!("minimal panic fixture has no instructions")
+        }
+
+        fn is_zero_reveal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<(Fr, Fr, Fr)>> {
             unreachable!("minimal panic fixture has no instructions")
         }
 

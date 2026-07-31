@@ -17,9 +17,7 @@ use std::collections::HashMap;
 use ark_ec::pairing::Pairing;
 use ark_ff::{BigInteger, PrimeField};
 use circom_compiler::compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP};
-use circom_compiler::hir::very_concrete_program::Wire as CircomWire;
 use circom_constraint_generation::BuildConfig;
-use circom_program_structure::ast::SignalType;
 use circom_program_structure::error_definition::Report;
 use circom_program_structure::program_archive::ProgramArchive;
 use circom_type_analysis::check_types;
@@ -31,27 +29,13 @@ use crate::CompilerConfig;
 
 use build::GraphCompiler;
 
-/// A list of circuit inputs: (name, witness offset, size).
-pub(crate) type InputList = ir::InputList;
+use crate::ir::InputList;
 
-/// Maps an output signal's name to (offset, size) in the witness.
-pub type OutputMapping = HashMap<String, (usize, usize)>;
-
-/// A template header's total flat signal count: its own declared signals (inputs + outputs +
-/// intermediates) plus every signal belonging to every subcomponent it transitively instantiates -
-/// i.e. exactly the contiguous span circom's own runtime layout reserves for one instance of that
-/// template. Needed to size a precomputation site's result-slot range (`num_intermediates` in
-/// `ir::PrecomputeSite`).
-///
-/// circom itself computes this same quantity (`constraint_generation::execution_data::
-/// executed_program::produce_dags_stats`), but only over its internal `DAG`, which
-/// `circom_constraint_generation::build_circuit`'s public API does not expose (it returns a
-/// `Box<dyn ConstraintExporter>` - a file-writer trait object with `r1cs`/`sym`/`json` methods
-/// only, no structural accessors). This recomputes it from `VCP::templates`, which *is* public:
-/// each `TemplateInstance` already carries its own direct signal counts and a `triggers` list
-/// naming every subcomponent it instantiates by `template_id` (an index into this same `templates`
-/// list - the convention `get_output_mapping` above also relies on), so the same recursive sum
-/// falls out directly, just sourced from a different (but equivalent) part of circom's output.
+/// A template header's total flat signal count: its own declared signals plus every signal of
+/// every subcomponent it transitively instantiates - the contiguous span circom's runtime layout
+/// reserves for one instance. Sizes a precomputation site's result-slot range. Recomputed from
+/// `VCP::templates` because circom computes it only on its internal `DAG`, which
+/// `build_circuit`'s public API does not expose.
 fn compute_signal_spans(vcp: &VCP) -> FxHashMap<String, usize> {
     fn span(vcp: &VCP, id: usize, memo: &mut [Option<usize>]) -> usize {
         if let Some(cached) = memo[id] {
@@ -113,10 +97,10 @@ fn get_program_archive<F: PrimeField>(
 fn build_circuit(
     program_archive: ProgramArchive,
     config: &CompilerConfig,
-) -> Result<(CircomCircuit, OutputMapping, FxHashMap<String, usize>)> {
+) -> Result<(CircomCircuit, FxHashMap<String, usize>)> {
     let build_config = BuildConfig {
-        // Full constraint simplification, unbounded round count - circom's `--O2`, no other level
-        // is supported (see `docs/ARCHITECTURE.md`, "Known gaps").
+        // Full constraint simplification, unbounded round count - circom's `--O2`; no other level
+        // is supported.
         no_rounds: usize::MAX,
         flag_json_sub: false,
         json_substitutions: String::new(),
@@ -130,33 +114,13 @@ fn build_circuit(
     };
     let (_, vcp) = circom_constraint_generation::build_circuit(program_archive, build_config)
         .map_err(|_| eyre::eyre!("cannot build vcp"))?;
-    let output_mapping = get_output_mapping(&vcp);
     let signal_spans = compute_signal_spans(&vcp);
 
     let flags = CompilationFlags {
         main_inputs_log: false,
         wat_flag: false,
     };
-    Ok((
-        CircomCircuit::build(vcp, flags, &config.version),
-        output_mapping,
-        signal_spans,
-    ))
-}
-
-fn get_output_mapping(vcp: &VCP) -> OutputMapping {
-    let mut output_mappings = HashMap::new();
-    let initial_node = vcp.get_main_id();
-    let main = &vcp.templates[initial_node];
-    for s in &main.wires {
-        if let CircomWire::TSignal(s) = s {
-            if s.xtype == SignalType::Output {
-                output_mappings.insert(s.name.clone(), (s.dag_local_id, s.size));
-            }
-        }
-        // TODO: Can buses be outputs?
-    }
-    output_mappings
+    Ok((CircomCircuit::build(vcp, flags, &config.version), signal_spans))
 }
 
 /// Parses `file` all the way down to a flat, verified (but not yet garbage-collected)
@@ -168,7 +132,7 @@ pub(crate) fn build_graph<P: Pairing>(
     let program_archive = get_program_archive::<P::ScalarField>(file, &config)?;
     let public_inputs = program_archive.public_inputs.clone();
     let mpc_public_inputs = config.mpc_public_inputs.clone();
-    let (mut circuit, _output_mapping, signal_spans) = build_circuit(program_archive, &config)?;
+    let (mut circuit, signal_spans) = build_circuit(program_archive, &config)?;
     let constant_table = circuit
         .c_producer
         .get_field_constant_list()

@@ -1,36 +1,14 @@
 //! Real protocol inputs for the vendored `circuits/merces/` circuits, shared by
-//! `tests/merces.rs`, `benches/`, and `examples/merces.rs`.
+//! `tests/merces.rs`, `benches/`, and `examples/merces.rs`. Lives in the library because tests,
+//! benches and examples are separate compilation units that cannot share a `tests/common` module.
 //!
-//! Lives in the library rather than under `tests/` because integration tests, benches and examples
-//! are three separate compilation units that cannot share a `tests/common` module between them.
-//!
-//! # Where the inputs come from
-//!
-//! `inputs/<main>_<scenario>.json` are real merces protocol values (not placeholders), one file per
-//! scenario, baked into the binary with `include_str!` so no test can silently skip because a file
-//! moved. Copied verbatim from merces' own `circom/main/inputs/`; regenerate from there, not from
-//! anything in this crate. [`MERCES_SCENARIOS`] is the index; [`Scenario::values`] turns one into the
-//! flat `&[F]` `Program::classify_inputs` expects, via [`flatten`] against the circuit's own
-//! `Graph::input_list`.
-//!
-//! # The `===` constraints these values satisfy
-//!
-//! Witness extension would happily run on any values; a *proof* additionally needs every `===` in
-//! the circuit to hold, which real protocol values do and arbitrary ones would not. Four families
-//! exist in the server closure:
-//!
-//! | Constraint | Where | How the real inputs satisfy it |
-//! |---|---|---|
-//! | `isDeposit * isWithdraw === 0` | `server.circom:110` | never both set, in any slot of any scenario |
-//! | `isTransfer * (senderWithdraw.newRoot - receiverDeposit.oldRoot) === 0` | `server.circom:159` | `isTransfer = 1` in `transfer` and in several batch8 slots; holds because the sender's post-withdraw root genuinely equals the receiver's pre-deposit root under a real Merkle setup |
-//! | `indexBits[k] * (indexBits[k] - 1) === 0` | `hash.circom:40` | genuine 0/1 index bits |
-//! | `shouldBeZeros[i] * indexBits[..] === 0` | `merkle_root_4.circom:76` | `depth = 3 < MAX_DEPTH = 13`, and every index bit at position `2*depth..` is zero |
-//!
-//! Everything else is `<--`/`<==` assignment, satisfied by construction. The root-linking family is
-//! not checkable by anything in this crate - it is confirmed externally by a passing prove+verify
-//! test in `tests/merces.rs`, against circom's own R1CS (see `scripts/gen-merces-artifacts.sh`).
+//! `inputs/<main>_<scenario>.json` are real merces protocol values (not placeholders), copied
+//! verbatim from merces' own `circom/main/inputs/` and baked in with `include_str!`. Real values
+//! matter: witness extension runs on anything, but a *proof* additionally needs every `===` in the
+//! circuit to hold (flag exclusivity, genuine index bits, and transfer root-linking, which needs a
+//! real Merkle setup).
 
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 use ark_ff::PrimeField;
 use num_bigint::BigUint;
@@ -39,7 +17,7 @@ use crate::ir::InputList;
 
 /// A circuit's inputs by name, each already flattened row-major the way circom numbers a
 /// multi-dimensional input signal.
-pub type NamedInputs<F> = BTreeMap<String, Vec<F>>;
+type NamedInputs<F> = BTreeMap<String, Vec<F>>;
 
 /// Parses one circom input leaf: a decimal string (optionally `-`-prefixed), a `0x`-prefixed hex
 /// string, or a JSON integer. Reduced mod p, matching circom's own input semantics.
@@ -102,8 +80,8 @@ fn push_flat<F: PrimeField>(path: &str, v: &serde_json::Value, out: &mut Vec<F>)
 }
 
 /// A circom-style `input.json` as [`NamedInputs`]: nested arrays flatten row-major, bare scalars
-/// become one-element vectors. Composes directly with [`flatten`].
-pub fn from_input_json<F: PrimeField>(json: &serde_json::Value) -> eyre::Result<NamedInputs<F>> {
+/// become one-element vectors.
+fn from_input_json<F: PrimeField>(json: &serde_json::Value) -> eyre::Result<NamedInputs<F>> {
     let object = json
         .as_object()
         .ok_or_else(|| eyre::eyre!("input.json must be a JSON object of `name: value` pairs"))?;
@@ -116,23 +94,13 @@ pub fn from_input_json<F: PrimeField>(json: &serde_json::Value) -> eyre::Result<
     Ok(inputs)
 }
 
-/// [`from_input_json`] over a file, with the path in every error message.
-pub fn read_input_json<F: PrimeField>(path: impl AsRef<Path>) -> eyre::Result<NamedInputs<F>> {
-    let path = path.as_ref();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| eyre::eyre!("reading {}: {e}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| eyre::eyre!("parsing {} as JSON: {e}", path.display()))?;
-    from_input_json(&json).map_err(|e| eyre::eyre!("{}: {e}", path.display()))
-}
-
 /// Orders `inputs` into the flat `&[F]` `Program::classify_inputs` expects, using the circuit's own
 /// `Graph::input_list` (`(name, start, size)` per input signal) rather than any assumed ordering.
 ///
 /// Errors if a name the circuit declares is missing, its length disagrees with what the circuit
 /// expects, or `inputs` carries a name the circuit does not declare at all (a stale key in a
 /// hand-edited scenario file, otherwise a silent no-op).
-pub fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -> eyre::Result<Vec<F>> {
+fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -> eyre::Result<Vec<F>> {
     let total = input_list.iter().map(|(_, _, size)| size).sum();
     let mut flat = vec![F::zero(); total];
     let mut claimed: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -158,30 +126,15 @@ pub fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -
     Ok(flat)
 }
 
-/// `CompilerConfig::mpc_public_inputs` for either merces server main: signal names merces' own MPC
-/// implementation (`~/repos/merces/crates/merces-server-proof/src/trace_builders/cosnark_arity4.rs`)
-/// passes as cleartext `Rep3VmType::Public` rather than secret-shared, even though only `alpha` is
-/// SNARK-public in `main {public [alpha]}`. `sender`/`receiver` are the arity-4 Merkle index bits,
-/// `senderPath`/`receiverPath` their sibling hashes; `depth`, `isDeposit`, `isWithdraw` are marked
-/// `// Public` directly in `circuits/merces/merces/server.circom`. Deliberately excludes `amount`:
-/// merces passes it cleartext for a pure deposit/withdraw but shared for a transfer, and one
-/// circuit serves all three, so it cannot be declared public here without being wrong for transfers.
-pub const MERCES_MPC_PUBLIC_INPUTS: &[&str] = &[
-    "sender",
-    "receiver",
-    "senderPath",
-    "receiverPath",
-    "depth",
-    "isDeposit",
-    "isWithdraw",
-];
-
-/// [`MERCES_MPC_PUBLIC_INPUTS`] as owned `String`s, ready for `CompilerConfig::mpc_public_inputs`.
+/// `CompilerConfig::mpc_public_inputs` for either merces server main: the signal names merces' own
+/// MPC implementation passes as cleartext rather than secret-shared. Deliberately excludes
+/// `amount`: merces passes it cleartext for a pure deposit/withdraw but shared for a transfer, and
+/// one circuit serves all three, so it cannot be declared public here without being wrong for
+/// transfers.
 pub fn merces_mpc_public_inputs() -> Vec<String> {
-    MERCES_MPC_PUBLIC_INPUTS
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    ["sender", "receiver", "senderPath", "receiverPath", "depth", "isDeposit", "isWithdraw"]
+        .map(String::from)
+        .to_vec()
 }
 
 /// One real protocol input set for a vendored merces main, keyed by `(main, name)`.
@@ -272,7 +225,7 @@ pub const MERCES_SCENARIOS: &[Scenario] = &[
 
 impl Scenario {
     /// This scenario's inputs, parsed but not yet flattened against a circuit.
-    pub fn named_inputs<F: PrimeField>(&self) -> eyre::Result<NamedInputs<F>> {
+    fn named_inputs<F: PrimeField>(&self) -> eyre::Result<NamedInputs<F>> {
         let json: serde_json::Value = serde_json::from_str(self.json)
             .map_err(|e| eyre::eyre!("{}: {e}", self.file_name()))?;
         from_input_json(&json).map_err(|e| eyre::eyre!("{}: {e}", self.file_name()))

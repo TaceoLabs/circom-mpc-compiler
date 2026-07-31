@@ -482,13 +482,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     let mut input_bindings: Vec<InputBinding> = Vec::new();
     for input_index in 0..graph.num_inputs {
         let sig = crate::ir::SignalIdx::new(graph.num_outputs + input_index);
-        let d = signal_domain(
-            graph.num_outputs,
-            &graph.input_list,
-            &graph.public_inputs,
-            &graph.mpc_public_inputs,
-            sig,
-        );
+        let d = signal_domain(graph, sig);
         input_domains.push(match d {
             Domain::Public => Bank::Public,
             Domain::Shared => Bank::Shared,

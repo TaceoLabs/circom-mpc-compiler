@@ -111,34 +111,12 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
         rep3::arithmetic::mul_public(*a, b)
     }
 
-    fn mul_local(&mut self, a: &Self::Share, b: &Self::Share) -> F {
-        rep3::arithmetic::local_mul_vec(
-            std::slice::from_ref(a),
-            std::slice::from_ref(b),
-            self.state,
-        )[0]
-    }
-
     fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<F> {
         rep3::arithmetic::local_mul_vec(a, b, self.state)
     }
 
     fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<Self::Share>> {
         rep3::arithmetic::reshare_vec(locals.to_vec(), self.net)
-    }
-
-    fn poseidon2_traces(
-        &mut self,
-        t: usize,
-        states: &[Self::Share],
-    ) -> eyre::Result<Vec<Self::Share>> {
-        gadgets::poseidon2::rep3_trace_preprocessed(
-            t,
-            states,
-            self.net,
-            self.state,
-            &mut self.poseidon2,
-        )
     }
 
     fn poseidon2_requested_traces(

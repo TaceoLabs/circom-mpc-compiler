@@ -31,7 +31,7 @@ pub(crate) fn plan_precompute_batches<F: PrimeField>(
         return Vec::new();
     }
 
-    let stages = level::site_stages_with_domains(graph, domains);
+    let stages = level::site_stages(graph, domains);
     let mut site_node = vec![usize::MAX; sites.len()];
     for (i, node) in nodes.iter().enumerate() {
         if let Op::Precompute(site_id) = &node.op {

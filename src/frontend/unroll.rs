@@ -1,6 +1,5 @@
 //! Loop unrolling: circom loops with a statically known trip count are fully unrolled during
-//! per-template lowering (not a separate pass — see `docs/ARCHITECTURE.md` for why loops are not
-//! modeled as graph nodes at all).
+//! per-template lowering.
 
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
@@ -12,15 +11,13 @@ use eyre::Result;
 use super::build::{to_u64, GraphCompiler};
 
 #[derive(Debug)]
-#[allow(dead_code)] // Mul's payload isn't read yet: get_induction_iter's Mul arms are all todo!()
-enum StepType {
-    Add(usize),
-    Sub(usize),
-    Mul(usize),
+enum Step {
+    Up(usize),
+    Down(usize),
 }
 
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
-    fn get_step_size(&self, inst: &Instruction) -> (usize, StepType) {
+    fn get_step_size(&self, inst: &Instruction) -> (usize, Step) {
         // must be a top level store
         let (var_index, compute_inst) = if let Instruction::Store(store_bucket) = inst {
             if let LocationRule::Indexed {
@@ -52,18 +49,16 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 } else {
                     panic!("non value inst for compute step size")
                 };
-                tracing::trace!("step size is: {step_size}");
-                let step_type = match compute_bucket.op {
-                    OperatorType::Add => StepType::Add(step_size),
-                    OperatorType::Sub => StepType::Sub(step_size),
-                    OperatorType::Mul => StepType::Mul(step_size),
-                    x => todo!("not supported for step size {}", x.to_string()),
+                let step = match compute_bucket.op {
+                    OperatorType::Add => Step::Up(step_size),
+                    OperatorType::Sub => Step::Down(step_size),
+                    x => panic!("unsupported induction step operator {}", x.to_string()),
                 };
-                (var_index, step_type)
+                (var_index, step)
             }
             inst @ Instruction::Value(_) => {
-                tracing::trace!("this is a constant round trip");
-                (var_index, StepType::Add(self.get_constant_value(inst)))
+                // a constant round trip
+                (var_index, Step::Up(self.get_constant_value(inst)))
             }
             x => panic!(
                 "must be compute or value for step size but is {}",
@@ -74,19 +69,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 
     // we unroll the loop if it is public - if it is shared we panic for the moment
     pub(crate) fn handle_loop_bucket(&mut self, loop_bucket: &LoopBucket) -> Result<()> {
-        tracing::trace!("============================");
-        tracing::trace!("{}", loop_bucket.continue_condition.to_string());
-        tracing::trace!("body:");
-        for inst in &loop_bucket.body {
-            tracing::trace!("{}", inst.to_string());
-        }
-        // get last instruction of loop body - this is step size
-        let (var_index, step_size) =
-            if let Some(step_instruction) = loop_bucket.body.last().as_ref() {
-                self.get_step_size(step_instruction)
-            } else {
-                panic!();
-            };
+        // the last instruction of the loop body updates the induction variable
+        let (var_index, step) = self.get_step_size(
+            loop_bucket.body.last().expect("loop body must not be empty"),
+        );
 
         let round_trips =
             if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
@@ -97,12 +83,9 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 );
                 let lhs = self.get_constant_value(&compute_bucket.stack[0]);
                 let rhs = self.get_constant_value(&compute_bucket.stack[1]);
-                tracing::trace!("lhs {lhs}");
-                tracing::trace!("rhs {rhs}");
-                tracing::trace!("step size {:?}", step_size);
-                get_induction_iter(&compute_bucket.op, lhs, rhs, step_size)
+                induction_values(&compute_bucket.op, lhs, rhs, step)
             } else {
-                todo!("condition not a compute for loop unrolling!");
+                panic!("condition not a compute for loop unrolling");
             };
         for induction_var in round_trips {
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
@@ -121,41 +104,16 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 }
 
-fn get_induction_iter(
-    op: &OperatorType,
-    lhs: usize,
-    mut rhs: usize,
-    step: StepType,
-) -> Box<dyn Iterator<Item = usize>> {
-    match op {
-        OperatorType::LesserEq => {
-            rhs += 1;
-            match step {
-                StepType::Add(step) => Box::new((lhs..rhs).step_by(step)),
-                StepType::Sub(_) => todo!(),
-                StepType::Mul(_) => todo!(),
-            }
-        }
-        OperatorType::GreaterEq => match step {
-            StepType::Add(_) => todo!(),
-            StepType::Sub(step) => Box::new((rhs..=lhs).rev().step_by(step)),
-            StepType::Mul(_) => todo!(),
-        },
-        OperatorType::Lesser => match step {
-            StepType::Add(step) => Box::new((lhs..rhs).step_by(step)),
-            StepType::Sub(_) => todo!(),
-            StepType::Mul(_) => todo!(),
-        },
-        OperatorType::Greater => {
-            rhs += 1;
-            match step {
-                StepType::Add(_) => todo!(),
-                StepType::Sub(step) => Box::new((rhs..=lhs).rev().step_by(step)),
-                StepType::Mul(_) => todo!(),
-            }
-        }
-        OperatorType::Eq(_) => todo!(),
-        OperatorType::NotEq => todo!(),
-        x => panic!("got type {} in loop unrolling compute", x.to_string()),
+/// The induction variable's values for a `for (i = lhs; i <op> rhs; i +=/-= step)` loop.
+fn induction_values(op: &OperatorType, lhs: usize, rhs: usize, step: Step) -> Vec<usize> {
+    match (op, step) {
+        (OperatorType::Lesser, Step::Up(step)) => (lhs..rhs).step_by(step).collect(),
+        (OperatorType::LesserEq, Step::Up(step)) => (lhs..=rhs).step_by(step).collect(),
+        (OperatorType::Greater, Step::Down(step)) => (rhs + 1..=lhs).rev().step_by(step).collect(),
+        (OperatorType::GreaterEq, Step::Down(step)) => (rhs..=lhs).rev().step_by(step).collect(),
+        (op, step) => panic!(
+            "unsupported loop shape in unrolling: condition {} with step {step:?}",
+            op.to_string()
+        ),
     }
 }

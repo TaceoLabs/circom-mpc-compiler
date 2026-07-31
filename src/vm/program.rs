@@ -66,11 +66,9 @@ pub struct Instruction {
     pub b: u32,
 }
 
-/// One batched MPC round (see `docs/ARCHITECTURE.md`, "MPC lowering"): `operand_start/len` index
-/// into `Program::round_operands` (`Local`-bank slots to reshare together, one message) and
-/// `result_start/len` index into `Program::round_results` (`Shared`-bank slots each result lands
-/// in; `u32::MAX` = discard - structurally supported for a future pass that prunes an unread round
-/// result without renumbering the round table, though nothing produces one today).
+/// One batched MPC round: `operand_start/len` index into `Program::round_operands` (`Local`-bank
+/// slots to reshare together, one message) and `result_start/len` index into
+/// `Program::round_results` (the `Shared`-bank slot each result lands in).
 #[derive(Debug, Clone, Copy)]
 pub struct RoundEntry {
     pub operand_start: u32,
@@ -138,7 +136,7 @@ pub struct PrecomputeBatch {
     /// [`Self::result_requests`]/[`Self::result_targets`].
     pub result_offsets: Vec<u32>,
     /// Parallel to [`Self::result_requests`]: the banked destination for each requested value.
-    /// `target.slot == u32::MAX` means discard. `Bank::Local` is never valid here.
+    /// `Bank::Local` is never valid here.
     pub result_targets: Vec<ResultTarget>,
 }
 
@@ -345,9 +343,7 @@ impl<F: PrimeField> Program<F> {
                 check_slot(Bank::Local, slot, "round operand")?;
             }
             for &slot in &self.round_results[result_start..result_end] {
-                if slot != u32::MAX {
-                    check_slot(Bank::Shared, slot, "round result")?;
-                }
+                check_slot(Bank::Shared, slot, "round result")?;
             }
         }
 
@@ -452,9 +448,7 @@ impl<F: PrimeField> Program<F> {
                         "precompute batch {index} result {request} targets {:?}, expected {expected_bank:?}",
                         target.bank
                     );
-                    if target.slot != u32::MAX {
-                        check_slot(target.bank, target.slot, "precompute result")?;
-                    }
+                    check_slot(target.bank, target.slot, "precompute result")?;
                 }
             }
         }

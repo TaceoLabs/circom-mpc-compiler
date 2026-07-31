@@ -1,46 +1,34 @@
 //! Common subexpression elimination by hash-consing: every pure node (`Op::is_pure`) is deduped
 //! against every other node with the same op and the same inputs, seen so far in this rewrite.
 //! Commutative ops (`Add`, `Mul`) have their inputs sorted first, so `a+b` and `b+a` hash-cons to
-//! the same entry (`passes/algebraic.rs` does this same canonicalization at the graph level, for
-//! the same reason - the two overlap deliberately, since this pass also needs it to build the key).
+//! the same entry.
 //!
 //! Skips every impure op (`Op::Precompute`/`Op::PrecomputeResult`/`Op::MulLocal`/`Op::Round`/
 //! `Op::RoundResult`) - merging two of those would change how many traces/rounds the runtime must
-//! supply, not just fold away redundant computation. See `docs/ARCHITECTURE.md`, "MPC lowering",
-//! and `Op::is_pure`'s own doc.
+//! supply, not just fold away redundant computation.
 
 use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
 use crate::ir::{Graph, Op, RewriteAction, ValueId};
 
-use super::{Changed, Pass, PassContext};
-
-pub(super) struct Cse;
-
-impl<F: PrimeField> Pass<F> for Cse {
-    fn name(&self) -> &'static str {
-        "cse"
-    }
-
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        let mut seen: FxHashMap<(Op<F>, Vec<ValueId>), ValueId> = FxHashMap::default();
-        Ok(graph.rewrite(|_id, node, emitted| {
-            if !node.op.is_pure() {
-                return RewriteAction::Keep;
-            }
-            let key_inputs = canonical_inputs(&node.op, &node.inputs);
-            let key = (node.op.clone(), key_inputs);
-            if let Some(&existing) = seen.get(&key) {
-                RewriteAction::ReplaceWith(existing)
-            } else {
-                // `emitted`'s length is exactly this node's prospective new-space id: `rewrite`
-                // pushes a `Keep` node at position `emitted.len()`, before it calls us again.
-                seen.insert(key, ValueId::new(emitted.len()));
-                RewriteAction::Keep
-            }
-        }))
-    }
+pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    let mut seen: FxHashMap<(Op<F>, Vec<ValueId>), ValueId> = FxHashMap::default();
+    Ok(graph.rewrite(|_id, node, emitted| {
+        if !node.op.is_pure() {
+            return RewriteAction::Keep;
+        }
+        let key_inputs = canonical_inputs(&node.op, &node.inputs);
+        let key = (node.op.clone(), key_inputs);
+        if let Some(&existing) = seen.get(&key) {
+            RewriteAction::ReplaceWith(existing)
+        } else {
+            // `emitted`'s length is exactly this node's prospective new-space id: `rewrite`
+            // pushes a `Keep` node at position `emitted.len()`, before it calls us again.
+            seen.insert(key, ValueId::new(emitted.len()));
+            RewriteAction::Keep
+        }
+    }))
 }
 
 /// The key inputs used for hash-consing: sorted for commutative ops, so operand order doesn't
@@ -88,7 +76,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
-        let changed = Pass::run(&mut Cse, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 3); // two inputs + one Add survive
@@ -104,7 +92,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(1), ValueId::new(0)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
-        let changed = Pass::run(&mut Cse, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 3);
