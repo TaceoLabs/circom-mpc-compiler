@@ -117,7 +117,6 @@ impl PrecomputeKind {
             }
             PrecomputeKind::IsZero => w.write_u8(2)?,
             PrecomputeKind::AliasCheck => w.write_u8(3)?,
-            PrecomputeKind::IsEqual => w.write_u8(4)?,
             PrecomputeKind::Reveal { n } => {
                 w.write_u8(5)?;
                 w.write_u32::<LittleEndian>(*n as u32)?;
@@ -136,7 +135,6 @@ impl PrecomputeKind {
             },
             2 => PrecomputeKind::IsZero,
             3 => PrecomputeKind::AliasCheck,
-            4 => PrecomputeKind::IsEqual,
             5 => PrecomputeKind::Reveal {
                 n: r.read_u32::<LittleEndian>()? as usize,
             },

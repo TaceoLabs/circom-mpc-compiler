@@ -92,10 +92,6 @@ pub trait VmDriver<F: PrimeField> {
         &mut self,
         inputs: &[Self::Share],
     ) -> eyre::Result<Vec<(Self::Share, Self::Share, F)>>;
-    /// `inputs` is `sites * 2` shares (`[in[0], in[1]]` per site); returns `sites * 4` - see
-    /// `ir::PrecomputeKind::IsEqual`. Delegates to `is_zero_traces` on the differences, so batching
-    /// stays uniform across kinds rather than being special-cased in `Machine::run`.
-    fn is_equal_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
     /// `ir::PrecomputeKind::AliasCheck`'s doc for the exact layout.
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;

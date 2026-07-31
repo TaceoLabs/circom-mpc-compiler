@@ -108,10 +108,6 @@ pub enum PrecomputeKind {
     Num2Bits { n: usize },
     /// `1` iff the input is zero, plus the field-inversion helper trace.
     IsZero,
-    /// `1` iff the two inputs are equal. Reduces to [`Self::IsZero`] on their difference, which is
-    /// exactly what circomlib's `IsEqual` does (`in[1] - in[0] ==> isz.in`), so the gadget is a thin
-    /// wrapper over the `IsZero` one rather than a separate implementation.
-    IsEqual,
     /// Proves a 254-bit decomposition is a canonical (non-aliased) representative.
     AliasCheck,
     /// Declassifies `n` values: opens them to every MPC party in the clear if they were `Shared`,
@@ -177,14 +173,6 @@ impl PrecomputeKind {
             PrecomputeKind::Num2Bits { n } => Some(n),
             // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
             PrecomputeKind::IsZero => Some(2),
-            // circomlib's `IsEqual` is `[out][in[0], in[1]]` plus a whole `IsZero` subcomponent
-            // (`[out][in][inv]`). Result slots skip the site's own inputs, so that's 1 output + 3
-            // subtree signals: `[out, isz.out, isz.in, isz.inv]`. Cross-checked directly against
-            // `circuits/libs/comparators.circom`.
-            //
-            // `isz.in` is `in[1] - in[0]`, *not* `in[0] - in[1]` - `out` is the same either way, but
-            // `isz.in` is a real witness slot, so the sign is load-bearing.
-            PrecomputeKind::IsEqual => Some(4),
             // No outputs. AliasCheck's whole subtree is its subcomponent CompConstant: its own
             // 254 input signals (copies of AliasCheck's `in`, per circom's `==>` semantics) + 1
             // output signal (`out <== num2bits.out[127]`, still a genuine witness signal despite

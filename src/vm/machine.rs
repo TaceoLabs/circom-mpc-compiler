@@ -363,7 +363,6 @@ impl Machine {
             PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
             PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
-            PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
             PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
             PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
@@ -436,7 +435,7 @@ impl Machine {
     }
 
     fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        use super::gadgets::{aliascheck, isequal, iszero, num2bits};
+        use super::gadgets::{aliascheck, iszero, num2bits};
 
         Ok(match kind {
             PrecomputeKind::Poseidon2 { .. } => {
@@ -450,7 +449,6 @@ impl Machine {
                 .iter()
                 .flat_map(|&x| iszero::plain_trace(x))
                 .collect(),
-            PrecomputeKind::IsEqual => isequal::plain_trace(inputs)?,
             PrecomputeKind::AliasCheck => {
                 eyre::ensure!(
                     inputs.len().is_multiple_of(254),
@@ -643,10 +641,6 @@ mod tests {
         }
 
         fn is_zero_reveal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<(Fr, Fr, Fr)>> {
-            unreachable!("minimal panic fixture has no instructions")
-        }
-
-        fn is_equal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
             unreachable!("minimal panic fixture has no instructions")
         }
 

@@ -2,7 +2,6 @@
 //! batched-MPC (`rep3`, behind the `rep3` feature). See `docs/ARCHITECTURE.md`, "Precomputation".
 
 pub mod aliascheck;
-pub mod isequal;
 pub mod iszero;
 pub mod num2bits;
 pub mod poseidon2;

@@ -156,10 +156,6 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
         gadgets::iszero::rep3_masked_reveal_trace(inputs, self.net, self.state)
     }
 
-    fn is_equal_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>> {
-        gadgets::isequal::rep3_trace(inputs, self.net, self.state)
-    }
-
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>> {
         gadgets::aliascheck::rep3_trace(inputs, self.net, self.state)
     }

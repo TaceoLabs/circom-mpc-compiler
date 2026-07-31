@@ -93,9 +93,8 @@ pub struct SiteInput {
 
 /// The service executed by a [`PrecomputeBatch`]. Most batches are a direct runtime realization
 /// of one circuit [`PrecomputeKind`]. `IsZeroReveal` is deliberately VM-only: codegen may fuse the
-/// conservative circuit shapes `shared IsZero.out -> Reveal(1)` and
-/// `shared IsEqual.out -> Reveal(1)` without changing the graph, R1CS, witness layout, or proving
-/// artifacts.
+/// conservative circuit shape `shared IsZero.out -> Reveal(1)` without changing the graph, R1CS,
+/// witness layout, or proving artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchKind {
     Precompute(PrecomputeKind),
@@ -359,7 +358,6 @@ impl<F: PrimeField> Program<F> {
                 }
                 BatchKind::Precompute(PrecomputeKind::Num2Bits { .. })
                 | BatchKind::Precompute(PrecomputeKind::IsZero) => 1,
-                BatchKind::Precompute(PrecomputeKind::IsEqual) => 2,
                 BatchKind::Precompute(PrecomputeKind::AliasCheck) => 254,
                 BatchKind::Precompute(PrecomputeKind::Reveal { n }) => n,
                 BatchKind::IsZeroReveal => 1,

@@ -4,7 +4,7 @@
 
 use ark_ff::PrimeField;
 
-use crate::vm::gadgets::{aliascheck, isequal, iszero, num2bits, poseidon2};
+use crate::vm::gadgets::{aliascheck, iszero, num2bits, poseidon2};
 
 use super::VmDriver;
 
@@ -89,10 +89,6 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
                 (is_zero, inverse, is_zero)
             })
             .collect())
-    }
-
-    fn is_equal_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        isequal::plain_trace(inputs)
     }
 
     fn alias_check_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {

@@ -368,7 +368,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
             "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
             "IsZero" => Some(PrecomputeKind::IsZero),
-            "IsEqual" => Some(PrecomputeKind::IsEqual),
             "AliasCheck" => Some(PrecomputeKind::AliasCheck),
             "TACEO_REVEAL" => Some(PrecomputeKind::Reveal { n: num_inputs }),
             _ => None,
