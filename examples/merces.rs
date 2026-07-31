@@ -5,8 +5,8 @@
 //! ```text
 //! cargo run --release --example merces                              # transfer_arity4_batch1 deposit
 //! cargo run --release --example merces -- transfer_arity4_batch8 full_batch
-//! cargo run --release --example merces -- circuits/multiplier2.circom kats/proving/multiplier2.zkey
-//! cargo run --release --example merces -- circuits/multiplier2.circom   # no zkey: skips proving
+//! cargo run --release --example merces -- circuits/multiplier3.circom kats/proving/multiplier3.zkey
+//! cargo run --release --example merces -- circuits/multiplier3.circom   # no zkey: skips proving
 //! ```
 
 use std::time::Instant;
@@ -67,8 +67,8 @@ impl PartyMetrics {
 
 /// Reads a zkey for proving, in whichever of the two formats this repo uses: `.arks.zkey` is the
 /// merces ceremony key (ark-serialized, uncompressed - see `tests/merces.rs`'s `ceremony_zkey`),
-/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g. the checked-in
-/// `kats/proving/multiplier2.zkey`).
+/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g.
+/// `kats/proving/multiplier3.zkey`).
 fn read_zkey(path: &str) -> (ConstraintMatrices<Fr>, ProvingKey<Bn254>) {
     if path.ends_with(".arks.zkey") {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));

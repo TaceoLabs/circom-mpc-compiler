@@ -162,7 +162,6 @@ macro_rules! prove_and_verify_test {
     };
 }
 
-prove_and_verify_test!(multiplier2);
 prove_and_verify_test!(multiplier3);
 prove_and_verify_test!(multiplier16);
 prove_and_verify_test!(loop_unrolling);
@@ -178,14 +177,14 @@ prove_and_verify_test!(precomputation_iszero_test);
 prove_and_verify_test!(precomputation_aliascheck_test);
 
 /// The split itself, against the plain driver - isolates a bad `n_pub` from a networking or proving
-/// problem if `multiplier2`'s prove+verify test above ever fails.
+/// problem if a prove+verify test above ever fails.
 #[test]
 fn plain_witness_splits_at_the_zkey_boundary() {
-    let Some((matrices, _)) = zkey("multiplier2") else {
-        eprintln!("note: no kats/proving/multiplier2.zkey - run scripts/gen-proving-artifacts.sh. skipping.");
+    let Some((matrices, _)) = zkey("multiplier2_public") else {
+        eprintln!("note: no kats/proving/multiplier2_public.zkey - run scripts/gen-proving-artifacts.sh. skipping.");
         return;
     };
-    let program = compiled("multiplier2");
+    let program = compiled("multiplier2_public");
     let n_pub = matrices.num_instance_variables;
 
     let values = vec![Fr::from(7u64), Fr::from(6u64)];
@@ -194,6 +193,6 @@ fn plain_witness_splits_at_the_zkey_boundary() {
     let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
 
     let (public, secret) = split_witness(&mut driver, witness.clone(), n_pub).unwrap();
-    assert_eq!(public, vec![Fr::from(1u64), Fr::from(42u64)]);
+    assert_eq!(public, vec![Fr::from(1u64), Fr::from(42u64), Fr::from(7u64)]);
     assert_eq!(public.len() + secret.len(), witness.len());
 }

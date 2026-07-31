@@ -14,9 +14,8 @@
 #   A `circom` built from THIS CRATE'S PINNED FORK REVISION (`rev = "1cc17fb"` in Cargo.toml), not
 #   whatever is on PATH. Different forks disagree on constraint-simplification-driven witness
 #   compaction, so a circuit's variable count can differ for the same source and the same flags.
-#   See docs/ARCHITECTURE.md, "Generating the zkeys and R1CS fixtures". That revision also
-#   self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so patch the VERSION const
-#   before building it:
+#   That revision also self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so patch
+#   the VERSION const before building it:
 #
 #     cd ~/.cargo/git/checkouts/circom-*/1cc17fb
 #     sed -i '' 's/^pub const VERSION.*/pub const VERSION: \&str = "2.2.2";/' circom/src/main.rs
@@ -38,7 +37,7 @@ if [[ $# -gt 0 ]]; then
     CIRCUITS=("$@")
 else
     CIRCUITS=(
-        multiplier2 multiplier3 multiplier16 loop_unrolling dead_code
+        multiplier3 multiplier16 loop_unrolling dead_code
         multiplier2_public constants_test babycheck_test control_flow
         precomputation_poseidon2_test precomputation_num2bits_test
         precomputation_iszero_test precomputation_aliascheck_test
