@@ -32,7 +32,7 @@ rustls = { version = "0.23", optional = true }
 
 [features]
 default = ["rep3", "round-counting"]
-rep3 = ["dep:mpc-core", "dep:mpc-net"]
+rep3 = ["dep:mpc-core", "dep:mpc-net", "dep:rand"]
 # Instruments the rep3 network (`vm::counting_net::CountingNet`) to count rounds and bytes.
 # Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
 # wrapper is a thin delegating decorator, two relaxed atomics per send/recv.

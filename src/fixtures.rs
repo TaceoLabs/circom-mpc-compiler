@@ -14,6 +14,146 @@ use ark_ff::PrimeField;
 use num_bigint::BigUint;
 
 use crate::ir::InputList;
+use crate::CompilerConfig;
+
+/// The compiler configuration for the vendored merces circuits, mirroring how merces itself
+/// compiles them (`-l circom/node_modules -l circom`): `circuits/libs/` resolves circomlib plus
+/// the vendored `taceo/` subtree, `circuits/merces/` the `merces/`/`oblivious_vector/`
+/// cross-references. The circuits are `pragma circom 2.2.2` verbatim.
+pub fn merces_config() -> CompilerConfig {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut config = CompilerConfig::default();
+    config.version = "2.2.2".to_owned();
+    config.link_library.push(format!("{root}/circuits/libs/").into());
+    config.link_library.push(format!("{root}/circuits/merces/").into());
+    config.mpc_public_inputs = merces_mpc_public_inputs();
+    config
+}
+
+/// `circuits/merces/main/<main>.circom`.
+pub fn merces_main_path(main: &str) -> String {
+    format!("{}/circuits/merces/main/{main}.circom", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The 3-party in-process rep3 harness shared by tests, benches and examples: secret-share the
+/// inputs, run the same `Program` on three threads over `mpc_net::local::LocalNetwork`, and
+/// reconstruct the witness.
+#[cfg(feature = "rep3")]
+pub mod rep3 {
+    use ark_ff::PrimeField;
+    use mpc_core::protocols::rep3::conversion::A2BType;
+    use mpc_core::protocols::rep3::{
+        combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+    };
+    use mpc_net::local::LocalNetwork;
+
+    use crate::vm::driver::rep3::Rep3Driver;
+    use crate::vm::program::Bank;
+    use crate::vm::{Machine, Program};
+
+    /// One `[share; 3]` triple per `Shared`-domain input, in the order `Program::classify_inputs`
+    /// visits them - each party takes its own component.
+    pub fn share_inputs<F: PrimeField>(
+        program: &Program<F>,
+        values: &[F],
+    ) -> Vec<[Rep3PrimeFieldShare<F>; 3]> {
+        let mut rng = rand::thread_rng();
+        program
+            .input_domains
+            .iter()
+            .zip(values)
+            .filter(|(bank, _)| matches!(bank, Bank::Shared))
+            .map(|(_, &v)| share_field_element(v, &mut rng))
+            .collect()
+    }
+
+    /// Runs `values` through real 3-party rep3 and returns the reconstructed witness.
+    pub fn run_witness<F: PrimeField>(program: &Program<F>, values: &[F]) -> Vec<F> {
+        run_witness_with_shares(program, values, &share_inputs(program, values))
+    }
+
+    /// [`run_witness`] with caller-supplied input shares (benches share once across iterations).
+    pub fn run_witness_with_shares<F: PrimeField>(
+        program: &Program<F>,
+        values: &[F],
+        shares: &[[Rep3PrimeFieldShare<F>; 3]],
+    ) -> Vec<F> {
+        let networks = LocalNetwork::new(3);
+        let witnesses: Vec<Vec<Rep3PrimeFieldShare<F>>> = std::thread::scope(|scope| {
+            networks
+                .into_iter()
+                .enumerate()
+                .map(|(party, net)| {
+                    scope.spawn(move || {
+                        let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                        let mut driver =
+                            Rep3Driver::<F, _>::new_for_run(&net, &mut state, program).unwrap();
+                        let mut next = 0;
+                        let inputs = program.classify_inputs(values, |_v| {
+                            let s = shares[next][party];
+                            next += 1;
+                            s
+                        });
+                        Machine::run(program, &mut driver, &inputs).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+
+        let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<F>>; 3] = witnesses.try_into().unwrap();
+        combine_field_elements(&w0, &w1, &w2)
+    }
+
+    /// [`run_witness`], additionally reporting each party's network rounds, split into
+    /// (driver preparation, online execution).
+    #[cfg(feature = "round-counting")]
+    pub fn run_witness_counted<F: PrimeField>(
+        program: &Program<F>,
+        values: &[F],
+    ) -> (Vec<F>, [usize; 3], [usize; 3]) {
+        use crate::vm::counting_net::CountingNet;
+
+        let shares = share_inputs(program, values);
+        let networks: Vec<_> = LocalNetwork::new(3).into_iter().map(CountingNet::new).collect();
+        let results: Vec<(Vec<Rep3PrimeFieldShare<F>>, usize, usize)> =
+            std::thread::scope(|scope| {
+                networks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(party, net)| {
+                        let shares = &shares;
+                        scope.spawn(move || {
+                            let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                            net.reset();
+                            let mut driver =
+                                Rep3Driver::<F, _>::new_for_run(&net, &mut state, program).unwrap();
+                            let preparation = net.rounds();
+                            net.reset();
+                            let mut next = 0;
+                            let inputs = program.classify_inputs(values, |_v| {
+                                let s = shares[next][party];
+                                next += 1;
+                                s
+                            });
+                            let witness = Machine::run(program, &mut driver, &inputs).unwrap();
+                            (witness, preparation, net.rounds())
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect()
+            });
+
+        let [(w0, p0, o0), (w1, p1, o1), (w2, p2, o2)]: [_; 3] = results
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("exactly three parties"));
+        (combine_field_elements(&w0, &w1, &w2), [p0, p1, p2], [o0, o1, o2])
+    }
+}
 
 /// A circuit's inputs by name, each already flattened row-major the way circom numbers a
 /// multi-dimensional input signal.

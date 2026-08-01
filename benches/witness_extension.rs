@@ -18,16 +18,10 @@
 use ark_bn254::{Bn254, Fr};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use circom_mpc_compiler::fixtures;
+use circom_mpc_compiler::fixtures::{self, rep3::run_witness_with_shares, rep3::share_inputs};
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
-use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
-use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
-use mpc_net::local::LocalNetwork;
-use rand::thread_rng;
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
@@ -78,17 +72,13 @@ fn cases() -> Vec<Case> {
 }
 
 fn config(case: &Case) -> CompilerConfig {
+    if case.merces_config {
+        return fixtures::merces_config();
+    }
     let mut config = CompilerConfig::default();
     config
         .link_library
         .push(format!("{}/circuits/libs/", manifest_dir()).into());
-    if case.merces_config {
-        config.version = "2.2.2".to_owned();
-        config
-            .link_library
-            .push(format!("{}/circuits/merces/", manifest_dir()).into());
-        config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
-    }
     config
 }
 
@@ -125,35 +115,6 @@ fn run_plain(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
     Machine::run(program, &mut driver, &inputs).expect("plain run")
 }
 
-/// One full 3-party total-cost execution, including the per-run `Rep3State` setup a real deployment
-/// would also pay once per connection and fresh program-wide Poseidon2 preprocessing.
-fn run_rep3(program: &Program<Fr>, values: &[Fr], shares: &[[Rep3PrimeFieldShare<Fr>; 3]]) {
-    let networks = LocalNetwork::new(3);
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = networks
-            .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
-                scope.spawn(move || {
-                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
-                    let mut next = 0;
-                    let inputs = program.classify_inputs(values, |_v| {
-                        let s = shares[next][party];
-                        next += 1;
-                        s
-                    });
-                    Machine::run(program, &mut driver, &inputs).unwrap()
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-    });
-}
-
 fn bench(c: &mut Criterion) {
     println!("\n--- circuit shapes (round count is the floor MPC time cannot go below) ---");
     let prepared: Vec<(Case, Program<Fr>, Vec<Fr>)> = cases()
@@ -174,17 +135,11 @@ fn bench(c: &mut Criterion) {
             b.iter(|| run_plain(program, values));
         });
 
-        let mut rng = thread_rng();
-        let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-            .input_domains
-            .iter()
-            .zip(values)
-            .filter(|(bank, _)| matches!(bank, Bank::Shared))
-            .map(|(_, &v)| share_field_element(v, &mut rng))
-            .collect();
-
+        let shares = share_inputs(program, values);
+        // Each iteration is total cost: fresh network, `Rep3State` setup, program-wide Poseidon2
+        // preprocessing, then online execution - what a fresh connection would pay.
         group.bench_with_input(BenchmarkId::new("rep3_total", case.name), &(), |b, ()| {
-            b.iter(|| run_rep3(program, values, &shares));
+            b.iter(|| run_witness_with_shares(program, values, &shares));
         });
     }
     group.finish();

@@ -50,7 +50,8 @@ use circom_mpc_compiler::vm::counting_net::CountingNet;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, OptLevel};
+use circom_mpc_compiler::fixtures;
+use circom_mpc_compiler::{CoCircomCompiler, OptLevel};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::bytes::Bytes;
@@ -221,13 +222,9 @@ fn bench_batch(
 ) -> eyre::Result<BatchResult> {
     eyre::ensure!(runs > 0, "--runs must be > 0");
 
-    let root = env!("CARGO_MANIFEST_DIR");
-    let mut config = CompilerConfig::default();
+    let mut config = fixtures::merces_config();
     config.opt_level = opt;
-    config.link_library.push(format!("{root}/circuits/libs/").into());
-    config.link_library.push(format!("{root}/circuits/merces/").into());
-    config.mpc_public_inputs = circom_mpc_compiler::fixtures::merces_mpc_public_inputs();
-    let path = format!("{root}/circuits/merces/main/transfer_arity4_batch{n}.circom");
+    let path = fixtures::merces_main_path(&format!("transfer_arity4_batch{n}"));
 
     println!("party {my_id}: batch {n}: circuit {path} (opt={opt:?})");
     let t = Instant::now();

@@ -11,19 +11,13 @@
 use ark_bn254::Bn254;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
-fn manifest_dir() -> &'static str {
-    env!("CARGO_MANIFEST_DIR")
-}
+mod common;
 
-fn circuit_path(name: &str) -> String {
-    format!("{}/circuits/{name}.circom", manifest_dir())
-}
+use common::{circuit_path, libs_path};
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config
-        .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
+    config.link_library.push(libs_path());
     config
 }
 
