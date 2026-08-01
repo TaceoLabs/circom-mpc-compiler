@@ -22,12 +22,15 @@ use crate::CompilerConfig;
 /// cross-references. The circuits are `pragma circom 2.2.2` verbatim.
 pub fn merces_config() -> CompilerConfig {
     let root = env!("CARGO_MANIFEST_DIR");
-    let mut config = CompilerConfig::default();
-    config.version = "2.2.2".to_owned();
-    config.link_library.push(format!("{root}/circuits/libs/").into());
-    config.link_library.push(format!("{root}/circuits/merces/").into());
-    config.mpc_public_inputs = merces_mpc_public_inputs();
-    config
+    CompilerConfig {
+        version: "2.2.2".to_owned(),
+        link_library: vec![
+            format!("{root}/circuits/libs/").into(),
+            format!("{root}/circuits/merces/").into(),
+        ],
+        mpc_public_inputs: merces_mpc_public_inputs(),
+        ..CompilerConfig::default()
+    }
 }
 
 /// `circuits/merces/main/<main>.circom`.

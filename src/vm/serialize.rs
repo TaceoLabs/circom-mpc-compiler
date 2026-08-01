@@ -476,16 +476,12 @@ mod tests {
     fn round_trips_an_unbound_zero_witness_source() {
         let original = program("loop_unrolling");
         assert!(original
-            .witness_sources
-            .iter()
-            .any(|source| *source == super::WitnessSource::Zero));
+            .witness_sources.contains(&super::WitnessSource::Zero));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
         assert!(read_back
-            .witness_sources
-            .iter()
-            .any(|source| *source == super::WitnessSource::Zero));
+            .witness_sources.contains(&super::WitnessSource::Zero));
 
         let inputs: Vec<_> = (1..=original.num_inputs).map(|i| Fr::from(i as u64)).collect();
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));

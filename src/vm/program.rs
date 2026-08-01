@@ -437,7 +437,7 @@ impl<F: PrimeField> Program<F> {
                 for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
                     eyre::ensure!((*request as usize) < capacity, "precompute batch {index} request {request} exceeds capacity {capacity}");
                     eyre::ensure!(target.bank != Bank::Local, "precompute batch {index} targets Local bank");
-                    let expected_bank = normal_result_bank.unwrap_or_else(|| {
+                    let expected_bank = normal_result_bank.unwrap_or({
                         if *request == 2 { Bank::Public } else { Bank::Shared }
                     });
                     eyre::ensure!(

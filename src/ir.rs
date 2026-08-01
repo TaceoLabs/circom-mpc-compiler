@@ -145,7 +145,7 @@ impl PrecomputeKind {
                 // ExternalMatMulT(t) = [out[t]][in[t]] + subtree. For t >= 8 the subtree is
                 // (t/4) x ExternalMatMul4 followed by 4 x Acc(t/4).
                 let emmt = |t: usize| match t {
-                    2 | 3 | 4 => 2 * t + emm_leaf(t),
+                    2..=4 => 2 * t + emm_leaf(t),
                     _ => {
                         let m = t / 4;
                         2 * t + m * 18 + 4 * acc(m)

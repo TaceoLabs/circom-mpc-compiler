@@ -111,7 +111,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     use num_traits::One;
 
     eyre::ensure!(
-        !inputs.is_empty() && inputs.len() % 254 == 0,
+        !inputs.is_empty() && inputs.len().is_multiple_of(254),
         "AliasCheck rep3_trace: {} inputs is not a multiple of 254",
         inputs.len()
     );
@@ -138,12 +138,11 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
         let mut e = F::one();
         let mut sum = Rep3PrimeFieldShare::zero_share();
         let mut parts = Vec::with_capacity(127);
-        for i in 0..127 {
+        for (i, &smsb_times_slsb) in prod.iter().enumerate() {
             let lo = i * 2;
             let hi = lo + 1;
             let (clsb, cmsb) = (ct_bits[lo], ct_bits[hi]);
             let (slsb, smsb) = (site[lo], site[hi]);
-            let smsb_times_slsb = prod[i];
             let part = match (cmsb, clsb) {
                 (false, false) => {
                     arithmetic::mul_public(smsb_times_slsb, -b)

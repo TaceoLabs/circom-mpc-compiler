@@ -58,6 +58,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 /// can falsely classify a non-zero input, so the statistical-soundness tradeoff is restricted to
 /// BN254 here as well as in codegen and `Program::validate`.
 #[cfg(feature = "rep3")]
+#[allow(clippy::type_complexity)]
 pub fn rep3_masked_reveal_trace<F: PrimeField, N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
     net: &N,

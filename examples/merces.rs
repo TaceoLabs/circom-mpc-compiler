@@ -9,6 +9,8 @@
 //! cargo run --release --example merces -- circuits/multiplier3.circom   # no zkey: skips proving
 //! ```
 
+#![allow(clippy::type_complexity)] // the per-party (witness, metrics, proof) tuples
+
 use std::time::Instant;
 
 use ark_bn254::{Bn254, Fr};
@@ -277,7 +279,6 @@ fn run_rep3(
             .enumerate()
             .map(|(party, net)| {
                 let shares = &shares;
-                let zkey = zkey;
                 let p0 = proving0.as_mut().map(|it| it.next().unwrap());
                 let p1 = proving1.as_mut().map(|it| it.next().unwrap());
                 scope.spawn(move || {

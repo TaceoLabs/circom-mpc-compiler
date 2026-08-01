@@ -84,7 +84,7 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
     }
 
     fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<F>> {
-        Ok(rep3::arithmetic::open_vec(shares, self.net)?)
+        rep3::arithmetic::open_vec(shares, self.net)
     }
 
     fn add_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share {

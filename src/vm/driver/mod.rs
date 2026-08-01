@@ -87,6 +87,7 @@ pub trait VmDriver<F: PrimeField> {
     /// Fused trace for an explicitly revealed IsZero result. Each site returns
     /// `(is_zero_share, inverse_share, revealed_is_zero)`. Rep3 implements this with one fresh
     /// arithmetic mask per site and one vector multiplication-open.
+    #[allow(clippy::type_complexity)]
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],

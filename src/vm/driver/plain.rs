@@ -93,7 +93,7 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
 
     fn alias_check_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
         eyre::ensure!(
-            inputs.len() % 254 == 0,
+            inputs.len().is_multiple_of(254),
             "alias_check_traces: {} inputs is not a multiple of 254",
             inputs.len()
         );
