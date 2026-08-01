@@ -2,7 +2,6 @@
 //! produces for circom constructs it deliberately doesn't support, and the input metadata it derives
 //! alongside the graph. The positive value cases live in `tests/proving.rs`.
 //!
-//! See `docs/ARCHITECTURE.md`, "Known gaps", for why each gap is a gap.
 
 use ark_bn254::Bn254;
 use circom_mpc_compiler::vm::program::Bank;

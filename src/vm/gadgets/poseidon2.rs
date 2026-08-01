@@ -1,42 +1,19 @@
 //! Poseidon2 permutation traces for `circuits/libs/taceo/poseidon2.circom`, computed from **that
-//! template's own signal layout**, for every supported width.
+//! template's own signal layout**.
 //!
-//! # The layout rule
+//! The layout rule that is easy to get wrong: circom lays out each component as
+//! `[outputs][inputs][own intermediates][subcomponent subtrees]`, and **sibling subcomponent
+//! subtrees are ordered by the callee template's definition order in the source file**, not by the
+//! order their creating statements execute. Hence `FullRound` emits `ExternalMatMulT` before
+//! `Sbox`, `ExternalMatMulT`'s `t >= 8` branch emits its `Acc` subtrees before its
+//! `ExternalMatMul4`s, and all 8 `FullRound` blocks precede every `PartialRound` block even though
+//! execution interleaves them - so **layout order is not execution order**. All confirmed against
+//! circom's own R1CS by `tests/proving.rs`'s `precomputation_poseidon2_test`.
 //!
-//! circom lays out each component as
-//! `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and -
-//! the part that is easy to get wrong - **sibling subcomponent subtrees are ordered by the *callee
-//! template's own definition order in the source file*, not by the order their creating statements
-//! execute within the caller.** Four consequences, all confirmed against a passing proof:
-//!
-//! - `FullRound` emits its `ExternalMatMulT` subtree *before* its `Sbox` subtree, even though the
-//!   source instantiates `Sbox` first: `ExternalMatMulT` is defined earlier in the file.
-//! - `ExternalMatMulT`'s own `t >= 8` branch emits its 4 `Acc(t/4)` subtrees *before* its `t/4`
-//!   `ExternalMatMul4` subtrees, even though the source creates `mds[]` (the `ExternalMatMul4`s)
-//!   before `accs[]` (the `Acc`s): `template Acc(t)` is defined before `template ExternalMatMul4` in
-//!   `poseidon2.circom`. Verified directly against circom's own R1CS for `t=16` - the only width
-//!   that reaches this branch (`t/4 >= 2`) among the widths this repo exercises.
-//! - `Poseidon2` emits all 8 `FullRound` blocks contiguously and only then all `PartialRound` blocks
-//!   - so **layout order is not execution order**, since rounds 5..(4+pr) run between them.
-//! - Within one template, *same-definition* sibling instances keep their own creation order: the 8
-//!   full rounds are the first group's 4 followed by the second group's 4, and `accs[0..4]`/
-//!   `mds[0..4]` are each in their own loop's `l`/`i` order.
-//!
-//! Verified for t=3 (2045 witness entries) by `tests/proving.rs`'s
-//! `precomputation_poseidon2_test`, which is the real oracle for all of this.
-//!
-//! # Structure
-//!
-//! Three separated concerns, so the layout exists in exactly one place (unlike `super::aliascheck`,
-//! which duplicates its much smaller layout between the plain and rep3 paths):
-//!
-//! - `Ops` - the arithmetic backend, implemented once for plain field elements and once for rep3
-//!   shares. During the walk, only `Ops::sbox_layer` communicates; rep3 pool preprocessing happens
-//!   separately, before online execution.
-//! - `walk` - the permutation itself, **layer-major across every site in lock-step**, so all of a
-//!   batch's s-boxes at one round go into a single `sbox_layer` call.
-//! - `SiteOutput` - a sparse layout sink. It records a value only when its logical result slot was
-//!   requested, while `walk` still computes every value needed to evolve the permutation state.
+//! Structure: `Ops` is the arithmetic backend (plain and rep3; only `Ops::sbox_layer`
+//! communicates), `walk` the permutation itself (layer-major across every site in lock-step, so a
+//! batch's s-boxes at one round are a single `sbox_layer` call), and `SiteOutput` the sparse sink
+//! that records only requested result slots while the walk still evolves the full state.
 
 use ark_ff::PrimeField;
 
@@ -131,7 +108,7 @@ struct SboxTrace<V> {
 }
 
 /// The field operations the walker needs. Everything except [`Self::sbox_layer`] is local work, free
-/// in every domain (see `docs/ARCHITECTURE.md`, "MPC lowering").
+/// in every domain.
 trait Ops<F: PrimeField> {
     type V: Clone;
 

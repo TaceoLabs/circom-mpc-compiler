@@ -660,8 +660,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     ///
     /// A *non*-constant condition stays an `Unsupported` error, and structurally has to: `ir::Op` is
     /// only `Add`/`Sub`/`Mul`, so there is no select/mux op to arithmetize a secret-dependent branch
-    /// into (see `docs/ARCHITECTURE.md`, "`Op<F>` is deliberately narrow"). Supporting it means
-    /// re-adding the operator surface, not extending this function.
+    /// into. Supporting it means re-adding the operator surface, not extending this function.
     fn handle_branch_bucket(&mut self, branch_bucket: &BranchBucket) -> Result<()> {
         let Some(taken) = self.fold_branch_condition(branch_bucket.cond.as_ref()) else {
             return Err(self.err_instruction(
@@ -717,8 +716,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     /// `if (remaining > T - 1)` where `remaining = N - absorbed`, all compile-time.
     ///
     /// Shares [`Self::eval_constant_node`] with address computation, which needs the identical
-    /// capability for `arr[N-1-i]`-style indexing - see "Where compile-time folding lives" in
-    /// `docs/ARCHITECTURE.md`.
+    /// capability for `arr[N-1-i]`-style indexing.
     fn eval_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
         let value_id = self.expect_value(inst).ok()?;
         self.eval_constant_node(value_id)

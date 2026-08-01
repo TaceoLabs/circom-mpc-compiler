@@ -26,13 +26,9 @@ fn config() -> CompilerConfig {
     config
 }
 
-/// Staged precomputation under a *real* network. This compares 3-party rep3 against the plain
-/// driver, the same substitute the gadget unit tests already use.
-///
-/// **This is the test that proves interleaving actually works.** `PlainDriver` cannot detect a
-/// mis-ordered batch - its `reshare` is the identity and every slot starts zeroed, so reading a
-/// not-yet-written slot silently yields a plausible number. Against three real parties the same bug
-/// either deadlocks or consumes uninitialized shares, and the reconstruction diverges.
+/// Staged precomputation under a real network - the test that proves batch interleaving works.
+/// `PlainDriver` cannot detect a mis-ordered batch (its `reshare` is the identity and slots start
+/// zeroed); against three real parties the same bug deadlocks or diverges.
 #[test]
 fn staged_precomputation_matches_the_plain_driver_under_rep3() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;

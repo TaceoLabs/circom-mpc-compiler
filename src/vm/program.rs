@@ -2,7 +2,7 @@
 //! `Shared`/`Local` - the same lattice `passes::mpc::domain` classifies values into), plus the
 //! side tables that carry everything that is program *structure* rather than a per-value
 //! operation - constants, inputs, batched MPC rounds, precomputation sites, and the final signal
-//! witness sources. See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! witness sources.
 
 use ark_ff::{BigInteger, PrimeField};
 
@@ -22,7 +22,7 @@ pub enum Bank {
 }
 
 /// One operation. Arithmetic opcodes are named `<Op><BankOfA><BankOfB>` (`P` public, `S` shared);
-/// `MulLocal`/`Reshare` are the MPC-lowering ops (see `docs/ARCHITECTURE.md`, "MPC lowering").
+/// `MulLocal`/`Reshare` are the MPC-lowering ops.
 /// There is no constant-load or round-result opcode: constants are preloaded at init
 /// (`Program::constants`), and a round's results are written straight into their slots by
 /// `Reshare` - see `Program::rounds`. `Add`/`Mul` are commutative, so codegen reorders operands to
@@ -51,7 +51,7 @@ pub enum Opcode {
     ///
     /// Being a real instruction rather than an out-of-band phase is what lets a site's inputs depend
     /// on earlier instructions - which the merces circuits require, since their Poseidon2 sites chain
-    /// through secret multiplications (see `docs/ARCHITECTURE.md`, "Precomputation").
+    /// through secret multiplications.
     Precompute,
 }
 
@@ -102,9 +102,9 @@ pub enum BatchKind {
     IsZeroReveal,
 }
 
-/// One requested batch result's physical destination. Unlike the older single `result_bank`
-/// representation, a fused service can write both shared witness values and a public revealed
-/// value while retaining one site-major CSR request table.
+/// One requested batch result's physical destination. Per-result (not per-batch) because a fused
+/// service writes both shared witness values and a public revealed value from one site-major CSR
+/// request table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultTarget {
     pub bank: Bank,
@@ -113,8 +113,7 @@ pub struct ResultTarget {
 
 /// Compatible `TACEO_PRECOMPUTATION_*` sites of one [`PrecomputeKind`], domain, and stage, batched
 /// into a single service. Codegen first keys sites by `(kind, stage, domain)`, then splits a group
-/// when an early consumer closes its anchor/deadline placement window. See
-/// `docs/ARCHITECTURE.md`, "Precomputation".
+/// when an early consumer closes its anchor/deadline placement window.
 ///
 /// Independent compatible sites normally collapse into one entry. A site may remain alone when its
 /// kind, stage, or domain differs, or when combining it would cross an earlier result deadline.
@@ -195,7 +194,7 @@ pub struct Program<F: PrimeField> {
     pub round_results: Vec<u32>,
     /// Indexed by [`Opcode::Precompute`]'s `a`. These are **not** run up front: each is serviced at
     /// its own point in the instruction stream, because a site's inputs may depend on earlier
-    /// instructions (see `docs/ARCHITECTURE.md`, "Precomputation").
+    /// instructions.
     pub precompute_batches: Vec<PrecomputeBatch>,
     /// One source per final witness entry, already in circom witness order.
     pub witness_sources: Vec<WitnessSource>,

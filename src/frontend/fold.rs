@@ -1,7 +1,7 @@
 //! Compile-time folding for circom operators that `ir::Op` has no runtime variant for, plus
 //! `Add`/`Sub`/`Mul` when they occur at the root of a static branch condition.
 //!
-//! `ir::Op` only carries `Add`/`Sub`/`Mul` as runtime ops (see `docs/ARCHITECTURE.md`). Circom
+//! `ir::Op` only carries `Add`/`Sub`/`Mul` as runtime ops. Circom
 //! source can still use `/`, `\`, `**`, shifts, and bitwise ops, but only where every operand is a
 //! compile-time constant - the moment one operand is a genuine circuit value, lowering it becomes
 //! an `non-constant-operator` error (`build.rs::handle_compute_bucket`) instead of

@@ -1,6 +1,6 @@
 //! Real three-party rep3 execution over `mpc_net`/`mpc_core`. `Share = Rep3PrimeFieldShare<F>`;
 //! `Local = F` - the `a` component of a replicated share is already a valid additive-3 sharing on
-//! its own (see `docs/ARCHITECTURE.md`, "MPC lowering"), so there's nothing to wrap. Behind the
+//! its own, so there's nothing to wrap. Behind the
 //! `rep3` feature.
 
 use ark_ff::PrimeField;

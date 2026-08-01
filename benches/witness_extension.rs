@@ -1,19 +1,10 @@
-//! `Machine::run` under `PlainDriver` versus real 3-party `Rep3Driver` over
-//! `mpc_net::local::LocalNetwork`.
-//!
-//! The plain/rep3 pair is the headline comparison: plain is pure local field arithmetic, so the gap
-//! between them is what MPC actually costs for a given circuit, and `Graph::mpc_summary` (printed
-//! once per circuit before the benches run) is what makes a number interpretable - a circuit's floor
-//! is its round count, not its instruction count.
-//!
-//! `transfer_arity4_batch1` versus `batch8` is the interesting pair: the same template at N=1 and
-//! N=8, so it shows how round count and reshare width scale with batch size while precomputation
-//! batching absorbs the extra sites.
-//!
-//! Note `LocalNetwork` is in-process, so rep3 numbers here measure protocol *work* and round
-//! *structure*, not real network latency - which is exactly the quantity round batching reduces.
-//! The `rep3_total` series is deliberately total cost: every measured iteration includes
-//! `Rep3State` setup, fresh program-wide Poseidon2 preprocessing, and online execution.
+//! `Machine::run` under `PlainDriver` versus real 3-party `Rep3Driver` over an in-process
+//! `LocalNetwork`: the gap between the two series is what MPC actually costs for a given circuit,
+//! and the `Graph::mpc_summary` line printed per circuit is what makes a number interpretable - a
+//! circuit's floor is its round count, not its instruction count. In-process, so rep3 numbers
+//! measure protocol work and round structure, not network latency. `rep3_total` is total cost:
+//! every measured iteration includes `Rep3State` setup, fresh Poseidon2 preprocessing, and online
+//! execution.
 
 use ark_bn254::{Bn254, Fr};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

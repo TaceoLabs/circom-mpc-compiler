@@ -1,5 +1,5 @@
 //! The five precomputation gadgets this compiler knows how to run, plain (used unconditionally) and
-//! batched-MPC (`rep3`, behind the `rep3` feature). See `docs/ARCHITECTURE.md`, "Precomputation".
+//! batched-MPC (`rep3`, behind the `rep3` feature).
 
 pub mod aliascheck;
 pub mod iszero;
@@ -29,9 +29,8 @@ fn a2b_many_selector<F: ark_ff::PrimeField, N: mpc_net::Network>(
 /// Shared 3-party rep3 test harness for this module's own unit tests - each gadget's `rep3_trace`
 /// is checked against its `plain_trace` twin on the same plaintext input, secret-shared and
 /// reconstructed via real `LocalNetwork` execution. Not a value oracle (that's `tests/proving.rs`'s
-/// job) - just proof the two implementations agree with each other. When `round-counting` is enabled,
-/// [`run3_counted`] also reports the round count each gadget's own tests pin against
-/// `docs/ARCHITECTURE.md`'s claims.
+/// job) - just proof the two implementations agree with each other. When `round-counting` is
+/// enabled, [`run3_counted`] also reports the round count each gadget's own tests pin.
 #[cfg(all(test, feature = "rep3"))]
 pub(crate) mod test_support {
     use ark_bn254::Fr;

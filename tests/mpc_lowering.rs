@@ -2,11 +2,10 @@
 //! same multiplicative depth batch into a single network round - against three synthetic circuits
 //! with known round structure (`circuits/bench_{chain,tree,widesum}.circom`). No witness value
 //! oracle is needed here: `Graph::mpc_summary` reports round *shape*, which a value comparison
-//! can't see. See `docs/ARCHITECTURE.md`, "MPC lowering".
+//! can't see.
 //!
-//! These are synthetic because the circuits that currently compile at all are small (only
-//! `Add`/`Sub`/`Mul` are supported - see `docs/ARCHITECTURE.md`, "Known gaps") - there is no large
-//! real circuit yet to measure round batching against.
+//! Synthetic, because round shape must be known in advance to assert on; `tests/merces.rs`
+//! covers batching on the real circuits.
 
 use ark_bn254::Bn254;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};

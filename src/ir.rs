@@ -2,7 +2,7 @@
 //!
 //! A [`Graph`] is a flat, topologically ordered list of [`Node`]s. There is no separate "wire"
 //! address space: a node's position in the graph *is* the identifier of the single value it
-//! produces (its [`ValueId`]). See `docs/ARCHITECTURE.md` for the full rationale.
+//! produces (its [`ValueId`]).
 
 use ark_ff::PrimeField;
 
@@ -98,8 +98,7 @@ pub struct MpcSummary {
 }
 
 /// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the instantiated
-/// template's name in `frontend/build.rs::handle_create_cmp_bucket`. See `docs/ARCHITECTURE.md`,
-/// "Precomputation", for what each variant computes.
+/// template's name in `frontend/build.rs::handle_create_cmp_bucket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrecomputeKind {
     /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 8, 12, 16}`).
@@ -112,10 +111,9 @@ pub enum PrecomputeKind {
     AliasCheck,
     /// Declassifies `n` values: opens them to every MPC party in the clear if they were `Shared`,
     /// or is the identity if they were already `Public`. A genuine MPC event, not deterministic
-    /// local work - see `docs/ARCHITECTURE.md`, "MPC lowering" and "Precomputation", and
-    /// `passes::mpc::level`'s re-keyed `PrecomputeResult` rule for how a `Reveal` site still
-    /// charges a network level exactly when its own input was `Shared`, even though its result's
-    /// *domain* is unconditionally `Public`.
+    /// local work - see `passes::mpc::level`'s re-keyed `PrecomputeResult` rule for how a `Reveal`
+    /// site still charges a network level exactly when its own input was `Shared`, even though its
+    /// result's *domain* is unconditionally `Public`.
     Reveal { n: usize },
 }
 
@@ -173,17 +171,10 @@ impl PrecomputeKind {
             PrecomputeKind::Num2Bits { n } => Some(n),
             // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
             PrecomputeKind::IsZero => Some(2),
-            // No outputs. AliasCheck's whole subtree is its subcomponent CompConstant: its own
-            // 254 input signals (copies of AliasCheck's `in`, per circom's `==>` semantics) + 1
-            // output signal (`out <== num2bits.out[127]`, still a genuine witness signal despite
-            // aliasing one of Num2Bits' own outputs) = 255, + 127 `parts` + 1 `sout`, then
-            // CompConstant's own child Num2Bits(135): its own 1 input signal (`num2bits.in`) + 135
-            // output bits = 136. Total 255 + 127 + 1 + 136 = 519, cross-checked directly against
-            // `circuits/libs/{aliascheck,compconstant}.circom`. One more than merces'
-            // `DEFAULT_ALIAS_TRACE` (518, ~/repos/merces/crates/merces-core/src/circom_proof/
-            // cosnark.rs) - that trace omits Num2Bits' own input signal, which this compiler's
-            // signal-span accounting (an independent cross-check against circom's own DAG, see
-            // `frontend/mod.rs::compute_signal_spans`) does not let it skip.
+            // No outputs. AliasCheck's subtree is its CompConstant subcomponent: 254 input-signal
+            // copies + 1 output = 255, + 127 `parts` + 1 `sout`, + CompConstant's child
+            // Num2Bits(135) (1 input + 135 bits = 136). Cross-checked directly against
+            // `circuits/libs/{aliascheck,compconstant}.circom`.
             PrecomputeKind::AliasCheck => Some(255 + 127 + 1 + 136),
             // n outputs, no intermediates - a `TACEO_REVEAL(n)` site's own signal layout is exactly
             // `[in[n]][out[n]]`, and result slots skip the site's own inputs.
@@ -192,8 +183,7 @@ impl PrecomputeKind {
     }
 }
 
-/// One recognized-gadget component instance: the shape the runtime must supply a trace for. See
-/// `docs/ARCHITECTURE.md`, "Precomputation".
+/// One recognized-gadget component instance: the shape the runtime must supply a trace for.
 #[derive(Debug, Clone)]
 pub struct PrecomputeSite {
     /// Which gadget this site runs, and (for the parameterized ones) its width.
@@ -211,8 +201,7 @@ pub struct PrecomputeSite {
 /// Deliberately narrow: only the linear/multiplicative core (`Add`/`Sub`/`Mul`) is a runtime op.
 /// Everything else circom can express (`/`, `\`, `**`, shifts, bitwise ops, comparisons, ...) is
 /// either rejected outright or, where all its operands are compile-time constants, folded away
-/// before it ever reaches this enum (`frontend::fold`). See `docs/ARCHITECTURE.md` for why, and for
-/// why MPC share-kind is not a set of `Op` variants (see "Non-goals").
+/// before it ever reaches this enum (`frontend::fold`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Op<F: PrimeField> {
     /// Reads a circuit input signal.
@@ -230,12 +219,11 @@ pub enum Op<F: PrimeField> {
     Precompute(PrecomputeId),
     /// Reads one result slot of the [`Op::Precompute`] node that is this node's sole input. Slot
     /// `0..num_outputs` are the wrapped component's outputs; `num_outputs..` are its subtree's
-    /// intermediate signals, in flat circuit order. See `docs/ARCHITECTURE.md`, "Precomputation".
+    /// intermediate signals, in flat circuit order.
     PrecomputeResult(u32),
     /// The free, local half of a secret x secret multiplication: `a*b + mask`, computed without a
     /// message (rep3's `local_mul_vec`). Not a valid share on its own - only a rep3 additive-3
-    /// sharing (see `docs/ARCHITECTURE.md`, "MPC lowering", for why that's still sound to add/
-    /// scale) until reshared via the [`Op::Round`] it feeds.
+    /// sharing (still sound to add and scale) until reshared via the [`Op::Round`] it feeds.
     MulLocal,
     /// One batched network round: arity equals the round's recorded length, which is validated when
     /// the graph invariants are checked, with one input per [`Op::MulLocal`] value being reshared
@@ -262,7 +250,7 @@ impl<F: PrimeField> Op<F> {
 
     /// Whether this op is free of side effects a rewrite pass must preserve exactly once each -
     /// `false` for the precomputation ops, since merging or duplicating a site would change how
-    /// many traces the runtime has to supply (see `docs/ARCHITECTURE.md`, "Precomputation"), and
+    /// many traces the runtime has to supply, and
     /// `false` for the MPC round ops for the same reason: `Op::MulLocal` consumes a fresh mask per
     /// evaluation, so merging two occurrences would desync a round's slot count from what the
     /// runtime's `local_mul_vec`/`reshare_vec` calls actually produce. Everything else is pure
@@ -331,8 +319,7 @@ pub struct Graph<F: PrimeField> {
     /// circom's witness vector addresses every signal in the circuit, not only main's I/O.
     outputs: Vec<(SignalIdx, ValueId)>,
     /// Every `TACEO_PRECOMPUTATION_*`-wrapped component encountered while inlining, in the order
-    /// encountered - that order *is* the trace order the runtime must supply results in. See
-    /// `docs/ARCHITECTURE.md`, "Precomputation".
+    /// encountered - that order *is* the trace order the runtime must supply results in.
     precompute_sites: Vec<PrecomputeSite>,
     /// Every batched MPC network round, indexed by [`RoundId`]. Empty until `passes::mpc` lowers
     /// the graph.
@@ -343,12 +330,10 @@ pub struct Graph<F: PrimeField> {
     pub signal_to_witness: Vec<usize>,
     pub input_list: InputList,
     pub public_inputs: Vec<String>,
-    /// Input names every MPC party holds in cleartext, even though they are not SNARK-public (not
-    /// in `public_inputs`/circom's own `main {public [...]}`). This is a genuine declassification,
-    /// supplied by `CompilerConfig::mpc_public_inputs` and populated by `frontend::build_graph` -
-    /// never inferred. Consulted only by `passes::mpc::domain::signal_domain`; `public_inputs`
-    /// alone remains the correct source for the SNARK statement split (see `vm::witness`), so this
-    /// is a separate list rather than merged into `public_inputs`.
+    /// Input names every MPC party holds in cleartext, even though they are not SNARK-public. A
+    /// genuine declassification, supplied by `CompilerConfig::mpc_public_inputs` - never inferred.
+    /// Kept separate from `public_inputs`, which remains the correct source for the SNARK
+    /// statement split (see `vm::witness`).
     pub mpc_public_inputs: Vec<String>,
     pub num_inputs: usize,
     pub num_outputs: usize,
@@ -402,7 +387,7 @@ impl<F: PrimeField> Graph<F> {
     }
 
     /// Every `TACEO_PRECOMPUTATION_*`-wrapped component in this graph, in inlining order - the
-    /// order the runtime must supply traces in. See `docs/ARCHITECTURE.md`, "Precomputation".
+    /// order the runtime must supply traces in.
     pub fn precompute_sites(&self) -> &[PrecomputeSite] {
         &self.precompute_sites
     }
@@ -411,14 +396,10 @@ impl<F: PrimeField> Graph<F> {
         &self.outputs
     }
 
-    /// Drops every `outputs` entry `keep` rejects, preserving the relative order of the rest.
-    /// Order must be preserved: several entries can name the same signal (a nested subcomponent's
-    /// input signal is pushed once as a `LocalSignal` alias and, if it also feeds a precomputation
-    /// site, again as a site input - `frontend/inline.rs`), and `Machine::run`'s store loop is
-    /// last-write-wins, so reordering could change *which* value ends up in a shared signal slot.
-    /// Returns whether anything was actually dropped. Used by `passes::dead_signals` to prune
-    /// outputs that bind to neither a genuine reader nor a witness position, so `Graph::gc`'s
-    /// existing reachability sweep can delete the now-unreferenced producer nodes.
+    /// Drops every `outputs` entry `keep` rejects, preserving the relative order of the rest -
+    /// several entries can name the same signal and the witness projection is last-write-wins, so
+    /// reordering could change which value ends up in a shared signal slot. Returns whether
+    /// anything was dropped.
     pub(crate) fn retain_outputs(&mut self, mut keep: impl FnMut(SignalIdx, ValueId) -> bool) -> bool {
         let before = self.outputs.len();
         self.outputs.retain(|&(signal, value)| keep(signal, value));
@@ -433,10 +414,8 @@ impl<F: PrimeField> Graph<F> {
         &self.rounds
     }
 
-    /// Installs a fresh round table, replacing whatever was there. `mul_split` calls this once, to
-    /// install its initial one-round-per-product table; `round_schedule` calls it again to replace
-    /// that with the batched-by-depth table it computes. Nothing between those two calls reads the
-    /// intermediate table, so there is no append-only requirement here.
+    /// Installs a fresh round table, replacing whatever was there (`mul_split` installs the
+    /// one-round-per-product table, `round_schedule` replaces it with the batched one).
     pub(crate) fn set_rounds(&mut self, rounds: Vec<RoundDesc>) {
         self.rounds = rounds;
     }
@@ -448,12 +427,9 @@ impl<F: PrimeField> Graph<F> {
     }
 
     /// Replaces the whole node list at once, remapping `outputs` through `remap` (`None` for a
-    /// dropped node an output still depends on is a bug in the caller, and panics loudly). Unlike
-    /// [`Graph::rewrite`], the caller builds `nodes` itself in whatever order it needs - this is
-    /// for passes whose transformation isn't a node-for-node substitution (merging several existing
-    /// nodes into one, as `passes::mpc::round_schedule` does, changes arity, which no `rewrite`
-    /// callback can express; see that pass for why, and [`Graph::gc`]'s own hand-rolled sweep for
-    /// the precedent of reaching for something other than `rewrite` when it doesn't fit).
+    /// node an output still depends on is a caller bug, and panics loudly). For passes whose
+    /// transformation isn't a node-for-node substitution and so cannot use [`Graph::rewrite`]
+    /// (`round_schedule` merges nodes, which changes arity).
     pub(crate) fn rebuild_nodes(&mut self, nodes: Vec<Node<F>>, remap: &[Option<ValueId>]) {
         self.nodes = nodes;
         for (_, value) in self.outputs.iter_mut() {
@@ -463,9 +439,8 @@ impl<F: PrimeField> Graph<F> {
 
     /// Reports the effect of MPC lowering: rounds, total reshare elements (one field element per
     /// round slot), min/mean/max slots per round, free local multiplications, free public
-    /// multiplications, and precomputation sites. Not a rewrite - this is what makes every claim
-    /// about round batching in `docs/ARCHITECTURE.md` falsifiable instead of asserted; see
-    /// `tests/mpc_lowering.rs`.
+    /// multiplications, and precomputation sites. Not a rewrite - this is what makes the round
+    /// batching claims falsifiable instead of asserted; see `tests/mpc_lowering.rs`.
     pub fn mpc_summary(&self) -> MpcSummary {
         let slot_counts: Vec<usize> = self.rounds.iter().map(|r| r.len).collect();
         let reshare_elements: usize = slot_counts.iter().sum();
@@ -501,16 +476,12 @@ impl<F: PrimeField> Graph<F> {
         for &(_, root) in &self.outputs {
             keep[root.index()] = true;
         }
-        // Every precomputation site must survive gc even if none of its results end up read. Since
-        // `passes::dead_signals` prunes every witness-dead output before this runs, a site whose
-        // results are all witness-dead and never read by an ordinary node genuinely has zero
-        // references at this point - this rule is the *only* thing keeping such a site's node (and
-        // transitively its input chain) alive, not defense in depth. It must stay: `vm::codegen`
-        // resolves each site's destination slots at compile time from a fixed, in-order
-        // `precompute_sites` table (`site_result_base[site] + slot`), so silently dropping a "dead"
-        // site would desynchronize every later same-kind site's slot range, and `Graph::verify`
-        // requires exactly one `Op::Precompute` node per site regardless. See
-        // docs/ARCHITECTURE.md, "Precomputation".
+        // Every precomputation site must survive gc even if none of its results end up read (a
+        // site whose results are all witness-dead has zero references at this point). Codegen
+        // resolves each site's destination slots from the fixed, in-order `precompute_sites`
+        // table, so silently dropping a "dead" site would desynchronize every later same-kind
+        // site's slot range - and `Graph::verify` requires exactly one `Op::Precompute` node per
+        // site regardless.
         for (i, node) in self.nodes.iter().enumerate() {
             if matches!(node.op, Op::Precompute(_)) {
                 keep[i] = true;
@@ -559,15 +530,8 @@ impl<F: PrimeField> Graph<F> {
     /// - every `PrecomputeResult`/`RoundResult` references a real slot of a real producer,
     /// - every precomputation site has exactly one [`Op::Precompute`] node,
     /// - no [`Op::Precompute`] reads an un-reshared [`Op::MulLocal`] value,
-    /// - MPC-lowering ops appear only once the graph is [`Stage::MpcLowered`],
+    /// - MPC-lowering ops appear only once the graph is lowered,
     /// - every output references a node that exists.
-    ///
-    /// Deliberately *not* checked here: that the sites sharing a batch are mutually independent.
-    /// Under `passes::mpc::level`'s formula that is a tautology of the formula (a dependency forces
-    /// a different stage), so asserting it here would test the formula against itself. The real
-    /// check belongs where the grouping *decision* is made, i.e. `vm::codegen`. If stages ever
-    /// become a recorded decision rather than a derivation (see `passes::mpc::level`'s module doc
-    /// on non-ASAP scheduling), promote it here.
     ///
     /// Called once after the frontend builds the graph and, in debug builds, between every pass.
     pub(crate) fn verify(&self) -> eyre::Result<()> {

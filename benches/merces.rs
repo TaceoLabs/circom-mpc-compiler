@@ -1,24 +1,11 @@
-//! Merces witness extension, plain versus rep3, swept over the transaction batch size `N` of
-//! `TransferBatchedCompressedArity4(N, ...)`. Throughput is defined over `N` (transactions per run,
-//! not witness entries), so criterion's `thrpt` column reads directly as transactions/second and is
-//! comparable across batch sizes - this is the question `benches/witness_extension.rs` cannot answer,
-//! since it normalizes throughput by witness size and only compares batch1 against batch8.
+//! Merces witness extension, plain versus rep3, swept over the transaction batch size `N`.
+//! Throughput is defined over `N` (transactions per run), so criterion's `thrpt` column reads as
+//! transactions/second across batch sizes. Inputs are seeded-random field elements, not real
+//! protocol values - this bench never proves, and rep3's cost is value-independent.
 //!
-//! Inputs are seeded-random field elements (`StdRng::seed_from_u64`), not real protocol values, for
-//! every `N` uniformly - this bench only measures total per-execution witness-extension cost and
-//! never proves or checks a `===` constraint, and rep3's cost is value-independent (see
-//! `src/bin/merces-net.rs`, which makes the same call). Real fixtures only exist for batch1/batch8
-//! anyway (`src/fixtures.rs`); using them for those two and dummy values for batch16/batch32 would
-//! mix two input provenances in one group for no benefit here.
-//!
-//! Each party's `LocalNetwork` and `Rep3State` (the correlated-randomness handshake) are built once
-//! per `N`, outside every timed iteration, and reused across all of them - deliberately unlike
-//! `witness_extension.rs`, which pays that setup inside every timed run to model a fresh connection.
-//! Here the setup cost is roughly constant in `N` and would compress the very scaling curve this bench
-//! exists to measure.
-//! The `rep3_total` series still measures total per-execution cost: each iteration prepares a fresh
-//! program-wide Poseidon2 pool before running the online VM; only the one-time connection/state
-//! setup is excluded.
+//! Each party's `LocalNetwork` and `Rep3State` are built once per `N` and reused across timed
+//! iterations (unlike `witness_extension.rs`, which models a fresh connection per run); each
+//! iteration still prepares a fresh program-wide Poseidon2 pool before the online VM.
 
 use ark_bn254::{Bn254, Fr};
 use ark_ff::UniformRand;

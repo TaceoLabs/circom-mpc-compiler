@@ -1,7 +1,7 @@
 //! Verifies precomputation-gadget recognition: `Poseidon2`, `Num2Bits`, `IsZero` and `AliasCheck`
 //! are each cut into exactly one `ir::PrecomputeSite` with the expected shape, whether reached
 //! through a `TACEO_PRECOMPUTATION_*` wrapper or (for `precomputation_unsupported_gadget_test`'s
-//! `Doubler`) not recognized at all. See `docs/ARCHITECTURE.md`, "Precomputation".
+//! `Doubler`) not recognized at all.
 
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::ir::PrecomputeKind;

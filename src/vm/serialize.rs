@@ -4,8 +4,7 @@
 //! `constants` (the only field-element table) go through `ark_serialize`'s
 //! `CanonicalSerialize`/`CanonicalDeserialize`; everything else is little-endian integers via
 //! `byteorder`. The instruction stream is the one part worth a fixed record shape (16 bytes:
-//! `u8` opcode + 3 bytes padding + three `u32`s) - see `docs/ARCHITECTURE.md`, "Bytecode and the
-//! slot machine".
+//! `u8` opcode + 3 bytes padding + three `u32`s).
 
 use std::io::{Read, Write};
 
@@ -20,17 +19,8 @@ use super::program::{
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
-/// Version 1 had no interleaved `Opcode::Precompute`; version 2 always stored precompute results in
-/// the shared bank. Version 3 records each batch's result bank so all-public gadgets can remain
-/// public. Version 4 adds the `PrecomputeKind::Reveal` tag. Version 5 adds `result_requests`/
-/// `result_offsets` to `PrecomputeBatch`, and changes `result_slots`' own meaning from one entry
-/// per site's full reserved capacity to one entry per *requested* (witness-live) slot - a
-/// version-4 reader has no way to tell the two shapes apart from length alone, so accepting it
-/// under version 5's semantics would silently scatter a batch's results into the wrong slots.
-/// Version 6 adds VM-only [`BatchKind`] services, banked [`ResultTarget`]s, and witness-ordered
-/// [`WitnessSource`] entries in place of the runtime-sized signal store/projection tables.
-/// `Machine::run` deliberately has no compatibility shim: accepting an older layout could produce
-/// a plausible-looking wrong witness.
+/// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
+/// shim: accepting an older layout could produce a plausible-looking wrong witness.
 const VERSION: u32 = 6;
 
 impl Opcode {

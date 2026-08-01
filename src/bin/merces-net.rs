@@ -1,14 +1,9 @@
 //! Runs rep3 witness extension over a genuine TLS network - one process per party, started
-//! separately (potentially on different machines). Unlike `examples/merces.rs`, which runs all
-//! three parties in one process over an in-process `LocalNetwork`, this binary is the tool for
-//! measuring real network behavior: connection and correlated-randomness setup happen once and are
-//! excluded from every timed run, while each reported total-cost run includes fresh program-wide
-//! Poseidon2 preprocessing followed by online witness extension.
-//!
-//! Sweeps a set of batch sizes (`--batches`, default `1,8,16,32`) in one process, so the network
-//! and rep3 randomness setup is paid once for the whole sweep rather than once per size. Inputs are
-//! seeded-random field elements, not real merces protocol values - fine here, since this binary
-//! only measures witness-extension time and never proves or checks a `===` constraint.
+//! separately (potentially on different machines). Unlike `examples/merces.rs` (all three parties
+//! in one process over `LocalNetwork`), this measures real network behavior: connection and
+//! correlated-randomness setup happen once for the whole `--batches` sweep and are excluded from
+//! every timed run; each reported run includes fresh program-wide Poseidon2 preprocessing plus
+//! online witness extension. Inputs are seeded-random field elements (this binary never proves).
 //!
 //! ```text
 //! # on each node (party N gets its own party config, e.g. configs/partyN.toml)
@@ -16,28 +11,10 @@
 //!     --config configs/party0.toml --opt 1 --runs 5 --batches 1,8,16,32
 //! ```
 //!
-//! The party config TOML and the TLS material it points at (a PKCS#8 private key and one
-//! certificate per party, indexed by id) are produced outside this repo - see
-//! `scripts/run-merces-net.sh` for the shape it expects. `dns_name` in `[[network.parties]]`
-//! doubles as the TLS server name (`ServerName::try_from` in `mpc_net::tls`), so a config that
-//! addresses parties by bare IP needs certs with a matching IP SAN. Example TOML:
-//!
-//! ```toml
-//! [network]
-//! my_id = 0
-//! bind_addr = "0.0.0.0:10000"
-//! timeout = "30min"
-//! connect_timeout = "60s"
-//!
-//! [network.tls]
-//! key = "./data/key0.der"
-//! certs = ["./data/cert0.der", "./data/cert1.der", "./data/cert2.der"]
-//!
-//! [[network.parties]]
-//! id = 0
-//! dns_name = "127.0.0.1:10000"
-//! # ... id = 1, id = 2
-//! ```
+//! The party config TOML and the TLS material it points at are produced outside this repo - see
+//! `scripts/run-merces-net.sh` for the expected shape. `dns_name` in `[[network.parties]]` doubles
+//! as the TLS server name, so a config that addresses parties by bare IP needs certs with a
+//! matching IP SAN.
 
 use std::io::Read as _;
 use std::path::PathBuf;

@@ -53,7 +53,7 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
 
     fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<F>> {
         // Nothing distinguishes "local" from "shared" for a single party - a round's k-th input
-        // already *is* its k-th result. See docs/ARCHITECTURE.md, "MPC lowering".
+        // already *is* its k-th result.
         Ok(locals.to_vec())
     }
 

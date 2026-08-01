@@ -1,40 +1,15 @@
-//! Every check here runs the circuits under a real rep3 driver, so the whole file is gated on the
-//! feature that provides one - otherwise `cargo test --no-default-features` (the plain-only build) fails
-//! to compile this file rather than skipping it.
-#![cfg(feature = "rep3")]
-
-//! End-to-end checks for the real-world circuits vendored from `~/repos/merces/circom`
-//! (`circuits/merces/`). **No vendored circuit is patched** - the compiler adapts to the circuits as
-//! merces ships them, which is the property that keeps this a meaningful compile target.
+//! End-to-end checks for the real-world circuits vendored under `circuits/merces/`. No vendored
+//! circuit is patched - the compiler adapts to the circuits as merces ships them.
 //!
-//! The two server mains (`transfer_arity4_batch{1,8}`) compile and run: `merkle_root_4.circom`'s
-//! `Arity4CMux` compiles like any ordinary template (its body is pure `Add`/`Sub`/`Mul`, so
-//! `passes::mpc::round_schedule` batches its multiplications automatically), and its bare
-//! `IsEqual()` call is recognized as a precomputation site the same way a
-//! `TACEO_PRECOMPUTATION_IsEqual` wrapper would be.
+//! Every scenario (real protocol inputs, see `fixtures`) compiles under both server mains, runs
+//! under `PlainDriver` and under real 3-party `Rep3Driver`, and the two witnesses must agree -
+//! the strongest check available without external artifacts, since `PlainDriver` cannot detect a
+//! mis-ordered precomputation batch (its `reshare` is the identity) while three real parties
+//! either deadlock or diverge. With `inputs/zkey/<main>.arks.zkey` present (gitignored, too large
+//! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
 //!
 //! `transfer_client_compressed` still does not compile; see [`client_main_is_still_unsupported`].
-//!
-//! # The inputs are a real protocol run
-//!
-//! `inputs/<main>_<scenario>.json` (via `fixtures::MERCES_SCENARIOS`) are real merces protocol
-//! values, not placeholders: 4 scenarios per server main, covering deposit, withdraw, an invalid
-//! (zero output-flag) withdraw, and a transfer that links a withdraw root to a deposit root - the one
-//! `===` family (`server.circom:159`) that arbitrary values cannot satisfy. See `fixtures`'s module
-//! doc for the full constraint table.
-//!
-//! # What is checked, and what that needs
-//!
-//! Always: every scenario compiles under both mains, runs under `PlainDriver`, runs under real
-//! 3-party `Rep3Driver` over `mpc_net::local::LocalNetwork`, and the two witnesses agree. That
-//! comparison is the strongest check available without external artifacts - `PlainDriver`'s
-//! `reshare` is the identity and its slots start zeroed, so it cannot detect a mis-ordered
-//! precomputation batch, whereas three real parties either deadlock or diverge.
-//!
-//! With `inputs/zkey/<main>.arks.zkey` present (the merces ceremony proving key - too large to
-//! commit, see `.gitignore`), a scenario additionally produces and verifies a real co-groth16
-//! proof - this skips with a message rather than failing when the key is absent, so `cargo test`
-//! stays green on a fresh clone.
+#![cfg(feature = "rep3")]
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -175,8 +150,8 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
 /// `transfer_client_compressed` remains unsupported, and must fail with a *typed* error rather than a
 /// panic. Its blockers are deeper than the server mains': a bare `IsZero` in `escalarmulany.circom`,
 /// bare `Num2Bits` calls reached through `BabyJubJubIsInFr`, and genuine non-constant field `Div` in
-/// `montgomery.circom` - i.e. the whole deliberately-removed operator surface (see
-/// `docs/ARCHITECTURE.md`, "Known gaps"), not something a config knob routes around.
+/// `montgomery.circom` - i.e. the whole deliberately-removed operator surface, not something a
+/// config knob routes around.
 #[test]
 fn client_main_is_still_unsupported() {
     match CoCircomCompiler::<Bn254>::parse(

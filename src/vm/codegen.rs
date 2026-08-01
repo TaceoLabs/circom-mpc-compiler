@@ -3,7 +3,7 @@
 //! over `graph.nodes()` (already topologically ordered - `Graph::verify`) doing three things at
 //! once: classifying each value's `Domain` (reusing `passes::mpc::domain`, the same analysis
 //! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
-//! emission. See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! emission.
 
 use ark_ff::{BigInteger, PrimeField};
 
@@ -307,8 +307,7 @@ fn select_opcode(
 /// Which bank a precomputation site's results live in. Every kind but [`PrecomputeKind::Reveal`]
 /// keeps the site's own domain (deterministic public work stays `Public`, a real share stays
 /// `Shared`) - `Reveal`'s entire purpose is to leave the `Public` domain regardless of whether its
-/// own input was `Shared`, since that is exactly what a genuine MPC open does. See
-/// `docs/ARCHITECTURE.md`, "Precomputation".
+/// own input was `Shared`, since that is exactly what a genuine MPC open does.
 fn precompute_result_bank(kind: PrecomputeKind, domain: Domain) -> eyre::Result<Bank> {
     if domain == Domain::Local {
         eyre::bail!(
@@ -354,16 +353,9 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
 
     // A site's inputs must still hold their values when its *batch* runs, which is later than the
     // `Op::Precompute` node that reads them - so extend their lifetimes to the batch's anchor.
-    //
-    // Load-bearing, not just defense in depth, now that `passes::dead_signals` prunes witness-dead
-    // outputs before this runs: `inline_precomputed` pushes every site input into `graph.outputs()`,
-    // but circom's own constraint simplification frequently drops a gadget's own input signal from
-    // the witness, so `dead_signals` removes that binding and `compute_last_use` no longer pins the
-    // input to `nodes.len()`. This extension is what stops the allocator from recycling a site
-    // input's slot between the `Op::Precompute` node and the batch's actual service point. Hand-built
-    // codegen test graphs never bound site inputs to outputs in the first place, which is why this
-    // was already exercised (`site_input_slot_survives_until_its_batch_runs`, below) before it
-    // became load-bearing on real circuits too.
+    // Without this the allocator recycles a witness-dead site input's slot between the node and
+    // the service point (dead-code elimination frequently unpins gadget input signals from the
+    // witness on real circuits).
     for runtime in &runtime_plans {
         match *runtime {
             RuntimePlan::Normal(plan_idx) => {
@@ -622,9 +614,9 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
                     .expect("round has more slots than fit into u32");
 
                 // round_schedule guarantees a Round node is immediately followed by exactly `len`
-                // RoundResult(0..len) nodes, in slot order - see its own module doc, and
-                // docs/ARCHITECTURE.md, "MPC lowering". Codegen relies on the same guarantee its
-                // own producer already asserts, rather than re-deriving the mapping some other way.
+                // RoundResult(0..len) nodes, in slot order - see its own module doc. Codegen relies
+                // on the same guarantee its own producer already asserts, rather than re-deriving
+                // the mapping some other way.
                 let result_start =
                     u32::try_from(round_results.len()).expect("too many round results");
                 for k in 0..node.inputs.len() {

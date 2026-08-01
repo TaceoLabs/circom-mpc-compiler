@@ -4,8 +4,7 @@
 //! `Add`/`Sub`/mul-by-constant tree into one of these, which is what lets it cancel terms
 //! (`(a+b)-a -> b`) and reassociate long chains circom happened to nest arbitrarily.
 //!
-//! Degree is deliberately capped at 1 (affine, not quadratic) - see `docs/ARCHITECTURE.md`, "MPC
-//! lowering", for why a degree-2 extension (fusing multiple products behind one reshare slot) is
+//! Degree is deliberately capped at 1 (affine, not quadratic), for why a degree-2 extension (fusing multiple products behind one reshare slot) is
 //! rejected rather than built speculatively here.
 
 use std::collections::HashMap;

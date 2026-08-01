@@ -3,8 +3,7 @@
 //! `frontend/fold.rs::fold_binary` (folds the operators removed from the runtime IR, before a
 //! node ever exists) and `GraphCompiler::eval_constant_node` (address-position-only, used for
 //! array/signal/component addressing at lowering time). This is the first fold that runs as a
-//! real pass over the graph itself - see `docs/ARCHITECTURE.md`, "Where compile-time folding
-//! lives".
+//! real pass over the graph itself.
 
 use ark_ff::PrimeField;
 

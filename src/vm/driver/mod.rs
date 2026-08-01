@@ -1,6 +1,6 @@
 //! `VmDriver`: the pluggable backend `Machine::run` executes a `Program` against - either
 //! `plain::PlainDriver` (single-party, the reference driver) or a real rep3 driver (three-party, behind
-//! the `rep3` feature). See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! the `rep3` feature).
 
 pub mod plain;
 #[cfg(feature = "rep3")]
@@ -10,10 +10,9 @@ use ark_ff::PrimeField;
 
 /// What actually executes a compiled `Program`. Linear ops (`add_ss`/`sub_sp`/...) are infallible
 /// local computation - a plain field op for `PlainDriver`, a share-local op for a real MPC driver,
-/// never a network round (see `docs/ARCHITECTURE.md`, "MPC lowering", for why every linear op is
-/// free). `mul_local`/`reshare` are the two MPC-lowering primitives; the four `*_traces` methods
-/// are the precomputation gadgets (see "Precomputation") batched circuit-wide by
-/// `Machine::run`'s precompute services.
+/// never a network round. `mul_local_vec`/`reshare` are the two MPC-lowering primitives; the
+/// `*_traces` methods are the precomputation gadgets batched circuit-wide by `Machine::run`'s
+/// precompute services.
 pub trait VmDriver<F: PrimeField> {
     /// A valid share any linear op may consume - `F` in `PlainDriver`, `Rep3PrimeFieldShare<F>` in
     /// a real rep3 driver.

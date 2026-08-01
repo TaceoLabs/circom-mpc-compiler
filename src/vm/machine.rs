@@ -1,6 +1,6 @@
 //! Executes a `Program` against a `VmDriver`: the same bytecode runs against `PlainDriver` (the
-//! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed in. See
-//! `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed
+//! in.
 
 use ark_ff::PrimeField;
 
@@ -269,8 +269,7 @@ impl Machine {
 
     /// Services one batched precomputation site group at its point in the instruction stream. A
     /// public batch uses the plain gadget path; a shared batch is one driver call. Interleaving is
-    /// required because a site's inputs may be produced by earlier instructions (see
-    /// `docs/ARCHITECTURE.md`, "Precomputation").
+    /// required because a site's inputs may be produced by earlier instructions.
     ///
     /// A gadget's per-site result count may be *shorter* than the site's reserved capacity
     /// (`num_outputs + num_intermediates`, sized from the real circuit's own signal layout): the
@@ -467,7 +466,7 @@ impl Machine {
     }
 
     /// Selects each site's witness-live logical result slots out of a gadget's full per-site
-    /// output, flattening site-major. A temporary bridge (see `docs/ARCHITECTURE.md`,
+    /// output, flattening site-major. A temporary bridge (,
     /// "Precomputation"): gadgets other than Poseidon2 still compute and return their *full*
     /// per-site trace (`num_outputs + num_intermediates` values), and this filters the
     /// `PrecomputeBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
