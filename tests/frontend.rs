@@ -2,7 +2,6 @@
 //! produces for circom constructs it deliberately doesn't support, and the input metadata it derives
 //! alongside the graph. The positive value cases live in `tests/proving.rs`.
 //!
-//! See `docs/ARCHITECTURE.md`, "Known gaps", for why each gap is a gap.
 
 use ark_bn254::Bn254;
 use circom_mpc_compiler::vm::program::Bank;
@@ -84,7 +83,7 @@ fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
     let program = CoCircomCompiler::<Bn254>::compile(circuit_path("multiplier2_public"), config())
         .expect("multiplier2_public compiles");
     assert_eq!(
-        program.input_domains,
+        program.input_domains(),
         vec![Bank::Public, Bank::Shared],
         "`a` is declared public, `b` is not"
     );

@@ -1,6 +1,6 @@
 //! Real three-party rep3 execution over `mpc_net`/`mpc_core`. `Share = Rep3PrimeFieldShare<F>`;
 //! `Local = F` - the `a` component of a replicated share is already a valid additive-3 sharing on
-//! its own (see `docs/ARCHITECTURE.md`, "MPC lowering"), so there's nothing to wrap. Behind the
+//! its own, so there's nothing to wrap. Behind the
 //! `rep3` feature.
 
 use ark_ff::PrimeField;
@@ -41,7 +41,7 @@ impl<'a, F: PrimeField, N: Network> Rep3Driver<'a, F, N> {
         program: &Program<F>,
     ) -> eyre::Result<Self> {
         // Never communicate for a malformed public Program value.
-        program.validate()?;
+        program.validate_encoding()?;
         let mask_budget = program.poseidon2_mask_budget()?;
         let poseidon2 = gadgets::poseidon2::preprocess_rep3(mask_budget, net, state)?;
         Ok(Self {
@@ -55,7 +55,6 @@ impl<'a, F: PrimeField, N: Network> Rep3Driver<'a, F, N> {
 
 impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
     type Share = Rep3PrimeFieldShare<F>;
-    type Local = F;
 
     fn begin_run(&mut self) -> eyre::Result<()> {
         match self.lifecycle {
@@ -84,7 +83,7 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
     }
 
     fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<F>> {
-        Ok(rep3::arithmetic::open_vec(shares, self.net)?)
+        rep3::arithmetic::open_vec(shares, self.net)
     }
 
     fn add_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share {
@@ -111,34 +110,13 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
         rep3::arithmetic::mul_public(*a, b)
     }
 
-    fn mul_local(&mut self, a: &Self::Share, b: &Self::Share) -> F {
-        rep3::arithmetic::local_mul_vec(
-            std::slice::from_ref(a),
-            std::slice::from_ref(b),
-            self.state,
-        )[0]
-    }
-
-    fn mul_local_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> Vec<F> {
-        rep3::arithmetic::local_mul_vec(a, b, self.state)
-    }
-
-    fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<Self::Share>> {
-        rep3::arithmetic::reshare_vec(locals.to_vec(), self.net)
-    }
-
-    fn poseidon2_traces(
+    fn mul_vec(
         &mut self,
-        t: usize,
-        states: &[Self::Share],
+        a: &[Self::Share],
+        b: &[Self::Share],
     ) -> eyre::Result<Vec<Self::Share>> {
-        gadgets::poseidon2::rep3_trace_preprocessed(
-            t,
-            states,
-            self.net,
-            self.state,
-            &mut self.poseidon2,
-        )
+        let local = rep3::arithmetic::local_mul_vec(a, b, self.state);
+        rep3::arithmetic::reshare_vec(local, self.net)
     }
 
     fn poseidon2_requested_traces(
@@ -176,10 +154,6 @@ impl<N: Network, F: PrimeField> VmDriver<F> for Rep3Driver<'_, F, N> {
         inputs: &[Self::Share],
     ) -> eyre::Result<Vec<(Self::Share, Self::Share, F)>> {
         gadgets::iszero::rep3_masked_reveal_trace(inputs, self.net, self.state)
-    }
-
-    fn is_equal_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>> {
-        gadgets::isequal::rep3_trace(inputs, self.net, self.state)
     }
 
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>> {

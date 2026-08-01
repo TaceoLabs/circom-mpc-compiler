@@ -4,134 +4,51 @@
 //!
 //! This alone is a correct, independently testable lowering: it's exactly `rep3::arithmetic::mul`
 //! called once per secret product (`local_mul` then `reshare`). `round_schedule`, the next pass in
-//! the pipeline, is what batches these singleton rounds into fewer, wider ones - see
-//! `docs/ARCHITECTURE.md`, "MPC lowering".
-//!
-//! Computes [`Domain`] incrementally, in new-space, as it rewrites - not from a precomputed
-//! old-space array. `Graph::rewrite` remaps every node's inputs to *new*-space ids before this
-//! pass's callback ever sees them (so an `EmitMany` earlier in the same rewrite shifts every later
-//! index), so an old-space domain table computed up front couldn't be indexed by the ids this
-//! callback actually receives. Recomputing alongside `new_nodes` keeps the two in lockstep for
-//! free.
+//! the pipeline, batches these singleton rounds into fewer, wider ones.
 
 use ark_ff::PrimeField;
 
-use crate::ir::{Graph, Node, Op, PrecomputeKind, RewriteAction, RoundDesc, RoundId, RoundKind, ValueId};
-use crate::passes::{Changed, Pass, PassContext};
+use crate::ir::{Graph, Node, Op, RewriteAction, RoundDesc, RoundId, ValueId};
 
-use super::domain::{signal_domain, Domain};
+use super::domain::{compute_domains, Domain};
 
-pub(crate) struct MulSplit;
+pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    // The split decision depends only on the *old* graph, so classify it up front. Inside the
+    // rewrite closure only the old-space node id is stable (`Graph::rewrite` remaps inputs to
+    // new-space ids), so the decision is looked up by that id.
+    let domains = compute_domains(graph);
+    let should_split: Vec<bool> = graph
+        .nodes()
+        .iter()
+        .map(|node| {
+            matches!(node.op, Op::Mul)
+                && domains[node.inputs[0].index()] == Domain::Shared
+                && domains[node.inputs[1].index()] == Domain::Shared
+        })
+        .collect();
 
-impl<F: PrimeField> Pass<F> for MulSplit {
-    fn name(&self) -> &'static str {
-        "mpc::mul_split"
-    }
-
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        // Copied out before `rewrite` takes `&mut graph`, so `signal_domain` doesn't need to
-        // borrow `graph` from inside the rewrite closure - see its own doc.
-        let num_outputs = graph.num_outputs;
-        let input_list = graph.input_list.clone();
-        let public_inputs = graph.public_inputs.clone();
-        let mpc_public_inputs = graph.mpc_public_inputs.clone();
-        // Kinds only (not the whole `PrecomputeSite`), keyed by `PrecomputeId` - just enough to
-        // mirror `domain::compute_domains`'s `Reveal`-forces-`Public` rule below.
-        let site_kinds: Vec<PrecomputeKind> =
-            graph.precompute_sites().iter().map(|site| site.kind).collect();
-
-        // Domain of each *new-space* value, grown by exactly one entry per node pushed to
-        // `new_nodes` inside `Graph::rewrite` - see the module doc for why this can't be a
-        // precomputed old-space array.
-        let mut domain: Vec<Domain> = Vec::with_capacity(graph.len());
-        let mut rounds: Vec<RoundDesc> = Vec::new();
-
-        let changed = graph.rewrite(|_id, node, emitted| match &node.op {
-            Op::Mul
-                if domain[node.inputs[0].index()] == Domain::Shared
-                    && domain[node.inputs[1].index()] == Domain::Shared =>
-            {
-                let mul_local_id = ValueId::new(domain.len());
-                let round_new_id = ValueId::new(domain.len() + 1);
-                let round_id = RoundId::new(rounds.len());
-                rounds.push(RoundDesc {
-                    kind: RoundKind::Reshare,
-                    len: 1,
-                    level: 0, // recomputed structurally by round_schedule; unused until then
-                });
-                domain.push(Domain::Local); // MulLocal
-                domain.push(Domain::Public); // Round's own value is never read directly
-                domain.push(Domain::Shared); // RoundResult(0)
-                RewriteAction::EmitMany(vec![
-                    Node::new(Op::MulLocal, node.inputs.clone()),
-                    Node::new(Op::Round(round_id), vec![mul_local_id]),
-                    Node::new(Op::RoundResult(0), vec![round_new_id]),
-                ])
-            }
-            Op::Constant(_) => {
-                domain.push(Domain::Public);
-                RewriteAction::Keep
-            }
-            Op::Input(sig) => {
-                domain.push(signal_domain(
-                    num_outputs,
-                    &input_list,
-                    &public_inputs,
-                    &mpc_public_inputs,
-                    *sig,
-                ));
-                RewriteAction::Keep
-            }
-            Op::Add | Op::Sub | Op::Mul => {
-                let d = domain[node.inputs[0].index()].join(domain[node.inputs[1].index()]);
-                domain.push(d);
-                RewriteAction::Keep
-            }
-            Op::Precompute(_) => {
-                let d = node
-                    .inputs
-                    .iter()
-                    .fold(Domain::Public, |d, input| d.join(domain[input.index()]));
-                domain.push(d);
-                RewriteAction::Keep
-            }
-            // Mirrors `domain::compute_domains`'s `Reveal`-forces-`Public` rule (see there for why):
-            // a `Reveal` site's result is unconditionally `Public`, regardless of its own site's
-            // domain. `emitted` is every new-space node pushed so far - the `Op::Precompute` node
-            // this result references always precedes it (topological order), so it's already there.
-            Op::PrecomputeResult(_) => {
-                let precompute_idx = node.inputs[0].index();
-                let d = match &emitted[precompute_idx].op {
-                    Op::Precompute(site_id)
-                        if matches!(site_kinds[site_id.index()], PrecomputeKind::Reveal { .. }) =>
-                    {
-                        Domain::Public
-                    }
-                    _ => domain[precompute_idx],
-                };
-                domain.push(d);
-                RewriteAction::Keep
-            }
-            // mul_split runs before any of these exist (frontend never produces them, and it's the
-            // first lowering pass) - handled defensively so this match stays exhaustive as Op
-            // grows, not because it's reachable today.
-            Op::MulLocal => {
-                domain.push(Domain::Local);
-                RewriteAction::Keep
-            }
-            Op::Round(_) => {
-                domain.push(Domain::Public);
-                RewriteAction::Keep
-            }
-            Op::RoundResult(_) => {
-                domain.push(Domain::Shared);
-                RewriteAction::Keep
-            }
+    let mut rounds: Vec<RoundDesc> = Vec::new();
+    let changed = graph.rewrite(|id, node, emitted| {
+        if !should_split[id.index()] {
+            return RewriteAction::Keep;
+        }
+        // `emitted.len()` is the new-space id the next emitted node will get.
+        let mul_local_id = ValueId::new(emitted.len());
+        let round_new_id = ValueId::new(emitted.len() + 1);
+        let round_id = RoundId::new(rounds.len());
+        rounds.push(RoundDesc {
+            len: 1,
+            level: 0, // recomputed structurally by round_schedule; unused until then
         });
+        RewriteAction::EmitMany(vec![
+            Node::new(Op::MulLocal, node.inputs.clone()),
+            Node::new(Op::Round(round_id), vec![mul_local_id]),
+            Node::new(Op::RoundResult(0), vec![round_new_id]),
+        ])
+    });
 
-        graph.set_rounds(rounds);
-        Ok(changed)
-    }
+    graph.set_rounds(rounds);
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -165,8 +82,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let mut pass = MulSplit;
-        let changed = Pass::run(&mut pass, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert_eq!(graph.len(), 5); // Input, Input, MulLocal, Round, RoundResult
         assert!(matches!(graph.node(ValueId::new(2)).op, Op::MulLocal));
@@ -185,8 +101,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let mut pass = MulSplit;
-        let changed = Pass::run(&mut pass, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(!changed);
         assert_eq!(graph.len(), 3);
         assert!(matches!(graph.node(ValueId::new(2)).op, Op::Mul));

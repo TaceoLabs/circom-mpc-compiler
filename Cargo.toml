@@ -8,7 +8,6 @@ ark-bn254 = "0.5"
 ark-ec = { version = "0.5", default-features = false }
 ark-ff = "0.5"
 ark-serialize = { version = "0.5", features = ["derive", "std"] }
-byteorder = "1.5.0"
 circom-type_analysis = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "type_analysis", rev = "1cc17fb" }
 circom-constraint_generation = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "constraint_generation", rev = "1cc17fb" }
 circom-parser = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "parser", rev = "1cc17fb" }
@@ -20,7 +19,6 @@ num-traits = { version = "0.2.18", default-features = false }
 rayon = "1.8.1"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0.59"
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 rustc-hash = "2"
@@ -33,7 +31,7 @@ rustls = { version = "0.23", optional = true }
 
 [features]
 default = ["rep3", "round-counting"]
-rep3 = ["dep:mpc-core", "dep:mpc-net"]
+rep3 = ["dep:mpc-core", "dep:mpc-net", "dep:rand"]
 # Instruments the rep3 network (`vm::counting_net::CountingNet`) to count rounds and bytes.
 # Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
 # wrapper is a thin delegating decorator, two relaxed atomics per send/recv.

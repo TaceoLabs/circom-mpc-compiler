@@ -1,10 +1,10 @@
 //! Compile-time folding for circom operators that `ir::Op` has no runtime variant for, plus
 //! `Add`/`Sub`/`Mul` when they occur at the root of a static branch condition.
 //!
-//! `ir::Op` only carries `Add`/`Sub`/`Mul` as runtime ops (see `docs/ARCHITECTURE.md`). Circom
+//! `ir::Op` only carries `Add`/`Sub`/`Mul` as runtime ops. Circom
 //! source can still use `/`, `\`, `**`, shifts, and bitwise ops, but only where every operand is a
 //! compile-time constant - the moment one operand is a genuine circuit value, lowering it becomes
-//! an `Unsupported::NonConstantOperator` error (`build.rs::handle_compute_bucket`) instead of
+//! an `non-constant-operator` error (`build.rs::handle_compute_bucket`) instead of
 //! reaching this module.
 
 use std::cmp::Ordering;
@@ -15,6 +15,8 @@ use num_traits::ToPrimitive;
 
 use circom_compiler::intermediate_representation::ir_interface::OperatorType;
 
+use super::build::to_usize;
+
 /// Field elements as an unsigned big integer, matching circom's own semantics for `\`, `<<`, `>>`,
 /// `|`, `&`, `^` (which all operate on the canonical integer representative, not the field element
 /// as such).
@@ -24,14 +26,6 @@ fn to_bigint<F: PrimeField>(f: F) -> BigUint {
 
 fn to_u128<F: PrimeField>(f: F) -> u128 {
     to_bigint(f).to_u128().expect("does not fit into u128")
-}
-
-fn to_usize<F: PrimeField>(f: F) -> usize {
-    to_bigint(f)
-        .to_u64()
-        .expect("does not fit into u64")
-        .try_into()
-        .expect("does not fit into usize")
 }
 
 /// Evaluates `op(lhs, rhs)` at compile time. Most callers use this for operators that have no

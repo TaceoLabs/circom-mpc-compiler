@@ -1,21 +1,10 @@
-//! Converting this VM's native witness into co-snarks' `SharedWitness`, so a `co-groth16` proof can
-//! be produced from it, in the tests and examples that actually prove (`tests/proving.rs`,
-//! `tests/merces.rs`, `examples/merces.rs`) - this module has no dependency on co-snarks' proving
-//! crates.
+//! Converts this VM's uniformly-shared witness into co-snarks' `SharedWitness` (a cleartext
+//! `public_inputs` prefix plus a secret-shared remainder): one batched open of the prefix, then a
+//! move of the rest.
 //!
-//! `Machine::run` returns `Vec<D::Share>` - **uniformly** shared, one entry per witness position in
-//! circom's own order, with position 0 the reserved constant `1`. co-snarks'
-//! `SharedWitness { public_inputs, witness }` instead splits that into a *cleartext* prefix and a
-//! secret-shared remainder, so the conversion is one batched open of the prefix and a move of the
-//! rest (`Rep3PrimeFieldShare<F>` is already exactly the element type it wants - both crates pin the
-//! same `mpc-core` revision, so there is no version skew to bridge).
-//!
-//! **The split index comes from the zkey, not from this compiler.** `ConstraintMatrices::
-//! num_instance_variables` is circom's own count of instance variables for the circuit being proved.
-//! Re-deriving it here from `Program::input_domains` would only be an approximation, because
-//! `passes::mpc::domain` falls back to `Shared` conservatively when it cannot prove a signal public -
-//! harmless for lowering (it just costs an optimization) but wrong as a split point, where being off
-//! by one silently produces a proof over the wrong statement.
+//! **The split index comes from the zkey, not from this compiler.** Re-deriving it from
+//! `Program::input_domains` would only be an approximation (the domain analysis falls back to
+//! `Shared` conservatively), and an off-by-one split silently proves the wrong statement.
 
 use ark_ff::PrimeField;
 

@@ -50,7 +50,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 }
 
 /// One-round masked IsZero plus explicit reveal, batched across every site. This is the optimized
-/// primitive used only for the VM's conservative whole-batch `IsZero/IsEqual -> Reveal(1)` fusion.
+/// primitive used only for the VM's conservative whole-batch `IsZero -> Reveal(1)` fusion.
 ///
 /// Each input is multiplied by its own fresh secret arithmetic mask and the products are opened
 /// together. A non-zero product gives `inv = mask / product = 1 / input`; a zero product gives the
@@ -58,6 +58,7 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 /// can falsely classify a non-zero input, so the statistical-soundness tradeoff is restricted to
 /// BN254 here as well as in codegen and `Program::validate`.
 #[cfg(feature = "rep3")]
+#[allow(clippy::type_complexity)]
 pub fn rep3_masked_reveal_trace<F: PrimeField, N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
     net: &N,
@@ -165,7 +166,7 @@ mod tests {
     }
 
     /// Pins both conversion strategies' all-party critical path, as well as the circuit-wide
-    /// batching guarantee. IsEqual delegates to this implementation and inherits the same cost.
+    /// batching guarantee.
     #[cfg(feature = "round-counting")]
     #[test]
     fn rep3_cost_by_strategy_is_independent_of_site_count() {

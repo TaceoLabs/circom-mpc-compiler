@@ -1,83 +1,33 @@
-//! Every check here runs the circuits under a real rep3 driver, so the whole file is gated on the
-//! feature that provides one - otherwise `cargo test --no-default-features` (the plain-only build) fails
-//! to compile this file rather than skipping it.
-#![cfg(feature = "rep3")]
-
-//! End-to-end checks for the real-world circuits vendored from `~/repos/merces/circom`
-//! (`circuits/merces/`). **No vendored circuit is patched** - the compiler adapts to the circuits as
-//! merces ships them, which is the property that keeps this a meaningful compile target.
+//! End-to-end checks for the real-world circuits vendored under `circuits/merces/`. No vendored
+//! circuit is patched - the compiler adapts to the circuits as merces ships them.
 //!
-//! The two server mains (`transfer_arity4_batch{1,8}`) compile and run: `merkle_root_4.circom`'s
-//! `Arity4CMux` compiles like any ordinary template (its body is pure `Add`/`Sub`/`Mul`, so
-//! `passes::mpc::round_schedule` batches its multiplications automatically), and its bare
-//! `IsEqual()` call is recognized as a precomputation site the same way a
-//! `TACEO_PRECOMPUTATION_IsEqual` wrapper would be.
+//! Every scenario (real protocol inputs, see `fixtures`) compiles under both server mains, runs
+//! under `PlainDriver` and under real 3-party `Rep3Driver`, and the two witnesses must agree -
+//! the strongest check available without external artifacts, since `PlainDriver` cannot detect a
+//! mis-ordered precomputation batch (its `reshare` is the identity) while three real parties
+//! either deadlock or diverge. With `inputs/zkey/<main>.arks.zkey` present (gitignored, too large
+//! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
 //!
 //! `transfer_client_compressed` still does not compile; see [`client_main_is_still_unsupported`].
-//!
-//! # The inputs are a real protocol run
-//!
-//! `inputs/<main>_<scenario>.json` (via `fixtures::MERCES_SCENARIOS`) are real merces protocol
-//! values, not placeholders: 4 scenarios per server main, covering deposit, withdraw, an invalid
-//! (zero output-flag) withdraw, and a transfer that links a withdraw root to a deposit root - the one
-//! `===` family (`server.circom:159`) that arbitrary values cannot satisfy. See `fixtures`'s module
-//! doc for the full constraint table.
-//!
-//! # What is checked, and what that needs
-//!
-//! Always: every scenario compiles under both mains, runs under `PlainDriver`, runs under real
-//! 3-party `Rep3Driver` over `mpc_net::local::LocalNetwork`, and the two witnesses agree. That
-//! comparison is the strongest check available without external artifacts - `PlainDriver`'s
-//! `reshare` is the identity and its slots start zeroed, so it cannot detect a mis-ordered
-//! precomputation batch, whereas three real parties either deadlock or diverge.
-//!
-//! With `inputs/zkey/<main>.arks.zkey` present (the merces ceremony proving key - too large to
-//! commit, see `.gitignore`), a scenario additionally produces and verifies a real co-groth16
-//! proof - this skips with a message rather than failing when the key is absent, so `cargo test`
-//! stays green on a fresh clone.
+#![cfg(feature = "rep3")]
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ark_bn254::{Bn254, Fr};
-use circom_mpc_compiler::fixtures;
+use circom_mpc_compiler::fixtures::{self, merces_config, merces_main_path, rep3::run_witness};
 use circom_mpc_compiler::ir::InputList;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::witness::split_witness;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CoCircomCompiler;
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{
-    combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
-};
+use mpc_core::protocols::rep3::{Rep3State};
 use mpc_net::local::LocalNetwork;
-use rand::thread_rng;
 
 fn manifest_dir() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
-}
-
-fn merces_circuit_path(name: &str) -> String {
-    format!("{}/circuits/merces/main/{name}.circom", manifest_dir())
-}
-
-fn merces_config() -> CompilerConfig {
-    let mut config = CompilerConfig::default();
-    // The vendored circuits are `pragma circom 2.2.2` verbatim.
-    config.version = "2.2.2".to_owned();
-    // Two link libraries, mirroring how merces itself compiles these (`-l circom/node_modules
-    // -l circom`): `circuits/libs/` resolves circomlib + the vendored `taceo/` subtree,
-    // `circuits/merces/` the `merces/`/`oblivious_vector/` cross-references.
-    config
-        .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
-    config
-        .link_library
-        .push(format!("{}/circuits/merces/", manifest_dir()).into());
-    config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
-    config
 }
 
 /// Compiles a merces main once and shares it across every scenario in this test binary -
@@ -85,7 +35,7 @@ fn merces_config() -> CompilerConfig {
 /// codegen depends on the scenario's input values.
 fn compiled(main: &str) -> &'static (Program<Fr>, InputList) {
     fn build(main: &str) -> (Program<Fr>, InputList) {
-        let graph = CoCircomCompiler::<Bn254>::parse(merces_circuit_path(main), merces_config())
+        let graph = CoCircomCompiler::<Bn254>::parse(merces_main_path(main), merces_config())
             .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
         let input_list = graph.input_list.clone();
         let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"));
@@ -114,47 +64,6 @@ fn plain_witness(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
     Machine::run(program, &mut driver, &inputs).unwrap_or_else(|e| panic!("plain run: {e}"))
 }
 
-/// Runs `values` through real 3-party rep3 and reconstructs the witness.
-fn run_rep3(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
-    let mut rng = thread_rng();
-    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-        .input_domains
-        .iter()
-        .zip(values)
-        .filter(|(bank, _)| matches!(bank, Bank::Shared))
-        .map(|(_, &v)| share_field_element(v, &mut rng))
-        .collect();
-
-    let networks = LocalNetwork::new(3);
-    let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
-        networks
-            .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
-                let secret_shares = &secret_shares;
-                scope.spawn(move || {
-                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
-                    let mut next = 0;
-                    let inputs = program.classify_inputs(values, |_v| {
-                        let s = secret_shares[next][party];
-                        next += 1;
-                        s
-                    });
-                    Machine::run(program, &mut driver, &inputs).unwrap()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
-    });
-
-    let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
-    combine_field_elements(&w0, &w1, &w2)
-}
-
 /// The core end-to-end assertion, for one (main, scenario) pair.
 fn witness_extension_agrees(main: &str, scenario: &str) {
     let (program, _) = compiled(main);
@@ -163,12 +72,12 @@ fn witness_extension_agrees(main: &str, scenario: &str) {
     let plain = plain_witness(program, &values);
     assert_eq!(
         plain.len(),
-        program.witness_sources.len(),
+        program.statistics().witness_values,
         "{main}/{scenario}: witness length"
     );
 
     assert_eq!(
-        run_rep3(program, &values),
+        run_witness(program, &values),
         plain,
         "{main}/{scenario}: 3-party rep3 must reconstruct the same witness the plain driver computes"
     );
@@ -189,83 +98,22 @@ fn transfer_arity4_batch8_all_scenarios_run_end_to_end() {
 }
 
 #[cfg(feature = "round-counting")]
-fn witness_extension_rounds(main: &str, scenario: &str) -> ([usize; 3], [usize; 3]) {
-    use circom_mpc_compiler::vm::counting_net::CountingNet;
-
-    let (program, _) = compiled(main);
-    let values = scenario_values(main, scenario);
-    let mut rng = thread_rng();
-    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-        .input_domains
-        .iter()
-        .zip(&values)
-        .filter(|(bank, _)| matches!(bank, Bank::Shared))
-        .map(|(_, &value)| share_field_element(value, &mut rng))
-        .collect();
-    let networks: Vec<_> = LocalNetwork::new(3)
-        .into_iter()
-        .map(CountingNet::new)
-        .collect();
-
-    let rounds: Vec<(usize, usize)> = std::thread::scope(|scope| {
-        networks
-            .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
-                let secret_shares = &secret_shares;
-                let values = &values;
-                scope.spawn(move || {
-                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    net.reset();
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
-                    let preprocessing = net.rounds();
-
-                    net.reset();
-                    let mut next = 0;
-                    let inputs = program.classify_inputs(values, |_value| {
-                        let share = secret_shares[next][party];
-                        next += 1;
-                        share
-                    });
-                    Machine::run(program, &mut driver, &inputs).unwrap();
-                    (preprocessing, net.rounds())
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
-    });
-
-    let [(prep0, online0), (prep1, online1), (prep2, online2)]: [(usize, usize); 3] =
-        rounds.try_into().unwrap();
-    ([prep0, prep1, prep2], [online0, online1, online2])
-}
-
-#[cfg(feature = "round-counting")]
 #[test]
 fn server_mains_separate_preprocessing_from_online_rounds() {
+    use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
+
     for (main, scenario) in [
         ("transfer_arity4_batch1", "deposit"),
         ("transfer_arity4_batch8", "full_batch"),
     ] {
-        let (preprocessing, online) = witness_extension_rounds(main, scenario);
-        let combined = std::array::from_fn(|party| preprocessing[party] + online[party]);
+        let (program, _) = compiled(main);
+        let values = scenario_values(main, scenario);
+        let (_, preprocessing, online) = run_witness_counted(program, &values);
+        let combined: [usize; 3] = std::array::from_fn(|party| preprocessing[party] + online[party]);
 
         assert_eq!(preprocessing, [3, 3, 3], "{main}: preprocessing rounds");
         assert_eq!(online, [69, 71, 71], "{main}: online rounds");
-        assert_eq!(
-            online.into_iter().max(),
-            Some(71),
-            "{main}: max online rounds"
-        );
         assert_eq!(combined, [72, 74, 74], "{main}: combined rounds");
-        assert_eq!(
-            combined.into_iter().max(),
-            Some(74),
-            "{main}: max combined rounds"
-        );
     }
 }
 
@@ -283,12 +131,8 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
 fn batching_collapses_many_sites_into_few_driver_calls() {
     for main in ["transfer_arity4_batch1", "transfer_arity4_batch8"] {
         let (program, _) = compiled(main);
-        let sites: usize = program.precompute_batches.iter().map(|b| b.sites).sum();
-        let shared_batches = program
-            .precompute_batches
-            .iter()
-            .filter(|b| b.input_slots.iter().any(|input| input.bank == Bank::Shared))
-            .count();
+        let sites = program.statistics().precompute_sites;
+        let shared_batches = program.statistics().shared_precompute_batches;
         assert!(sites > 50, "{main}: expected a site-heavy circuit, got {sites}");
         assert!(
             shared_batches * 4 < sites,
@@ -301,12 +145,12 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
 /// `transfer_client_compressed` remains unsupported, and must fail with a *typed* error rather than a
 /// panic. Its blockers are deeper than the server mains': a bare `IsZero` in `escalarmulany.circom`,
 /// bare `Num2Bits` calls reached through `BabyJubJubIsInFr`, and genuine non-constant field `Div` in
-/// `montgomery.circom` - i.e. the whole deliberately-removed operator surface (see
-/// `docs/ARCHITECTURE.md`, "Known gaps"), not something a config knob routes around.
+/// `montgomery.circom` - i.e. the whole deliberately-removed operator surface, not something a
+/// config knob routes around.
 #[test]
 fn client_main_is_still_unsupported() {
     match CoCircomCompiler::<Bn254>::parse(
-        merces_circuit_path("transfer_client_compressed"),
+        merces_main_path("transfer_client_compressed"),
         merces_config(),
     ) {
         Ok(_) => panic!(
@@ -374,20 +218,13 @@ fn proves_and_verifies(main: &str, scenario: &str) {
         .and_then(|s| s.values(input_list))
         .unwrap_or_else(|e| panic!("{main}/{scenario}: {e}"));
     assert_eq!(
-        program.witness_sources.len(),
+        program.statistics().witness_values,
         matrices.num_instance_variables + matrices.num_witness_variables,
         "{main}: this compiler's witness length disagrees with the zkey's - they were not built \
          from the same compilation"
     );
 
-    let mut rng = thread_rng();
-    let secret_shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-        .input_domains
-        .iter()
-        .zip(&values)
-        .filter(|(bank, _)| matches!(bank, Bank::Shared))
-        .map(|(_, &v)| share_field_element(v, &mut rng))
-        .collect();
+    let secret_shares = fixtures::rep3::share_inputs(program, &values);
 
     // Each party needs two connections: one for witness extension, one for proving.
     let extension_nets = LocalNetwork::new(3);

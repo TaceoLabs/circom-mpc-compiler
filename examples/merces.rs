@@ -5,9 +5,11 @@
 //! ```text
 //! cargo run --release --example merces                              # transfer_arity4_batch1 deposit
 //! cargo run --release --example merces -- transfer_arity4_batch8 full_batch
-//! cargo run --release --example merces -- circuits/multiplier2.circom kats/proving/multiplier2.zkey
-//! cargo run --release --example merces -- circuits/multiplier2.circom   # no zkey: skips proving
+//! cargo run --release --example merces -- circuits/multiplier3.circom kats/proving/multiplier3.zkey
+//! cargo run --release --example merces -- circuits/multiplier3.circom   # no zkey: skips proving
 //! ```
+
+#![allow(clippy::type_complexity)] // the per-party (witness, metrics, proof) tuples
 
 use std::time::Instant;
 
@@ -17,19 +19,17 @@ use circom_mpc_compiler::fixtures;
 use circom_mpc_compiler::vm::counting_net::CountingNet;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::witness::split_witness;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CoCircomCompiler;
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{
-    combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+    combine_field_elements, Rep3PrimeFieldShare, Rep3State,
 };
 use mpc_net::local::LocalNetwork;
 use mpc_net::Network;
-use rand::thread_rng;
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
@@ -67,8 +67,8 @@ impl PartyMetrics {
 
 /// Reads a zkey for proving, in whichever of the two formats this repo uses: `.arks.zkey` is the
 /// merces ceremony key (ark-serialized, uncompressed - see `tests/merces.rs`'s `ceremony_zkey`),
-/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g. the checked-in
-/// `kats/proving/multiplier2.zkey`).
+/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g.
+/// `kats/proving/multiplier3.zkey`).
 fn read_zkey(path: &str) -> (ConstraintMatrices<Fr>, ProvingKey<Bn254>) {
     if path.ends_with(".arks.zkey") {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
@@ -113,16 +113,9 @@ fn main() -> eyre::Result<()> {
         .flatten();
     let zkey_arg = args.next();
 
-    let mut config = CompilerConfig::default();
-    config.version = "2.2.2".to_owned();
-    config
-        .link_library
-        .push(format!("{root}/circuits/libs/").into());
-    config
-        .link_library
-        .push(format!("{root}/circuits/merces/").into());
-    if is_merces_main {
-        config.mpc_public_inputs = fixtures::merces_mpc_public_inputs();
+    let mut config = fixtures::merces_config();
+    if !is_merces_main {
+        config.mpc_public_inputs.clear();
     }
 
     let path = if is_merces_main {
@@ -171,10 +164,10 @@ fn main() -> eyre::Result<()> {
     println!("codegen: {:.2?}", t.elapsed());
     println!(
         "  {} instructions, slots public={} shared={} local={}",
-        program.instructions.len(),
-        program.slots.public,
-        program.slots.shared,
-        program.slots.local,
+        program.statistics().instructions,
+        program.statistics().public_slots,
+        program.statistics().shared_slots,
+        program.statistics().local_slots,
     );
 
     let t = Instant::now();
@@ -267,14 +260,7 @@ fn run_rep3(
         Vec<Fr>,
     )>,
 ) {
-    let mut rng = thread_rng();
-    let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-        .input_domains
-        .iter()
-        .zip(values)
-        .filter(|(bank, _)| matches!(bank, Bank::Shared))
-        .map(|(_, &v)| share_field_element(v, &mut rng))
-        .collect();
+    let shares = fixtures::rep3::share_inputs(program, values);
 
     // A second and third connection per party are only needed if we are actually proving.
     let extension_nets = LocalNetwork::new(3);
@@ -293,7 +279,6 @@ fn run_rep3(
             .enumerate()
             .map(|(party, net)| {
                 let shares = &shares;
-                let zkey = zkey;
                 let p0 = proving0.as_mut().map(|it| it.next().unwrap());
                 let p1 = proving1.as_mut().map(|it| it.next().unwrap());
                 scope.spawn(move || {

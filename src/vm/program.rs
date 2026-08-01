@@ -2,7 +2,7 @@
 //! `Shared`/`Local` - the same lattice `passes::mpc::domain` classifies values into), plus the
 //! side tables that carry everything that is program *structure* rather than a per-value
 //! operation - constants, inputs, batched MPC rounds, precomputation sites, and the final signal
-//! witness sources. See `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! witness sources.
 
 use ark_ff::{BigInteger, PrimeField};
 
@@ -22,7 +22,7 @@ pub enum Bank {
 }
 
 /// One operation. Arithmetic opcodes are named `<Op><BankOfA><BankOfB>` (`P` public, `S` shared);
-/// `MulLocal`/`Reshare` are the MPC-lowering ops (see `docs/ARCHITECTURE.md`, "MPC lowering").
+/// `MulLocal`/`Reshare` are the MPC-lowering ops.
 /// There is no constant-load or round-result opcode: constants are preloaded at init
 /// (`Program::constants`), and a round's results are written straight into their slots by
 /// `Reshare` - see `Program::rounds`. `Add`/`Mul` are commutative, so codegen reorders operands to
@@ -51,7 +51,7 @@ pub enum Opcode {
     ///
     /// Being a real instruction rather than an out-of-band phase is what lets a site's inputs depend
     /// on earlier instructions - which the merces circuits require, since their Poseidon2 sites chain
-    /// through secret multiplications (see `docs/ARCHITECTURE.md`, "Precomputation").
+    /// through secret multiplications.
     Precompute,
 }
 
@@ -66,11 +66,9 @@ pub struct Instruction {
     pub b: u32,
 }
 
-/// One batched MPC round (see `docs/ARCHITECTURE.md`, "MPC lowering"): `operand_start/len` index
-/// into `Program::round_operands` (`Local`-bank slots to reshare together, one message) and
-/// `result_start/len` index into `Program::round_results` (`Shared`-bank slots each result lands
-/// in; `u32::MAX` = discard - structurally supported for a future pass that prunes an unread round
-/// result without renumbering the round table, though nothing produces one today).
+/// One batched MPC round: `operand_start/len` index into `Program::round_operands` (`Local`-bank
+/// slots to reshare together, one message) and `result_start/len` index into
+/// `Program::round_results` (the `Shared`-bank slot each result lands in).
 #[derive(Debug, Clone, Copy)]
 pub struct RoundEntry {
     pub operand_start: u32,
@@ -95,9 +93,8 @@ pub struct SiteInput {
 
 /// The service executed by a [`PrecomputeBatch`]. Most batches are a direct runtime realization
 /// of one circuit [`PrecomputeKind`]. `IsZeroReveal` is deliberately VM-only: codegen may fuse the
-/// conservative circuit shapes `shared IsZero.out -> Reveal(1)` and
-/// `shared IsEqual.out -> Reveal(1)` without changing the graph, R1CS, witness layout, or proving
-/// artifacts.
+/// conservative circuit shape `shared IsZero.out -> Reveal(1)` without changing the graph, R1CS,
+/// witness layout, or proving artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchKind {
     Precompute(PrecomputeKind),
@@ -105,9 +102,9 @@ pub enum BatchKind {
     IsZeroReveal,
 }
 
-/// One requested batch result's physical destination. Unlike the older single `result_bank`
-/// representation, a fused service can write both shared witness values and a public revealed
-/// value while retaining one site-major CSR request table.
+/// One requested batch result's physical destination. Per-result (not per-batch) because a fused
+/// service writes both shared witness values and a public revealed value from one site-major CSR
+/// request table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultTarget {
     pub bank: Bank,
@@ -116,8 +113,7 @@ pub struct ResultTarget {
 
 /// Compatible `TACEO_PRECOMPUTATION_*` sites of one [`PrecomputeKind`], domain, and stage, batched
 /// into a single service. Codegen first keys sites by `(kind, stage, domain)`, then splits a group
-/// when an early consumer closes its anchor/deadline placement window. See
-/// `docs/ARCHITECTURE.md`, "Precomputation".
+/// when an early consumer closes its anchor/deadline placement window.
 ///
 /// Independent compatible sites normally collapse into one entry. A site may remain alone when its
 /// kind, stage, or domain differs, or when combining it would cross an earlier result deadline.
@@ -138,7 +134,7 @@ pub struct PrecomputeBatch {
     /// [`Self::result_requests`]/[`Self::result_targets`].
     pub result_offsets: Vec<u32>,
     /// Parallel to [`Self::result_requests`]: the banked destination for each requested value.
-    /// `target.slot == u32::MAX` means discard. `Bank::Local` is never valid here.
+    /// `Bank::Local` is never valid here.
     pub result_targets: Vec<ResultTarget>,
 }
 
@@ -184,29 +180,73 @@ pub struct SlotCounts {
 /// [`crate::vm::codegen::compile`], serializable via [`Program::write`]/[`Program::read`].
 #[derive(Debug, Clone)]
 pub struct Program<F: PrimeField> {
-    pub instructions: Vec<Instruction>,
+    pub(crate) instructions: Vec<Instruction>,
     /// Preloaded into `Public`-bank slots `0..constants.len()` at init - no const opcode.
-    pub constants: Vec<F>,
+    pub(crate) constants: Vec<F>,
     /// One entry per circuit input (`len == num_inputs`), in flat signal order - `Bank::Local`
     /// never appears. An input whose `Op::Input` node didn't survive `gc` (dead, never read) has
     /// no corresponding entry here; its domain still appears in this table so a caller can tell
     /// which representation to prepare without needing it to be live.
-    pub input_domains: Vec<Bank>,
-    pub inputs: Vec<InputBinding>,
-    pub rounds: Vec<RoundEntry>,
-    pub round_operands: Vec<u32>,
-    pub round_results: Vec<u32>,
+    pub(crate) input_domains: Vec<Bank>,
+    pub(crate) inputs: Vec<InputBinding>,
+    pub(crate) rounds: Vec<RoundEntry>,
+    pub(crate) round_operands: Vec<u32>,
+    pub(crate) round_results: Vec<u32>,
     /// Indexed by [`Opcode::Precompute`]'s `a`. These are **not** run up front: each is serviced at
     /// its own point in the instruction stream, because a site's inputs may depend on earlier
-    /// instructions (see `docs/ARCHITECTURE.md`, "Precomputation").
-    pub precompute_batches: Vec<PrecomputeBatch>,
+    /// instructions.
+    pub(crate) precompute_batches: Vec<PrecomputeBatch>,
     /// One source per final witness entry, already in circom witness order.
-    pub witness_sources: Vec<WitnessSource>,
-    pub num_inputs: usize,
-    pub slots: SlotCounts,
+    pub(crate) witness_sources: Vec<WitnessSource>,
+    pub(crate) num_inputs: usize,
+    pub(crate) slots: SlotCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramStatistics {
+    pub instructions: usize,
+    pub inputs: usize,
+    pub witness_values: usize,
+    pub public_slots: u32,
+    pub shared_slots: u32,
+    pub local_slots: u32,
+    pub multiplication_rounds: usize,
+    pub multiplication_elements: usize,
+    pub precompute_batches: usize,
+    pub precompute_sites: usize,
+    pub shared_precompute_batches: usize,
+    pub fused_is_zero_reveal_batches: usize,
+    pub public_precompute_results: usize,
 }
 
 impl<F: PrimeField> Program<F> {
+    pub fn input_domains(&self) -> &[Bank] {
+        &self.input_domains
+    }
+
+    pub fn statistics(&self) -> ProgramStatistics {
+        ProgramStatistics {
+            instructions: self.instructions.len(),
+            inputs: self.num_inputs,
+            witness_values: self.witness_sources.len(),
+            public_slots: self.slots.public,
+            shared_slots: self.slots.shared,
+            local_slots: self.slots.local,
+            multiplication_rounds: self.rounds.len(),
+            multiplication_elements: self.rounds.iter().map(|round| round.len as usize).sum(),
+            precompute_batches: self.precompute_batches.len(),
+            precompute_sites: self.precompute_batches.iter().map(|batch| batch.sites).sum(),
+            shared_precompute_batches: self.precompute_batches.iter().filter(|batch| {
+                batch.input_slots.iter().any(|input| input.bank == Bank::Shared)
+            }).count(),
+            fused_is_zero_reveal_batches: self.precompute_batches.iter().filter(|batch| {
+                batch.kind == BatchKind::IsZeroReveal
+            }).count(),
+            public_precompute_results: self.precompute_batches.iter().flat_map(|batch| {
+                &batch.result_targets
+            }).filter(|target| target.bank == Bank::Public).count(),
+        }
+    }
     /// Derives the number of fresh Poseidon2 masks one execution needs. The budget is intentionally
     /// not serialized: it is a checked function of executable precompute instructions and their
     /// version-6 batch table. Walking instructions (rather than the side table alone) ignores
@@ -250,7 +290,7 @@ impl<F: PrimeField> Program<F> {
     /// Checks every side-table and slot reference before execution. This is intentionally usable
     /// both after deserialization and at `Machine::run`'s public boundary: `Program` fields are
     /// public, so a caller can otherwise create a malformed value without going through codegen.
-    pub fn validate(&self) -> eyre::Result<()> {
+    pub(crate) fn validate_encoding(&self) -> eyre::Result<()> {
         let check_slot = |bank: Bank, slot: u32, what: &str| -> eyre::Result<()> {
             let limit = match bank {
                 Bank::Public => self.slots.public,
@@ -345,9 +385,7 @@ impl<F: PrimeField> Program<F> {
                 check_slot(Bank::Local, slot, "round operand")?;
             }
             for &slot in &self.round_results[result_start..result_end] {
-                if slot != u32::MAX {
-                    check_slot(Bank::Shared, slot, "round result")?;
-                }
+                check_slot(Bank::Shared, slot, "round result")?;
             }
         }
 
@@ -363,7 +401,6 @@ impl<F: PrimeField> Program<F> {
                 }
                 BatchKind::Precompute(PrecomputeKind::Num2Bits { .. })
                 | BatchKind::Precompute(PrecomputeKind::IsZero) => 1,
-                BatchKind::Precompute(PrecomputeKind::IsEqual) => 2,
                 BatchKind::Precompute(PrecomputeKind::AliasCheck) => 254,
                 BatchKind::Precompute(PrecomputeKind::Reveal { n }) => n,
                 BatchKind::IsZeroReveal => 1,
@@ -444,7 +481,7 @@ impl<F: PrimeField> Program<F> {
                 for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
                     eyre::ensure!((*request as usize) < capacity, "precompute batch {index} request {request} exceeds capacity {capacity}");
                     eyre::ensure!(target.bank != Bank::Local, "precompute batch {index} targets Local bank");
-                    let expected_bank = normal_result_bank.unwrap_or_else(|| {
+                    let expected_bank = normal_result_bank.unwrap_or({
                         if *request == 2 { Bank::Public } else { Bank::Shared }
                     });
                     eyre::ensure!(
@@ -452,9 +489,7 @@ impl<F: PrimeField> Program<F> {
                         "precompute batch {index} result {request} targets {:?}, expected {expected_bank:?}",
                         target.bank
                     );
-                    if target.slot != u32::MAX {
-                        check_slot(target.bank, target.slot, "precompute result")?;
-                    }
+                    check_slot(target.bank, target.slot, "precompute result")?;
                 }
             }
         }
@@ -505,15 +540,15 @@ mod tests {
 
     #[test]
     fn accepts_a_freshly_compiled_program() {
-        program("multiplier2").validate().unwrap();
-        program("precomputation_iszero_test").validate().unwrap();
+        program("multiplier2").validate_encoding().unwrap();
+        program("precomputation_iszero_test").validate_encoding().unwrap();
     }
 
     #[test]
     fn rejects_an_input_domain_count_mismatch() {
         let mut program = program("multiplier2");
         program.input_domains.pop();
-        assert!(program.validate().is_err());
+        assert!(program.validate_encoding().is_err());
     }
 
     #[test]
@@ -525,7 +560,7 @@ mod tests {
             .find(|instruction| instruction.op == Opcode::MulLocal)
             .expect("multiplier2's product is a genuine secret x secret multiplication");
         instruction.a = program.slots.shared;
-        assert!(program.validate().is_err());
+        assert!(program.validate_encoding().is_err());
     }
 
     #[test]
@@ -537,21 +572,21 @@ mod tests {
             .find(|instruction| instruction.op == Opcode::Reshare)
             .expect("multiplier2's product needs one reshare round");
         instruction.a = program.rounds.len() as u32;
-        assert!(program.validate().is_err());
+        assert!(program.validate_encoding().is_err());
     }
 
     #[test]
     fn rejects_a_precompute_batch_with_wrong_input_count() {
         let mut program = program("precomputation_iszero_test");
         program.precompute_batches[0].input_slots.pop();
-        assert!(program.validate().is_err());
+        assert!(program.validate_encoding().is_err());
     }
 
     #[test]
     fn rejects_a_malformed_witness_source_table() {
         let mut program = program("multiplier2");
         program.witness_sources[0] = WitnessSource::Zero;
-        assert!(program.validate().is_err());
+        assert!(program.validate_encoding().is_err());
     }
 
     #[cfg(feature = "rep3")]
@@ -616,7 +651,7 @@ mod tests {
     #[test]
     fn poseidon_mask_budget_is_derived_after_serialization() {
         let original = poseidon_budget_program(Bank::Shared, 2, 2);
-        original.validate().unwrap();
+        original.validate_encoding().unwrap();
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let decoded = Program::<Fr>::read(&mut bytes.as_slice()).unwrap();

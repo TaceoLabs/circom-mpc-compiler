@@ -4,7 +4,7 @@
 
 use ark_ff::PrimeField;
 
-use crate::vm::gadgets::{aliascheck, isequal, iszero, num2bits, poseidon2};
+use crate::vm::gadgets::{aliascheck, iszero, num2bits, poseidon2};
 
 use super::VmDriver;
 
@@ -13,7 +13,6 @@ pub struct PlainDriver;
 
 impl<F: PrimeField> VmDriver<F> for PlainDriver {
     type Share = F;
-    type Local = F;
 
     fn promote(&mut self, value: F) -> F {
         value
@@ -47,18 +46,8 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
         *a * b
     }
 
-    fn mul_local(&mut self, a: &F, b: &F) -> F {
-        *a * *b
-    }
-
-    fn reshare(&mut self, locals: &[F]) -> eyre::Result<Vec<F>> {
-        // Nothing distinguishes "local" from "shared" for a single party - a round's k-th input
-        // already *is* its k-th result. See docs/ARCHITECTURE.md, "MPC lowering".
-        Ok(locals.to_vec())
-    }
-
-    fn poseidon2_traces(&mut self, t: usize, states: &[F]) -> eyre::Result<Vec<F>> {
-        poseidon2::plain_trace(t, states)
+    fn mul_vec(&mut self, a: &[F], b: &[F]) -> eyre::Result<Vec<F>> {
+        Ok(a.iter().zip(b).map(|(a, b)| *a * *b).collect())
     }
 
     fn poseidon2_requested_traces(
@@ -95,13 +84,9 @@ impl<F: PrimeField> VmDriver<F> for PlainDriver {
             .collect())
     }
 
-    fn is_equal_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        isequal::plain_trace(inputs)
-    }
-
     fn alias_check_traces(&mut self, inputs: &[F]) -> eyre::Result<Vec<F>> {
         eyre::ensure!(
-            inputs.len() % 254 == 0,
+            inputs.len().is_multiple_of(254),
             "alias_check_traces: {} inputs is not a multiple of 254",
             inputs.len()
         );

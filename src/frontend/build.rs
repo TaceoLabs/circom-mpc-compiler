@@ -9,17 +9,19 @@ use ark_ec::pairing::Pairing;
 use ark_ff::{PrimeField, Zero};
 use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, AssertBucket, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
+    AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
     LoadBucket, LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
 };
 use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{Arity, Op, PrecomputeKind, ValueId};
+use crate::ir::{Op, PrecomputeKind, ValueId};
 
-use super::error::Unsupported;
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
+
+const MAPPED_LOCATION: &str =
+    "unsupported mapped location rule (bus/anonymous component access)";
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -53,17 +55,11 @@ impl<F: PrimeField> TemplateOp<F> {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
             TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } => 1,
             // TemplateOp::Real is only ever built from Op::Input/Constant/Add/Sub/Mul here -
-            // Op::Precompute/PrecomputeResult are inlining-time-only ops (materialized by
-            // frontend/inline.rs) and Op::MulLocal/Round/RoundResult are lowering-time-only ops
-            // (materialized by passes/mpc/), never by this per-template build pass.
-            TemplateOp::Real(op) => match op.arity() {
-                Arity::Fixed(n) => n,
-                Arity::SiteInputs | Arity::RoundLen => {
-                    unreachable!(
-                        "TemplateOp::Real never wraps a precomputation or MPC-lowering op before inlining"
-                    )
-                }
-            },
+            // precomputation and MPC-lowering ops are materialized later, by inlining and
+            // passes/mpc respectively, never by this per-template build pass.
+            TemplateOp::Real(op) => op
+                .fixed_arity()
+                .expect("TemplateOp::Real never wraps a precomputation or MPC-lowering op"),
         }
     }
 }
@@ -84,21 +80,25 @@ pub(crate) enum SubGraphInstance<F: PrimeField> {
         signal_offset: usize,
     },
     /// A recognized gadget template: its body is never compiled - `frontend/inline.rs` turns this
-    /// into an `ir::Op::Precompute` site instead of recursing. See `docs/ARCHITECTURE.md`,
-    /// "Precomputation".
-    Precomputed {
-        /// Which gadget this site runs - resolved from the template's `name`/`num_inputs`/
-        /// `num_outputs` in `handle_create_cmp_bucket`, once, rather than re-derived every time
-        /// this instance is inlined.
-        kind: PrecomputeKind,
-        /// The template's specialized header, e.g. `"Poseidon2_12"` (`TemplateCodeInfo::header`) -
-        /// the key `precompute_spans` is looked up by.
-        header: String,
-        signal_offset: usize,
-        num_inputs: usize,
-        num_outputs: usize,
-        num_intermediates: usize,
-    },
+    /// into an `ir::Op::Precompute` site instead of recursing.
+    Precomputed(PrecomputedInstance),
+}
+
+/// One recognized gadget instance: everything `frontend/inline.rs` needs to cut it into a
+/// precomputation site. Resolved once in `handle_create_cmp_bucket` rather than re-derived every
+/// time the instance is inlined.
+#[derive(Clone)]
+pub(crate) struct PrecomputedInstance {
+    pub(crate) kind: PrecomputeKind,
+    /// The template's specialized header, e.g. `"Poseidon2_3"` (`TemplateCodeInfo::header`) -
+    /// the key `precompute_spans` is looked up by.
+    pub(crate) header: String,
+    /// Relative to the immediate father's signal frame, like every
+    /// `CreateCmpBucket::signal_offset`.
+    pub(crate) signal_offset: usize,
+    pub(crate) num_inputs: usize,
+    pub(crate) num_outputs: usize,
+    pub(crate) num_intermediates: usize,
 }
 
 /// The not-yet-inlined value graph of a single template. `sub_graphs[i]` is the i-th
@@ -234,12 +234,10 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 return self.handle_bulk_store_bucket(store_bucket, *n)
             }
             SizeOption::Multiple(_) => {
-                return Err(Unsupported::Instruction {
-                    kind: "bulk copy spanning multiple component instances".to_owned(),
-                    template: self.code.header.clone(),
-                    line: store_bucket.line,
-                }
-                .into());
+                return Err(self.unsupported(
+                    "unsupported instruction `bulk copy spanning multiple component instances`",
+                    store_bucket.line,
+                ));
             }
             _ => {}
         }
@@ -254,11 +252,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 self.write_value_at(&store_bucket.dest_address_type, index, value);
             }
             LocationRule::Mapped { .. } => {
-                return Err(Unsupported::MappedLocation {
-                    template: self.code.header.clone(),
-                    line: store_bucket.line,
-                }
-                .into());
+                return Err(self.unsupported(MAPPED_LOCATION, store_bucket.line));
             }
         }
         Ok(())
@@ -289,11 +283,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             template_header: _,
         } = &store_bucket.dest
         else {
-            return Err(Unsupported::MappedLocation {
-                template: self.code.header.clone(),
-                line: store_bucket.line,
-            }
-            .into());
+            return Err(self.unsupported(MAPPED_LOCATION, store_bucket.line));
         };
         let dest_base = self.get_constant_value(dest_location);
         let dest_address_type = store_bucket.dest_address_type.clone();
@@ -306,15 +296,13 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     fn err_bulk_copy_shape(&self, store_bucket: &StoreBucket) -> eyre::Report {
-        Unsupported::Instruction {
-            kind: format!(
-                "bulk copy whose source is not a plain indexed load: `{}`",
+        self.unsupported(
+            format!(
+                "unsupported instruction `bulk copy whose source is not a plain indexed load: {}`",
                 store_bucket.src.to_string()
             ),
-            template: self.code.header.clone(),
-            line: store_bucket.line,
-        }
-        .into()
+            store_bucket.line,
+        )
     }
 
     /// Pushes one [`SubGraphInstance`] per repetition of `create_cmp_bucket`, at consecutive
@@ -374,7 +362,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
             "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
             "IsZero" => Some(PrecomputeKind::IsZero),
-            "IsEqual" => Some(PrecomputeKind::IsEqual),
             "AliasCheck" => Some(PrecomputeKind::AliasCheck),
             "TACEO_REVEAL" => Some(PrecomputeKind::Reveal { n: num_inputs }),
             _ => None,
@@ -387,14 +374,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             let num_intermediates = span - num_inputs - num_outputs;
 
             self.push_instances(create_cmp_bucket, |signal_offset| {
-                SubGraphInstance::Precomputed {
+                SubGraphInstance::Precomputed(PrecomputedInstance {
                     kind,
                     header: header.clone(),
                     signal_offset,
                     num_inputs,
                     num_outputs,
                     num_intermediates,
-                }
+                })
             });
             return Ok(());
         }
@@ -541,10 +528,6 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    fn handle_assert_bucket(&mut self, _: &AssertBucket) -> Result<()> {
-        Ok(())
-    }
-
     fn handle_compute_bucket(&mut self, compute_bucket: &ComputeBucket) -> Result<ValueId> {
         tracing::trace!(
             "lowering {} at line: {}",
@@ -590,8 +573,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                     "{} is a bin op",
                     removed.to_string()
                 );
-                let lhs = self.get_constant_operand(&compute_bucket.stack[0]);
-                let rhs = self.get_constant_operand(&compute_bucket.stack[1]);
+                let lhs = self.eval_constant_operand(&compute_bucket.stack[0]);
+                let rhs = self.eval_constant_operand(&compute_bucket.stack[1]);
                 match lhs.zip(rhs).and_then(|(l, r)| fold_binary(removed, l, r)) {
                     Some(folded) => Ok(self.push_constant_value(folded)),
                     None => Err(self.err_non_constant_operator(compute_bucket)),
@@ -601,44 +584,37 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    /// Returns `Some(constant)` iff `inst` is already a resolved `Op::Constant` value - used by
-    /// [`Self::handle_compute_bucket`]'s compile-time folding for the removed operators. Unlike
-    /// [`Self::get_constant_value`] (which panics if the value isn't a compile-time constant, and
-    /// is used only for genuine address computation) this returns `None` so the caller can turn a
-    /// non-constant operand into a proper `Unsupported` error instead of panicking.
-    fn get_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
-        let value_id = self.expect_value(inst).ok()?;
-        match &self.nodes[value_id.index()].op {
-            TemplateOp::Real(Op::Constant(c)) => Some(*c),
-            _ => None,
-        }
+    /// A circom construct this compiler deliberately does not support (yet, or ever).
+    /// `tests/frontend.rs` and `tests/merces.rs` pin several of these message prefixes.
+    fn unsupported(&self, msg: impl std::fmt::Display, line: usize) -> eyre::Report {
+        eyre::eyre!("{msg} in template `{}` at line {line}", self.code.header)
     }
 
     fn err_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::Operator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!("unsupported operator `{}`", compute_bucket.op.to_string()),
+            compute_bucket.line,
+        )
     }
 
     fn err_non_constant_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::NonConstantOperator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!(
+                "operator `{}` is only supported on compile-time constants",
+                compute_bucket.op.to_string()
+            ),
+            compute_bucket.line,
+        )
     }
 
     fn err_address_operator(&self, compute_bucket: &ComputeBucket) -> eyre::Report {
-        Unsupported::AddressOperator {
-            op: compute_bucket.op.to_string(),
-            template: self.code.header.clone(),
-            line: compute_bucket.line,
-        }
-        .into()
+        self.unsupported(
+            format!(
+                "address operator `{}` in value position (dynamic array indexing)",
+                compute_bucket.op.to_string()
+            ),
+            compute_bucket.line,
+        )
     }
 
     fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> Result<ValueId> {
@@ -666,21 +642,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 let index = self.get_constant_value(location);
                 Ok(self.read_value_at(&load_bucket.address_type, index))
             }
-            LocationRule::Mapped { .. } => Err(Unsupported::MappedLocation {
-                template: self.code.header.clone(),
-                line: load_bucket.line,
+            LocationRule::Mapped { .. } => {
+                Err(self.unsupported(MAPPED_LOCATION, load_bucket.line))
             }
-            .into()),
         }
     }
 
     fn err_instruction(&self, kind: &str, line: usize) -> eyre::Report {
-        Unsupported::Instruction {
-            kind: kind.to_owned(),
-            template: self.code.header.clone(),
-            line,
-        }
-        .into()
+        self.unsupported(format!("unsupported instruction `{kind}`"), line)
     }
 
     /// `if`/`else` on a **compile-time-constant** condition: evaluate the condition, then lower only
@@ -691,8 +660,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     ///
     /// A *non*-constant condition stays an `Unsupported` error, and structurally has to: `ir::Op` is
     /// only `Add`/`Sub`/`Mul`, so there is no select/mux op to arithmetize a secret-dependent branch
-    /// into (see `docs/ARCHITECTURE.md`, "`Op<F>` is deliberately narrow"). Supporting it means
-    /// re-adding the operator surface, not extending this function.
+    /// into. Supporting it means re-adding the operator surface, not extending this function.
     fn handle_branch_bucket(&mut self, branch_bucket: &BranchBucket) -> Result<()> {
         let Some(taken) = self.fold_branch_condition(branch_bucket.cond.as_ref()) else {
             return Err(self.err_instruction(
@@ -748,8 +716,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     /// `if (remaining > T - 1)` where `remaining = N - absorbed`, all compile-time.
     ///
     /// Shares [`Self::eval_constant_node`] with address computation, which needs the identical
-    /// capability for `arr[N-1-i]`-style indexing - see "Where compile-time folding lives" in
-    /// `docs/ARCHITECTURE.md`.
+    /// capability for `arr[N-1-i]`-style indexing.
     fn eval_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
         let value_id = self.expect_value(inst).ok()?;
         self.eval_constant_node(value_id)
@@ -777,10 +744,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
             Instruction::Return(return_bucket) => {
                 Err(self.err_instruction("return", return_bucket.line))
             }
-            Instruction::Assert(assert_bucket) => {
-                self.handle_assert_bucket(assert_bucket)?;
-                Ok(None)
-            }
+            // `===` constraints do not affect witness extension.
+            Instruction::Assert(_) => Ok(None),
             Instruction::Log(log_bucket) => Err(self.err_instruction("log", log_bucket.line)),
             Instruction::Loop(loop_bucket) => {
                 self.handle_loop_bucket(loop_bucket)?;

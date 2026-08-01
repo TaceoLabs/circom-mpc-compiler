@@ -1,38 +1,25 @@
-//! Merces witness extension, plain versus rep3, swept over the transaction batch size `N` of
-//! `TransferBatchedCompressedArity4(N, ...)`. Throughput is defined over `N` (transactions per run,
-//! not witness entries), so criterion's `thrpt` column reads directly as transactions/second and is
-//! comparable across batch sizes - this is the question `benches/witness_extension.rs` cannot answer,
-//! since it normalizes throughput by witness size and only compares batch1 against batch8.
+//! Merces witness extension, plain versus rep3, swept over the transaction batch size `N`.
+//! Throughput is defined over `N` (transactions per run), so criterion's `thrpt` column reads as
+//! transactions/second across batch sizes. Inputs are seeded-random field elements, not real
+//! protocol values - this bench never proves, and rep3's cost is value-independent.
 //!
-//! Inputs are seeded-random field elements (`StdRng::seed_from_u64`), not real protocol values, for
-//! every `N` uniformly - this bench only measures total per-execution witness-extension cost and
-//! never proves or checks a `===` constraint, and rep3's cost is value-independent (see
-//! `src/bin/merces-net.rs`, which makes the same call). Real fixtures only exist for batch1/batch8
-//! anyway (`src/fixtures.rs`); using them for those two and dummy values for batch16/batch32 would
-//! mix two input provenances in one group for no benefit here.
-//!
-//! Each party's `LocalNetwork` and `Rep3State` (the correlated-randomness handshake) are built once
-//! per `N`, outside every timed iteration, and reused across all of them - deliberately unlike
-//! `witness_extension.rs`, which pays that setup inside every timed run to model a fresh connection.
-//! Here the setup cost is roughly constant in `N` and would compress the very scaling curve this bench
-//! exists to measure.
-//! The `rep3_total` series still measures total per-execution cost: each iteration prepares a fresh
-//! program-wide Poseidon2 pool before running the online VM; only the one-time connection/state
-//! setup is excluded.
+//! Each party's `LocalNetwork` and `Rep3State` are built once per `N` and reused across timed
+//! iterations (unlike `witness_extension.rs`, which models a fresh connection per run); each
+//! iteration still prepares a fresh program-wide Poseidon2 pool before the online VM.
 
 use ark_bn254::{Bn254, Fr};
 use ark_ff::UniformRand;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::StdRng;
-use rand::{thread_rng, SeedableRng};
+use rand::SeedableRng;
 
+use circom_mpc_compiler::fixtures::{merces_config, merces_main_path, rep3::share_inputs};
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CoCircomCompiler;
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
+use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
 
 /// Transaction counts to sweep - matches `circuits/merces/main/transfer_arity4_batch{N}.circom` and
@@ -43,33 +30,13 @@ const BATCHES: [usize; 4] = [1, 8, 16, 32];
 /// own share) sees the same inputs.
 const SEED: u64 = 0;
 
-fn manifest_dir() -> &'static str {
-    env!("CARGO_MANIFEST_DIR")
-}
-
-fn config() -> CompilerConfig {
-    let mut config = CompilerConfig::default();
-    config.version = "2.2.2".to_owned();
-    config
-        .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
-    config
-        .link_library
-        .push(format!("{}/circuits/merces/", manifest_dir()).into());
-    config.mpc_public_inputs = circom_mpc_compiler::fixtures::merces_mpc_public_inputs();
-    config
-}
-
 /// Compiles `transfer_arity4_batch{n}.circom` and builds its seeded-random inputs, printing the
 /// round shape so a timing can be read against it. Compilation is deliberately outside the measured
 /// closure - parsing batch32 alone takes seconds.
 fn prepare(n: usize) -> (Program<Fr>, Vec<Fr>) {
-    let path = format!(
-        "{}/circuits/merces/main/transfer_arity4_batch{n}.circom",
-        manifest_dir()
-    );
-    let graph =
-        CoCircomCompiler::<Bn254>::parse(path, config()).unwrap_or_else(|e| panic!("batch{n}: {e}"));
+    let path = merces_main_path(&format!("transfer_arity4_batch{n}"));
+    let graph = CoCircomCompiler::<Bn254>::parse(path, merces_config())
+        .unwrap_or_else(|e| panic!("batch{n}: {e}"));
     let summary = graph.mpc_summary();
     let mut rng = StdRng::seed_from_u64(SEED);
     let values: Vec<Fr> = (0..graph.num_inputs).map(|_| Fr::rand(&mut rng)).collect();
@@ -81,7 +48,7 @@ fn prepare(n: usize) -> (Program<Fr>, Vec<Fr>) {
         summary.max_slots_per_round.unwrap_or(0),
         summary.precompute_sites,
         summary.precompute_batches,
-        program.instructions.len(),
+        program.statistics().instructions,
     );
     (program, values)
 }
@@ -158,14 +125,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| run_plain(&program, &values));
         });
 
-        let mut rng = thread_rng();
-        let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
-            .input_domains
-            .iter()
-            .zip(&values)
-            .filter(|(bank, _)| matches!(bank, Bank::Shared))
-            .map(|(_, &v)| share_field_element(v, &mut rng))
-            .collect();
+        let shares = share_inputs(&program, &values);
 
         let (networks, mut states) = rep3_setup();
         group.bench_with_input(BenchmarkId::new("rep3_total", n), &(), |b, ()| {

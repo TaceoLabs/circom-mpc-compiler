@@ -1,7 +1,6 @@
 //! Merges every singleton `Op::Round` `mul_split` created into as few, as-wide rounds as possible:
 //! one round per distinct multiplicative depth, via ASAP list scheduling. This is the headline MPC
-//! transform - message count drops from one-per-secret-mul to one-per-depth-level. See
-//! `docs/ARCHITECTURE.md`, "MPC lowering".
+//! transform - message count drops from one-per-secret-mul to one-per-depth-level.
 //!
 //! Implemented as a direct depth-bucketed reconstruction, not a [`Graph::rewrite`] consumer:
 //! merging several existing rounds into one changes arity (which no rewrite callback can express),
@@ -12,109 +11,96 @@
 
 use ark_ff::PrimeField;
 
-use crate::ir::{Graph, Node, Op, RoundDesc, RoundId, RoundKind, ValueId};
-use crate::passes::{Changed, Pass, PassContext};
+use crate::ir::{Graph, Node, Op, RoundDesc, RoundId, ValueId};
 
 use super::domain::compute_domains;
 
-pub(crate) struct RoundSchedule;
-
-impl<F: PrimeField> Pass<F> for RoundSchedule {
-    fn name(&self) -> &'static str {
-        "mpc::round_schedule"
+pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    let nodes = graph.nodes();
+    if nodes.is_empty() {
+        return Ok(false);
     }
 
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        let nodes = graph.nodes();
-        if nodes.is_empty() {
-            return Ok(false);
-        }
+    // Network level per (old-space) value. Crossing a shared precomputation site advances the
+    // axis; a public result remains at its producer's level and relies on preserved source order
+    // within that bucket. Feeding the existing domain table into both computations keeps round
+    // scheduling and precompute planning on the same cost model.
+    let domains = compute_domains(graph);
+    let depth = super::level::network_levels(graph, &domains);
 
-        // Network level per (old-space) value. Crossing a shared precomputation site advances the
-        // axis; a public result remains at its producer's level and relies on preserved source order
-        // within that bucket. Feeding the existing domain table into both computations keeps round
-        // scheduling and precompute planning on the same cost model.
-        let domains = compute_domains(graph);
-        let depth = super::level::network_levels_with_domains(graph, &domains);
+    // Bucket every node once. Iterating these buckets below, rather than rescanning all nodes
+    // for every distinct level, keeps reconstruction linear in the graph size. Insertion order
+    // is source order, so nodes within one level remain deterministic and topological.
+    let max_depth = depth.iter().copied().max().unwrap_or(0);
+    let mut nodes_by_depth: Vec<Vec<usize>> = (0..=max_depth).map(|_| Vec::new()).collect();
 
-        // Bucket every node once. Iterating these buckets below, rather than rescanning all nodes
-        // for every distinct level, keeps reconstruction linear in the graph size. Insertion order
-        // is source order, so nodes within one level remain deterministic and topological.
-        let max_depth = depth.iter().copied().max().unwrap_or(0);
-        let mut nodes_by_depth: Vec<Vec<usize>> = (0..=max_depth).map(|_| Vec::new()).collect();
-
-        // Every singleton round mul_split created, grouped by depth, in original creation order -
-        // that order is also each round's slot order in the merged round. mul_split always emits
-        // [MulLocal, Round, RoundResult(0)] as three consecutive nodes, so the RoundResult always
-        // immediately follows its Round (relied on below), checked defensively.
-        let mut rounds_by_depth: Vec<Vec<(ValueId, usize)>> =
-            (0..=max_depth).map(|_| Vec::new()).collect();
-        for (i, node) in nodes.iter().enumerate() {
-            match &node.op {
-                Op::Round(_) => {
-                    debug_assert!(
-                        nodes.len() > i + 1 && matches!(nodes[i + 1].op, Op::RoundResult(0)),
-                        "mul_split invariant violated: Round not immediately followed by RoundResult(0)"
-                    );
-                    rounds_by_depth[depth[i]].push((node.inputs[0], i + 1));
-                }
-                // Re-emitted alongside the merged round that produces it.
-                Op::RoundResult(_) => {}
-                _ => nodes_by_depth[depth[i]].push(i),
+    // Every singleton round mul_split created, grouped by depth, in original creation order -
+    // that order is also each round's slot order in the merged round. mul_split always emits
+    // [MulLocal, Round, RoundResult(0)] as three consecutive nodes, so the RoundResult always
+    // immediately follows its Round (relied on below), checked defensively.
+    let mut rounds_by_depth: Vec<Vec<(ValueId, usize)>> =
+        (0..=max_depth).map(|_| Vec::new()).collect();
+    for (i, node) in nodes.iter().enumerate() {
+        match &node.op {
+            Op::Round(_) => {
+                debug_assert!(
+                    nodes.len() > i + 1 && matches!(nodes[i + 1].op, Op::RoundResult(0)),
+                    "mul_split invariant violated: Round not immediately followed by RoundResult(0)"
+                );
+                rounds_by_depth[depth[i]].push((node.inputs[0], i + 1));
             }
+            // Re-emitted alongside the merged round that produces it.
+            Op::RoundResult(_) => {}
+            _ => nodes_by_depth[depth[i]].push(i),
         }
-
-        let has_rounds = rounds_by_depth.iter().any(|rounds| !rounds.is_empty());
-        let already_level_sorted = depth.windows(2).all(|pair| pair[0] <= pair[1]);
-        if !has_rounds && already_level_sorted {
-            return Ok(false);
-        }
-
-        let old_len = nodes.len();
-        let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
-        let mut new_nodes: Vec<Node<F>> = Vec::with_capacity(old_len);
-        let mut new_rounds: Vec<RoundDesc> = Vec::new();
-
-        for (d, (level_nodes, level_rounds)) in
-            nodes_by_depth.iter().zip(&rounds_by_depth).enumerate()
-        {
-            for &i in level_nodes {
-                let node = &nodes[i];
-                let remapped_inputs = node
-                    .inputs
-                    .iter()
-                    .map(|v| remap[v.index()].expect("round_schedule: input not yet placed"))
-                    .collect();
-                remap[i] = Some(ValueId::new(new_nodes.len()));
-                new_nodes.push(Node::new(node.op.clone(), remapped_inputs));
-            }
-            if !level_rounds.is_empty() {
-                let round_id = RoundId::new(new_rounds.len());
-                new_rounds.push(RoundDesc {
-                    kind: RoundKind::Reshare,
-                    len: level_rounds.len(),
-                    level: d,
-                });
-                let round_inputs = level_rounds
-                    .iter()
-                    .map(|(mul_local, _)| {
-                        remap[mul_local.index()].expect("round_schedule: MulLocal not yet placed")
-                    })
-                    .collect();
-                let round_new_id = ValueId::new(new_nodes.len());
-                new_nodes.push(Node::new(Op::Round(round_id), round_inputs));
-                for (k, (_, old_round_result_idx)) in level_rounds.iter().enumerate() {
-                    let k32 = u32::try_from(k).expect("round has more than u32::MAX slots");
-                    remap[*old_round_result_idx] = Some(ValueId::new(new_nodes.len()));
-                    new_nodes.push(Node::new(Op::RoundResult(k32), vec![round_new_id]));
-                }
-            }
-        }
-
-        graph.rebuild_nodes(new_nodes, &remap);
-        graph.set_rounds(new_rounds);
-        Ok(true)
     }
+
+    let has_rounds = rounds_by_depth.iter().any(|rounds| !rounds.is_empty());
+    let already_level_sorted = depth.windows(2).all(|pair| pair[0] <= pair[1]);
+    if !has_rounds && already_level_sorted {
+        return Ok(false);
+    }
+
+    let old_len = nodes.len();
+    let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
+    let mut new_nodes: Vec<Node<F>> = Vec::with_capacity(old_len);
+    let mut new_rounds: Vec<RoundDesc> = Vec::new();
+
+    for (d, (level_nodes, level_rounds)) in
+        nodes_by_depth.iter().zip(&rounds_by_depth).enumerate()
+    {
+        for &i in level_nodes {
+            let node = &nodes[i];
+            let remapped_inputs = node
+                .inputs
+                .iter()
+                .map(|v| remap[v.index()].expect("round_schedule: input not yet placed"))
+                .collect();
+            remap[i] = Some(ValueId::new(new_nodes.len()));
+            new_nodes.push(Node::new(node.op.clone(), remapped_inputs));
+        }
+        if !level_rounds.is_empty() {
+            let round_id = RoundId::new(new_rounds.len());
+            new_rounds.push(RoundDesc { len: level_rounds.len(), level: d });
+            let round_inputs = level_rounds
+                .iter()
+                .map(|(mul_local, _)| {
+                    remap[mul_local.index()].expect("round_schedule: MulLocal not yet placed")
+                })
+                .collect();
+            let round_new_id = ValueId::new(new_nodes.len());
+            new_nodes.push(Node::new(Op::Round(round_id), round_inputs));
+            for (k, (_, old_round_result_idx)) in level_rounds.iter().enumerate() {
+                let k32 = u32::try_from(k).expect("round has more than u32::MAX slots");
+                remap[*old_round_result_idx] = Some(ValueId::new(new_nodes.len()));
+                new_nodes.push(Node::new(Op::RoundResult(k32), vec![round_new_id]));
+            }
+        }
+    }
+
+    graph.rebuild_nodes(new_nodes, &remap);
+    graph.set_rounds(new_rounds);
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -151,8 +137,6 @@ mod tests {
     // and round_schedule must not be able to merge any of them (each depends on the previous).
     #[test]
     fn chain_of_products_stays_one_round_per_depth() {
-        use super::super::mul_split::MulSplit;
-
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: a
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b
@@ -161,9 +145,8 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(3), ValueId::new(2)]), // 4: (a*b)*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(4));
-        Pass::run(&mut MulSplit, &mut graph, &mut PassContext::default()).unwrap();
-        let changed =
-            Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        super::super::mul_split::run(&mut graph).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert_eq!(graph.rounds().len(), 2);
         assert!(graph.rounds().iter().all(|r| r.len == 1));
@@ -172,8 +155,6 @@ mod tests {
     // Two independent secret products at the same depth must merge into a single round.
     #[test]
     fn independent_products_at_same_depth_merge() {
-        use super::super::mul_split::MulSplit;
-
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: a
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b
@@ -183,9 +164,8 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(4)]), // 5: a*b + b*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(5));
-        Pass::run(&mut MulSplit, &mut graph, &mut PassContext::default()).unwrap();
-        let changed =
-            Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        super::super::mul_split::run(&mut graph).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert_eq!(graph.rounds().len(), 1);
         assert_eq!(graph.rounds()[0].len, 2);
@@ -199,8 +179,6 @@ mod tests {
     /// feeds the next level.
     #[test]
     fn site_between_two_products_does_not_panic() {
-        use super::super::mul_split::MulSplit;
-
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: a
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b
@@ -222,9 +200,8 @@ mod tests {
                 num_intermediates: 1,
             }],
         );
-        Pass::run(&mut MulSplit, &mut graph, &mut PassContext::default()).unwrap();
-        let changed =
-            Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        super::super::mul_split::run(&mut graph).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         // Two products separated by a site service: they can never share a round.
         assert_eq!(graph.rounds().len(), 2);
@@ -261,8 +238,7 @@ mod tests {
             .collect();
         let mut graph = graph_with_sites(nodes, ValueId::new(7), sites);
 
-        let changed =
-            Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert!(graph.rounds().is_empty());
 
@@ -309,8 +285,7 @@ mod tests {
         }
 
         let mut graph = graph_of(nodes, value);
-        let changed =
-            Pass::run(&mut RoundSchedule, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         assert_eq!(graph.rounds().len(), DEPTH);
         for (level, round) in graph.rounds().iter().enumerate() {

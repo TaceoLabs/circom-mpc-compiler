@@ -1,5 +1,5 @@
 //! [`CountingNet`]: a thin [`Network`] decorator that counts network rounds and bytes, so the
-//! round claims in `docs/ARCHITECTURE.md` (and the per-gadget round-count tests in `vm::gadgets`)
+//! round claims (the per-gadget round-count tests in `vm::gadgets`, `tests/merces.rs`)
 //! are measured rather than asserted. See `examples/merces.rs` for it wrapping a real 3-party run.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,7 +11,7 @@ use mpc_net::{ConnectionStats, Network};
 /// before the next `send`. Every rep3 primitive that communicates - `reshare_many`,
 /// `broadcast_many`, and everything built on them (`mul_vec`, `open_vec`, `a2y2b_many`, ...) - sends
 /// to its peers and then receives from them, so this scores each such call as exactly one round,
-/// which is what the round counts in `docs/ARCHITECTURE.md` mean.
+/// which is what every round count in this crate's tests means.
 ///
 /// Uses atomics rather than `Cell` because [`Network`] requires `Send + Sync` (a party's own
 /// send/recv sequence is single-threaded, so relaxed ordering is sufficient - this is a counter,

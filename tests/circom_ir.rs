@@ -10,8 +10,7 @@ mod common;
 use common::{circuit_path, inputs_from_test_name, libs_path};
 
 /// Every opt level exercises `CoCircomCompiler::compile`'s unconditional MPC lowering and codegen
-/// (see `docs/ARCHITECTURE.md`, "MPC lowering", "Bytecode and the slot machine") - there is no
-/// plaintext-only path any more, so this matrix is what makes every test below also a correctness
+/// (there is no plaintext-only path), so this matrix makes every test below also a correctness
 /// test for lowering and codegen, not just the frontend and the classical passes. The oracle is
 /// agreement across opt levels; `tests/proving.rs`'s prove+verify tests are the value oracle.
 const OPT_LEVELS: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
@@ -31,7 +30,7 @@ macro_rules! witness_extension_test_plain {
                         CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
                             .unwrap();
 
-                    assert_eq!(program.num_inputs, input.len());
+                    assert_eq!(program.statistics().inputs, input.len());
 
                     let classified = program.classify_inputs(input, |v| v);
                     let mut driver = PlainDriver;
@@ -76,7 +75,7 @@ fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
     config.link_library.push(libs_path());
     config.opt_level = OptLevel::O2;
     let program = CoCircomCompiler::<Bn254>::compile(circuit_path(circuit), config).unwrap();
-    assert_eq!(program.num_inputs, 0);
+    assert_eq!(program.statistics().inputs, 0);
     let mut driver = PlainDriver;
     Machine::run(&program, &mut driver, &[]).unwrap()
 }
@@ -107,9 +106,5 @@ fn nested_component_at_absolute_offset_zero_is_not_the_root_at_o2() {
     run_o2_without_inputs("zero_offset_subcomponent");
 }
 
-// Only the circuits this compiler can actually run are wired up. `circuits/` and `kats/` still
-// hold fixtures for everything it can't yet (the removed operator surface, unconstrained function
-// calls, non-constant branches) - those stay as ready-made fixtures for when support lands. The
-// inventory of what's missing lives in `docs/ARCHITECTURE.md`, "Known gaps", not in this file's
-// failure list. The precomputation gadgets aren't wired up here - `tests/proving.rs`'s
-// prove+verify tests cover them instead.
+// Only the circuits this compiler can actually run are wired up. The precomputation gadgets
+// aren't wired up here - `tests/proving.rs`'s prove+verify tests cover them instead.

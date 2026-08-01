@@ -1,7 +1,7 @@
 //! Verifies precomputation-gadget recognition: `Poseidon2`, `Num2Bits`, `IsZero` and `AliasCheck`
 //! are each cut into exactly one `ir::PrecomputeSite` with the expected shape, whether reached
 //! through a `TACEO_PRECOMPUTATION_*` wrapper or (for `precomputation_unsupported_gadget_test`'s
-//! `Doubler`) not recognized at all. See `docs/ARCHITECTURE.md`, "Precomputation".
+//! `Doubler`) not recognized at all.
 
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::ir::PrecomputeKind;
@@ -9,19 +9,13 @@ use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
-fn manifest_dir() -> &'static str {
-    env!("CARGO_MANIFEST_DIR")
-}
+mod common;
 
-fn circuit_path(name: &str) -> String {
-    format!("{}/circuits/{name}.circom", manifest_dir())
-}
+use common::{circuit_path, libs_path};
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
-    config
-        .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
+    config.link_library.push(libs_path());
     config
 }
 
@@ -144,7 +138,7 @@ fn extract_mode_runs_end_to_end_through_the_plain_driver() {
     for w in WRAPPERS {
         let program = CoCircomCompiler::<Bn254>::compile(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
-        let values = vec![Fr::from(0u64); program.num_inputs];
+        let values = vec![Fr::from(0u64); program.statistics().inputs];
         let inputs = program.classify_inputs(&values, |v| v);
         let mut driver = PlainDriver;
         Machine::run(&program, &mut driver, &inputs)
@@ -220,8 +214,8 @@ fn all_public_gadgets_stay_public_through_downstream_multiplication() {
 
     let program = CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
         .unwrap();
-    assert_eq!(program.precompute_batches.len(), 1);
-    assert_eq!(program.precompute_batches[0].result_targets[0].bank, circom_mpc_compiler::vm::program::Bank::Public);
+    assert_eq!(program.statistics().precompute_batches, 1);
+    assert!(program.statistics().public_precompute_results > 0);
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();

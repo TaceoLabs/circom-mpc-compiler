@@ -1,51 +1,28 @@
 //! Poseidon2 permutation traces for `circuits/libs/taceo/poseidon2.circom`, computed from **that
-//! template's own signal layout**, for every width the circuit defines
-//! (`t ∈ {2, 3, 4, 8, 12, 16}`).
+//! template's own signal layout**.
 //!
-//! # The layout rule
+//! The layout rule that is easy to get wrong: circom lays out each component as
+//! `[outputs][inputs][own intermediates][subcomponent subtrees]`, and **sibling subcomponent
+//! subtrees are ordered by the callee template's definition order in the source file**, not by the
+//! order their creating statements execute. Hence `FullRound` emits `ExternalMatMulT` before
+//! `Sbox`, `ExternalMatMulT`'s `t >= 8` branch emits its `Acc` subtrees before its
+//! `ExternalMatMul4`s, and all 8 `FullRound` blocks precede every `PartialRound` block even though
+//! execution interleaves them - so **layout order is not execution order**. All confirmed against
+//! circom's own R1CS by `tests/proving.rs`'s `precomputation_poseidon2_test`.
 //!
-//! circom lays out each component as
-//! `[outputs][inputs][own intermediates, in source-declaration order][subcomponent subtrees]`, and -
-//! the part that is easy to get wrong - **sibling subcomponent subtrees are ordered by the *callee
-//! template's own definition order in the source file*, not by the order their creating statements
-//! execute within the caller.** Four consequences, all confirmed against a passing proof:
-//!
-//! - `FullRound` emits its `ExternalMatMulT` subtree *before* its `Sbox` subtree, even though the
-//!   source instantiates `Sbox` first: `ExternalMatMulT` is defined earlier in the file.
-//! - `ExternalMatMulT`'s own `t >= 8` branch emits its 4 `Acc(t/4)` subtrees *before* its `t/4`
-//!   `ExternalMatMul4` subtrees, even though the source creates `mds[]` (the `ExternalMatMul4`s)
-//!   before `accs[]` (the `Acc`s): `template Acc(t)` is defined before `template ExternalMatMul4` in
-//!   `poseidon2.circom`. Verified directly against circom's own R1CS for `t=16` - the only width
-//!   that reaches this branch (`t/4 >= 2`) among the widths this repo exercises.
-//! - `Poseidon2` emits all 8 `FullRound` blocks contiguously and only then all `PartialRound` blocks
-//!   - so **layout order is not execution order**, since rounds 5..(4+pr) run between them.
-//! - Within one template, *same-definition* sibling instances keep their own creation order: the 8
-//!   full rounds are the first group's 4 followed by the second group's 4, and `accs[0..4]`/
-//!   `mds[0..4]` are each in their own loop's `l`/`i` order.
-//!
-//! Verified for t=3 (2045 witness entries) by `tests/proving.rs`'s
-//! `precomputation_poseidon2_test`, which is the real oracle for all of this.
-//!
-//! # Structure
-//!
-//! Three separated concerns, so the layout exists in exactly one place (unlike `super::aliascheck`,
-//! which duplicates its much smaller layout between the plain and rep3 paths):
-//!
-//! - `Ops` - the arithmetic backend, implemented once for plain field elements and once for rep3
-//!   shares. During the walk, only `Ops::sbox_layer` communicates; rep3 pool preprocessing happens
-//!   separately, before online execution.
-//! - `walk` - the permutation itself, **layer-major across every site in lock-step**, so all of a
-//!   batch's s-boxes at one round go into a single `sbox_layer` call.
-//! - `SiteOutput` - a sparse layout sink. It records a value only when its logical result slot was
-//!   requested, while `walk` still computes every value needed to evolve the permutation state.
+//! Structure: `Ops` is the arithmetic backend (plain and rep3; only `Ops::sbox_layer`
+//! communicates), `walk` the permutation itself (layer-major across every site in lock-step, so a
+//! batch's s-boxes at one round are a single `sbox_layer` call), and `SiteOutput` the sparse sink
+//! that records only requested result slots while the walk still evolves the full state.
 
 use ark_ff::PrimeField;
 
 use super::poseidon2_constants::{partial_rounds, RoundConstants};
 
-/// The widths `circuits/libs/taceo/poseidon2.circom` defines constants for:
-/// `{2, 3, 4, 8, 12, 16}`.
-pub const SUPPORTED_WIDTHS: [usize; 6] = [2, 3, 4, 8, 12, 16];
+/// The widths any vendored circuit instantiates (merces' compression sponge uses 16).
+/// `poseidon2.circom` also defines 12; support it by restoring its constant tables in
+/// `poseidon2_constants.rs`.
+pub const SUPPORTED_WIDTHS: [usize; 5] = [2, 3, 4, 8, 16];
 
 // --- Signal counts, mirroring the circuit's own template structure ---
 
@@ -131,7 +108,7 @@ struct SboxTrace<V> {
 }
 
 /// The field operations the walker needs. Everything except [`Self::sbox_layer`] is local work, free
-/// in every domain (see `docs/ARCHITECTURE.md`, "MPC lowering").
+/// in every domain.
 trait Ops<F: PrimeField> {
     type V: Clone;
 
@@ -180,32 +157,20 @@ impl<F: PrimeField> Ops<F> for PlainOps {
 
 // --- The permutation, layer-major over every site ---
 
-enum SiteSelection<'a> {
-    All,
-    Requested(&'a [u32]),
-}
-
-/// Index-addressed output for one site. The witness layout is not execution ordered: the second
-/// full-round group executes after the partial rounds but precedes them in signal order. Directly
-/// addressing requested logical slots preserves that layout without retaining whole round blocks.
+/// Index-addressed output for one site, recording only the requested logical result slots. The
+/// witness layout is not execution ordered: the second full-round group executes after the partial
+/// rounds but precedes them in signal order. Directly addressing requested logical slots preserves
+/// that layout without retaining whole round blocks.
 struct SiteOutput<'a, V> {
-    selection: SiteSelection<'a>,
+    requests: &'a [u32],
     values: Vec<Option<V>>,
     capacity: usize,
 }
 
 impl<'a, V: Clone> SiteOutput<'a, V> {
-    fn all(capacity: usize) -> Self {
-        Self {
-            selection: SiteSelection::All,
-            values: vec![None; capacity],
-            capacity,
-        }
-    }
-
     fn requested(capacity: usize, requests: &'a [u32]) -> Self {
         Self {
-            selection: SiteSelection::Requested(requests),
+            requests,
             values: vec![None; requests.len()],
             capacity,
         }
@@ -213,10 +178,7 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
 
     fn destination(&self, logical: usize) -> Option<usize> {
         debug_assert!(logical < self.capacity);
-        match self.selection {
-            SiteSelection::All => Some(logical),
-            SiteSelection::Requested(requests) => requests.binary_search(&(logical as u32)).ok(),
-        }
+        self.requests.binary_search(&(logical as u32)).ok()
     }
 
     fn wants(&self, logical: usize) -> bool {
@@ -703,24 +665,6 @@ fn requested_outputs<'a, V: Clone>(
     Ok(outputs)
 }
 
-/// Plain traces for a whole batch: `states` is `sites * t` values (one length-`t` state per site,
-/// concatenated), and the result is `sites * result_slots(t)` values in `Machine::precompute`'s slot
-/// order.
-pub fn plain_trace<F: PrimeField>(t: usize, states: &[F]) -> eyre::Result<Vec<F>> {
-    let sites = check_width(t, states.len())?;
-    let capacity = result_slots(t);
-    let rc = RoundConstants::load(t)?;
-    let outputs = (0..sites).map(|_| SiteOutput::all(capacity)).collect();
-    let out = walk(&mut PlainOps, t, states, &rc, outputs)?;
-    eyre::ensure!(
-        out.len() == sites * capacity,
-        "Poseidon2(t={t}) emitted {} values, expected {}",
-        out.len(),
-        sites * capacity
-    );
-    Ok(out)
-}
-
 /// Computes only the requested logical trace slots for each site. `result_offsets` is a CSR row
 /// pointer of length `sites + 1`; each site's request row must be strictly ascending and contain
 /// slots in `0..result_slots(t)`. The returned values are site-major in exactly that CSR order.
@@ -958,45 +902,9 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
     }
 }
 
-/// Internal full-trace path backed by a caller-owned, program-wide preprocessing pool. It spends
-/// only the online `8 + partial_rounds(t)` rounds; preparation is deliberately outside this call.
-#[cfg(feature = "rep3")]
-pub(crate) fn rep3_trace_preprocessed<F: PrimeField, N: mpc_net::Network>(
-    t: usize,
-    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
-    net: &N,
-    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
-    preprocessing: &mut Rep3Poseidon2Preprocessing<F>,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
-    let sites = check_width(t, states.len())?;
-    let required = mask_elements(t, sites)?;
-    preprocessing.ensure_available(required)?;
-    let consumed_before = preprocessing.consumed;
-    let capacity = result_slots(t);
-    let rc = RoundConstants::load(t)?;
-    let mut ops = Rep3Ops {
-        net,
-        state: rep3_state,
-        pool: preprocessing,
-    };
-    let outputs = (0..sites).map(|_| SiteOutput::all(capacity)).collect();
-    let out = walk(&mut ops, t, states, &rc, outputs)?;
-    eyre::ensure!(
-        ops.pool.consumed - consumed_before == required,
-        "Poseidon2(t={t}) consumed {} masks, expected {required}",
-        ops.pool.consumed - consumed_before
-    );
-    eyre::ensure!(
-        out.len() == sites * capacity,
-        "Poseidon2(t={t}) emitted {} values, expected {}",
-        out.len(),
-        sites * capacity
-    );
-    Ok(out)
-}
-
-/// Internal sparse-trace twin of [`rep3_trace_preprocessed`]. Request sparsity changes only local
-/// trace retention; it consumes the same pool slice and online rounds as the full path.
+/// Sparse-trace path backed by a caller-owned, program-wide preprocessing pool. It spends only the
+/// online `8 + partial_rounds(t)` rounds; preparation is deliberately outside this call. Request
+/// sparsity changes only local trace retention, not the pool slice or round count.
 #[cfg(feature = "rep3")]
 pub(crate) fn rep3_trace_requested_preprocessed<F: PrimeField, N: mpc_net::Network>(
     t: usize,
@@ -1028,53 +936,50 @@ pub(crate) fn rep3_trace_requested_preprocessed<F: PrimeField, N: mpc_net::Netwo
     Ok(out)
 }
 
-/// Compatibility full-trace entry point. Direct gadget callers retain the historical behavior:
-/// one fresh three-round preprocessing followed by the online permutation. VM execution uses the
-/// internal preprocessed twin so all Poseidon2 services in a run share one freshly prepared pool.
-#[cfg(feature = "rep3")]
-pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
-    t: usize,
-    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
-    net: &N,
-    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
-    let sites = check_width(t, states.len())?;
-    let mut preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, rep3_state)?;
-    let out = rep3_trace_preprocessed(t, states, net, rep3_state, &mut preprocessing)?;
-    preprocessing.ensure_consumed()?;
-    Ok(out)
-}
-
-/// Compatibility sparse-trace entry point; see [`rep3_trace`].
-#[cfg(feature = "rep3")]
-pub fn rep3_trace_requested<F: PrimeField, N: mpc_net::Network>(
-    t: usize,
-    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
-    net: &N,
-    rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
-    result_requests: &[u32],
-    result_offsets: &[u32],
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
-    let sites = check_width(t, states.len())?;
-    let mut preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, rep3_state)?;
-    let out = rep3_trace_requested_preprocessed(
-        t,
-        states,
-        net,
-        rep3_state,
-        &mut preprocessing,
-        result_requests,
-        result_offsets,
-    )?;
-    preprocessing.ensure_consumed()?;
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
 
     use super::*;
+
+    /// A CSR request table asking for every logical slot of every site.
+    fn full_csr(t: usize, sites: usize) -> (Vec<u32>, Vec<u32>) {
+        let capacity = result_slots(t);
+        let requests = (0..sites).flat_map(|_| 0..capacity as u32).collect();
+        let offsets = (0..=sites).map(|s| (s * capacity) as u32).collect();
+        (requests, offsets)
+    }
+
+    /// The full plain trace, via the requested path (the only production path).
+    fn plain_full(t: usize, states: &[Fr]) -> Vec<Fr> {
+        let (requests, offsets) = full_csr(t, states.len() / t);
+        plain_trace_requested(t, states, &requests, &offsets).unwrap()
+    }
+
+    /// One fresh preprocessing pool + one requested trace, the way the rep3 driver runs it.
+    #[cfg(feature = "rep3")]
+    fn rep3_requested<N: mpc_net::Network>(
+        t: usize,
+        shares: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
+        net: &N,
+        state: &mut mpc_core::protocols::rep3::Rep3State,
+        requests: &[u32],
+        offsets: &[u32],
+    ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
+        let sites = check_width(t, shares.len())?;
+        let mut preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, state)?;
+        let out = rep3_trace_requested_preprocessed(
+            t,
+            shares,
+            net,
+            state,
+            &mut preprocessing,
+            requests,
+            offsets,
+        )?;
+        preprocessing.ensure_consumed()?;
+        Ok(out)
+    }
 
     /// The emitted length must match what `ir::PrecomputeKind` promises, for every width - otherwise
     /// `frontend/inline.rs`'s cross-check against the circuit's real signal span would be comparing
@@ -1083,7 +988,7 @@ mod tests {
     fn emitted_length_matches_the_declared_result_count() {
         for t in SUPPORTED_WIDTHS {
             let states = vec![Fr::from(1u64); t];
-            let got = plain_trace(t, &states).unwrap();
+            let got = plain_full(t, &states);
             assert_eq!(
                 got.len(),
                 crate::ir::PrecomputeKind::Poseidon2 { t }
@@ -1102,11 +1007,11 @@ mod tests {
         let t = 3;
         let a = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
         let b = [Fr::from(4u64), Fr::from(5u64), Fr::from(6u64)];
-        let mut expected = plain_trace(t, &a).unwrap();
-        expected.extend(plain_trace(t, &b).unwrap());
+        let mut expected = plain_full(t, &a);
+        expected.extend(plain_full(t, &b));
 
         let both: Vec<Fr> = a.iter().chain(&b).copied().collect();
-        assert_eq!(plain_trace(t, &both).unwrap(), expected);
+        assert_eq!(plain_full(t, &both), expected);
     }
 
     #[test]
@@ -1116,7 +1021,7 @@ mod tests {
             let states: Vec<Fr> = (0..sites * t)
                 .map(|i| Fr::from((17 * i + 3) as u64))
                 .collect();
-            let full = plain_trace(t, &states).unwrap();
+            let full = plain_full(t, &states);
             let capacity = result_slots(t);
 
             let mut requests = Vec::new();
@@ -1173,9 +1078,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_width_and_ragged_input() {
-        assert!(plain_trace(5, &[Fr::from(0u64); 5]).is_err());
-        assert!(plain_trace::<Fr>(3, &[]).is_err());
-        assert!(plain_trace(3, &[Fr::from(0u64); 4]).is_err());
+        assert!(plain_trace_requested(5, &[Fr::from(0u64); 5], &[], &[0]).is_err());
+        assert!(plain_trace_requested(12, &[Fr::from(0u64); 12], &[], &[0]).is_err());
+        assert!(plain_trace_requested::<Fr>(3, &[], &[], &[0]).is_err());
+        assert!(plain_trace_requested(3, &[Fr::from(0u64); 4], &[], &[0]).is_err());
     }
 
     /// Guards the vendored constant tables against drifting from the circuit they were copied from.
@@ -1221,9 +1127,10 @@ mod tests {
         // Two sites per width, so this covers batching as well as the arithmetic.
         for t in SUPPORTED_WIDTHS {
             let states: Vec<Fr> = (0..2 * t).map(|i| Fr::from(i as u64 + 1)).collect();
-            let expected = plain_trace(t, &states).unwrap();
+            let expected = plain_full(t, &states);
+            let (requests, offsets) = full_csr(t, 2);
             let got = run3(&states, |net, state, shares| {
-                rep3_trace(t, shares, net, state)
+                rep3_requested(t, shares, net, state, &requests, &offsets)
             });
             assert_eq!(got, expected, "t={t}");
         }
@@ -1245,7 +1152,7 @@ mod tests {
         let offsets = [0, 5, 8];
         let expected = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
         let got = run3(&states, |net, state, shares| {
-            rep3_trace_requested(t, shares, net, state, &requests, &offsets)
+            rep3_requested(t, shares, net, state, &requests, &offsets)
         });
         assert_eq!(got, expected);
     }
@@ -1270,7 +1177,8 @@ mod tests {
                 .collect();
             let offsets = [0, 5, 8];
 
-            let mut expected = plain_trace(t, &states).unwrap();
+            let (full_requests, full_offsets) = full_csr(t, sites);
+            let mut expected = plain_full(t, &states);
             expected.extend(plain_trace_requested(t, &states, &requests, &offsets).unwrap());
 
             let per_call = mask_elements(t, sites).unwrap();
@@ -1282,8 +1190,15 @@ mod tests {
                     "fresh preprocessing pool must start unused"
                 );
 
-                let mut result =
-                    rep3_trace_preprocessed(t, shares, net, state, &mut preprocessing)?;
+                let mut result = rep3_trace_requested_preprocessed(
+                    t,
+                    shares,
+                    net,
+                    state,
+                    &mut preprocessing,
+                    &full_requests,
+                    &full_offsets,
+                )?;
                 eyre::ensure!(
                     preprocessing.consumed == per_call,
                     "first Poseidon2 call consumed {} masks, expected {per_call}",
@@ -1319,7 +1234,7 @@ mod tests {
         use crate::vm::gadgets::test_support::run3_counted_with_a2b;
 
         let values = [Fr::from(1u64)];
-        let budget = mask_elements(16, 3).unwrap();
+        let budget = mask_elements(8, 3).unwrap();
         let (_, rounds) =
             run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
                 let preprocessing = preprocess_rep3::<Fr, _>(budget, net, state)?;
@@ -1351,14 +1266,22 @@ mod tests {
             let states: Vec<Fr> = (0..t).map(|i| Fr::from(i as u64 + 19)).collect();
             let budget = mask_elements(t, 1).unwrap();
             let expected_online = 8 + partial_rounds(t);
-            let expected_full = plain_trace(t, &states).unwrap();
+            let expected_full = plain_full(t, &states);
+            let (full_requests, full_offsets) = full_csr(t, 1);
 
             let (full, full_rounds) =
                 run3_counted_with_a2b(&states, A2BType::default(), |net, state, shares| {
                     let mut preprocessing = preprocess_rep3(budget, net, state)?;
                     net.reset();
-                    let result =
-                        rep3_trace_preprocessed(t, shares, net, state, &mut preprocessing)?;
+                    let result = rep3_trace_requested_preprocessed(
+                        t,
+                        shares,
+                        net,
+                        state,
+                        &mut preprocessing,
+                        &full_requests,
+                        &full_offsets,
+                    )?;
                     preprocessing.ensure_consumed()?;
                     Ok(result)
                 });
@@ -1393,8 +1316,8 @@ mod tests {
         }
     }
 
-    /// Pins the round claim in `rep3_trace`'s doc: `3 + 8 + partial_rounds(t)`, the same for every
-    /// site count in a batch.
+    /// Preprocessing plus online: `3 + 8 + partial_rounds(t)`, the same for every site count and
+    /// request sparsity.
     #[cfg(all(feature = "rep3", feature = "round-counting"))]
     #[test]
     fn rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites() {
@@ -1404,8 +1327,9 @@ mod tests {
             let expected_rounds = 3 + 8 + partial_rounds(t);
             for sites in [1, 3] {
                 let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
+                let (requests, offsets) = full_csr(t, sites);
                 let (_, rounds) = run3_counted(&states, |net, state, shares| {
-                    rep3_trace(t, shares, net, state)
+                    rep3_requested(t, shares, net, state, &requests, &offsets)
                 });
                 assert_eq!(rounds, expected_rounds, "t={t} sites={sites}");
             }
@@ -1418,7 +1342,7 @@ mod tests {
         let offsets = [0, 2, 2, 4];
         let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
         let (_, sparse_rounds) = run3_counted(&states, |net, state, shares| {
-            rep3_trace_requested(t, shares, net, state, &requests, &offsets)
+            rep3_requested(t, shares, net, state, &requests, &offsets)
         });
         assert_eq!(sparse_rounds, 3 + 8 + partial_rounds(t));
     }

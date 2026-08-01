@@ -1,23 +1,36 @@
-//! Wraps [`Graph::gc`] as a [`Pass`] - dead code elimination is already a single reverse-liveness
-//! sweep (`src/ir.rs`); this just gives it the shared `Pass` interface so it can sit in the same
-//! pipeline as everything else.
+//! Dead code elimination: drops every `outputs` entry that cannot reach the final witness, then
+//! runs [`Graph::gc`]'s reverse-liveness sweep to delete the now-unreferenced producers.
+//!
+//! The output pruning matters because most of a recognized precomputation gadget's result slots
+//! are *not* witness positions: circom's own `--O2` constraint simplification removes the vast
+//! majority of e.g. a Poseidon2 trace from the witness (roughly 90% on the merces mains). Without
+//! pruning, every dead result slot would stay bound into `outputs`, survive every later pass,
+//! reserve a real codegen slot, and be copied around by `Machine::run`.
 
 use ark_ff::PrimeField;
 
 use crate::ir::Graph;
 
-use super::{Changed, Pass, PassContext};
-
-pub(super) struct DeadCode;
-
-impl<F: PrimeField> Pass<F> for DeadCode {
-    fn name(&self) -> &'static str {
-        "dead_code"
+pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    // Hand-built graphs (pass unit tests, codegen tests) pass an empty `signal_to_witness`.
+    // Pruning against an empty witness would delete every output, so skip the pruning there.
+    let mut changed = false;
+    if !graph.signal_to_witness.is_empty() {
+        // `Machine::run` reserves index 0 for the constant `1` and places every genuine
+        // `SignalIdx` `s` at `s + 1`; `signal_to_witness` indexes into that same offset-by-one
+        // space, so the mask must match it exactly.
+        let mut witness_mask = vec![false; graph.num_signals];
+        for &idx in &graph.signal_to_witness {
+            if let Some(slot) = witness_mask.get_mut(idx) {
+                *slot = true;
+            }
+        }
+        changed |= graph.retain_outputs(|signal, _value| {
+            witness_mask.get(signal.index() + 1).copied().unwrap_or(false)
+        });
     }
 
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        let before = graph.len();
-        graph.gc();
-        Ok(graph.len() != before)
-    }
+    let before = graph.len();
+    graph.gc();
+    Ok(changed || graph.len() != before)
 }

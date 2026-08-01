@@ -3,25 +3,14 @@
 //! `frontend/fold.rs::fold_binary` (folds the operators removed from the runtime IR, before a
 //! node ever exists) and `GraphCompiler::eval_constant_node` (address-position-only, used for
 //! array/signal/component addressing at lowering time). This is the first fold that runs as a
-//! real pass over the graph itself - see `docs/ARCHITECTURE.md`, "Where compile-time folding
-//! lives".
+//! real pass over the graph itself.
 
 use ark_ff::PrimeField;
 
 use crate::ir::{Graph, Node, Op, RewriteAction, ValueId};
 
-use super::{Changed, Pass, PassContext};
-
-pub(super) struct ConstFold;
-
-impl<F: PrimeField> Pass<F> for ConstFold {
-    fn name(&self) -> &'static str {
-        "const_fold"
-    }
-
-    fn run(&mut self, graph: &mut Graph<F>, _ctx: &mut PassContext) -> eyre::Result<Changed> {
-        Ok(graph.rewrite(|_id, node, emitted| fold_node(node, emitted)))
-    }
+pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+    Ok(graph.rewrite(|_id, node, emitted| fold_node(node, emitted)))
 }
 
 /// Returns `Some(c)` iff `v`'s producer (already emitted, so present in `emitted`) is a resolved
@@ -99,8 +88,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let mut pass = ConstFold;
-        let changed = Pass::run(&mut pass, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 1);
@@ -116,8 +104,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let mut pass = ConstFold;
-        let changed = Pass::run(&mut pass, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(changed);
         graph.gc();
         // only the Input node should survive - the Add collapsed into an alias for it
@@ -134,8 +121,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let mut pass = ConstFold;
-        let changed = Pass::run(&mut pass, &mut graph, &mut PassContext::default()).unwrap();
+        let changed = run(&mut graph).unwrap();
         assert!(!changed);
         assert_eq!(graph.len(), 3);
     }

@@ -2,15 +2,57 @@
 //! particular Rust type's derive support (`Opcode`/`Bank` are plain fieldless enums over small
 //! integers, not `ark_serialize` types). An 8-byte magic + `u32` version identify the format;
 //! `constants` (the only field-element table) go through `ark_serialize`'s
-//! `CanonicalSerialize`/`CanonicalDeserialize`; everything else is little-endian integers via
-//! `byteorder`. The instruction stream is the one part worth a fixed record shape (16 bytes:
-//! `u8` opcode + 3 bytes padding + three `u32`s) - see `docs/ARCHITECTURE.md`, "Bytecode and the
-//! slot machine".
+//! `CanonicalSerialize`/`CanonicalDeserialize`; everything else uses compact tags and
+//! little-endian integers. The instruction stream has a fixed record shape (16 bytes:
+//! `u8` opcode + 3 bytes padding + three `u32`s).
 
 use std::io::{Read, Write};
 
 use ark_ff::PrimeField;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+
+struct LittleEndian;
+
+trait WriteLeExt: Write {
+    fn write_u8(&mut self, value: u8) -> std::io::Result<()> {
+        self.write_all(&[value])
+    }
+
+    fn write_u32<E>(&mut self, value: u32) -> std::io::Result<()> {
+        let _ = std::marker::PhantomData::<E>;
+        self.write_all(&value.to_le_bytes())
+    }
+
+    fn write_u64<E>(&mut self, value: u64) -> std::io::Result<()> {
+        let _ = std::marker::PhantomData::<E>;
+        self.write_all(&value.to_le_bytes())
+    }
+}
+
+impl<W: Write + ?Sized> WriteLeExt for W {}
+
+trait ReadLeExt: Read {
+    fn read_u8(&mut self) -> std::io::Result<u8> {
+        let mut bytes = [0; 1];
+        self.read_exact(&mut bytes)?;
+        Ok(bytes[0])
+    }
+
+    fn read_u32<E>(&mut self) -> std::io::Result<u32> {
+        let _ = std::marker::PhantomData::<E>;
+        let mut bytes = [0; 4];
+        self.read_exact(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64<E>(&mut self) -> std::io::Result<u64> {
+        let _ = std::marker::PhantomData::<E>;
+        let mut bytes = [0; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+}
+
+impl<R: Read + ?Sized> ReadLeExt for R {}
 
 use crate::ir::PrecomputeKind;
 
@@ -20,18 +62,9 @@ use super::program::{
 };
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
-/// Version 1 had no interleaved `Opcode::Precompute`; version 2 always stored precompute results in
-/// the shared bank. Version 3 records each batch's result bank so all-public gadgets can remain
-/// public. Version 4 adds the `PrecomputeKind::Reveal` tag. Version 5 adds `result_requests`/
-/// `result_offsets` to `PrecomputeBatch`, and changes `result_slots`' own meaning from one entry
-/// per site's full reserved capacity to one entry per *requested* (witness-live) slot - a
-/// version-4 reader has no way to tell the two shapes apart from length alone, so accepting it
-/// under version 5's semantics would silently scatter a batch's results into the wrong slots.
-/// Version 6 adds VM-only [`BatchKind`] services, banked [`ResultTarget`]s, and witness-ordered
-/// [`WitnessSource`] entries in place of the runtime-sized signal store/projection tables.
-/// `Machine::run` deliberately has no compatibility shim: accepting an older layout could produce
-/// a plausible-looking wrong witness.
-const VERSION: u32 = 6;
+/// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
+/// shim: accepting an older layout could produce a plausible-looking wrong witness.
+const VERSION: u32 = 1;
 
 impl Opcode {
     fn to_u8(self) -> u8 {
@@ -117,7 +150,6 @@ impl PrecomputeKind {
             }
             PrecomputeKind::IsZero => w.write_u8(2)?,
             PrecomputeKind::AliasCheck => w.write_u8(3)?,
-            PrecomputeKind::IsEqual => w.write_u8(4)?,
             PrecomputeKind::Reveal { n } => {
                 w.write_u8(5)?;
                 w.write_u32::<LittleEndian>(*n as u32)?;
@@ -136,7 +168,6 @@ impl PrecomputeKind {
             },
             2 => PrecomputeKind::IsZero,
             3 => PrecomputeKind::AliasCheck,
-            4 => PrecomputeKind::IsEqual,
             5 => PrecomputeKind::Reveal {
                 n: r.read_u32::<LittleEndian>()? as usize,
             },
@@ -169,7 +200,7 @@ impl BatchKind {
 impl<F: PrimeField> Program<F> {
     /// Serializes this program. See the module doc for the exact format.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
-        self.validate()?;
+        self.validate_encoding()?;
         w.write_all(MAGIC)?;
         w.write_u32::<LittleEndian>(VERSION)?;
 
@@ -420,7 +451,7 @@ impl<F: PrimeField> Program<F> {
                 local,
             },
         };
-        program.validate()?;
+        program.validate_encoding()?;
         Ok(program)
     }
 }
@@ -488,16 +519,12 @@ mod tests {
     fn round_trips_an_unbound_zero_witness_source() {
         let original = program("loop_unrolling");
         assert!(original
-            .witness_sources
-            .iter()
-            .any(|source| *source == super::WitnessSource::Zero));
+            .witness_sources.contains(&super::WitnessSource::Zero));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
         assert!(read_back
-            .witness_sources
-            .iter()
-            .any(|source| *source == super::WitnessSource::Zero));
+            .witness_sources.contains(&super::WitnessSource::Zero));
 
         let inputs: Vec<_> = (1..=original.num_inputs).map(|i| Fr::from(i as u64)).collect();
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
@@ -526,8 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_a_fused_isequal_reveal_batch_without_changing_version_six() {
-        assert_eq!(super::VERSION, 6);
+    fn round_trips_a_fused_isequal_reveal_batch_in_version_one() {
+        assert_eq!(super::VERSION, 1);
         let original = program("precomputation_isequal_reveal_test");
         assert_eq!(original.precompute_batches.len(), 1);
         assert_eq!(
@@ -610,17 +637,17 @@ mod tests {
             bank: super::Bank::Shared,
             slot: invalid_witness.slots.shared,
         };
-        assert!(invalid_witness.validate().is_err());
+        assert!(invalid_witness.validate_encoding().is_err());
         assert!(invalid_witness.write(&mut Vec::new()).is_err());
 
         let mut invalid_batch = program("precomputation_iszero_test");
         invalid_batch.precompute_batches[0].result_targets[0].slot =
             invalid_batch.slots.shared;
-        assert!(invalid_batch.validate().is_err());
+        assert!(invalid_batch.validate_encoding().is_err());
 
         let mut invalid_poseidon = program("precomputation_poseidon2_test");
         invalid_poseidon.precompute_batches[0].kind =
             super::BatchKind::Precompute(crate::ir::PrecomputeKind::Poseidon2 { t: 5 });
-        assert!(invalid_poseidon.validate().is_err());
+        assert!(invalid_poseidon.validate_encoding().is_err());
     }
 }

@@ -1,6 +1,6 @@
 //! Executes a `Program` against a `VmDriver`: the same bytecode runs against `PlainDriver` (the
-//! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed in. See
-//! `docs/ARCHITECTURE.md`, "Bytecode and the slot machine".
+//! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed
+//! in.
 
 use ark_ff::PrimeField;
 
@@ -117,7 +117,6 @@ impl Machine {
         driver: &mut D,
         inputs: &[InputValue<F, D::Share>],
     ) -> eyre::Result<Vec<D::Share>> {
-        program.validate()?;
         eyre::ensure!(
             inputs.len() == program.num_inputs,
             "expected {} inputs, got {}",
@@ -127,7 +126,6 @@ impl Machine {
 
         let mut public: Vec<F> = vec![F::zero(); program.slots.public as usize];
         let mut shared: Vec<D::Share> = vec![D::Share::default(); program.slots.shared as usize];
-        let mut local: Vec<D::Local> = vec![D::Local::default(); program.slots.local as usize];
 
         for (i, c) in program.constants.iter().enumerate() {
             public[i] = *c;
@@ -198,23 +196,10 @@ impl Machine {
                         pending_mul_dst.as_slice() == &program.round_operands[start..start + len],
                         "MulLocal instructions do not match the following round's operand table"
                     );
-                    let products = driver.mul_local_vec(&pending_mul_lhs, &pending_mul_rhs);
-                    eyre::ensure!(
-                        products.len() == len,
-                        "mul_local_vec returned {} products, expected {len}",
-                        products.len()
-                    );
-                    for (&dst, product) in pending_mul_dst.iter().zip(products) {
-                        local[dst as usize] = product;
-                    }
+                    let results = driver.mul_vec(&pending_mul_lhs, &pending_mul_rhs)?;
                     pending_mul_lhs.clear();
                     pending_mul_rhs.clear();
                     pending_mul_dst.clear();
-                    let locals: Vec<D::Local> = program.round_operands[start..start + len]
-                        .iter()
-                        .map(|&slot| local[slot as usize].clone())
-                        .collect();
-                    let results = driver.reshare(&locals)?;
                     eyre::ensure!(
                         results.len() == len,
                         "reshare returned {} results, expected {len}",
@@ -222,10 +207,7 @@ impl Machine {
                     );
                     let rstart = entry.result_start as usize;
                     for (k, r) in results.into_iter().enumerate() {
-                        let slot = program.round_results[rstart + k];
-                        if slot != u32::MAX {
-                            shared[slot as usize] = r;
-                        }
+                        shared[program.round_results[rstart + k] as usize] = r;
                     }
                 }
                 Opcode::Precompute => Self::run_batch(
@@ -272,8 +254,7 @@ impl Machine {
 
     /// Services one batched precomputation site group at its point in the instruction stream. A
     /// public batch uses the plain gadget path; a shared batch is one driver call. Interleaving is
-    /// required because a site's inputs may be produced by earlier instructions (see
-    /// `docs/ARCHITECTURE.md`, "Precomputation").
+    /// required because a site's inputs may be produced by earlier instructions.
     ///
     /// A gadget's per-site result count may be *shorter* than the site's reserved capacity
     /// (`num_outputs + num_intermediates`, sized from the real circuit's own signal layout): the
@@ -325,11 +306,11 @@ impl Machine {
                     &batch.result_requests,
                     &batch.result_offsets,
                 )?;
-                return Self::store_batch_results_owned(batch, selected, Bank::Public, public);
+                return Self::store_batch_results(batch, selected, Bank::Public, public);
             }
             let results = Self::run_plain_batch(kind, &inputs)?;
             let selected = Self::select_requests(&results, batch)?;
-            return Self::store_batch_results(batch, &selected, Bank::Public, public);
+            return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
 
         // A site input isn't always a share - a circuit may pass a literal, which codegen resolves
@@ -351,7 +332,7 @@ impl Machine {
         if let PrecomputeKind::Reveal { .. } = kind {
             let opened = driver.open(&inputs)?;
             let selected = Self::select_requests(&opened, batch)?;
-            return Self::store_batch_results(batch, &selected, Bank::Public, public);
+            return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
         if let PrecomputeKind::Poseidon2 { t } = kind {
             let selected = driver.poseidon2_requested_traces(
@@ -360,18 +341,17 @@ impl Machine {
                 &batch.result_requests,
                 &batch.result_offsets,
             )?;
-            return Self::store_batch_results_owned(batch, selected, Bank::Shared, shared);
+            return Self::store_batch_results(batch, selected, Bank::Shared, shared);
         }
         let results = match kind {
             PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
             PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
-            PrecomputeKind::IsEqual => driver.is_equal_traces(&inputs)?,
             PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
             PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
         };
         let selected = Self::select_requests(&results, batch)?;
-        Self::store_batch_results(batch, &selected, Bank::Shared, shared)
+        Self::store_batch_results(batch, selected, Bank::Shared, shared)
     }
 
     fn run_is_zero_reveal_batch<F: PrimeField, D: VmDriver<F>>(
@@ -418,9 +398,6 @@ impl Machine {
                 .iter()
                 .zip(&batch.result_targets[lo..hi])
             {
-                if target.slot == u32::MAX {
-                    continue;
-                }
                 match logical {
                     0 => {
                         eyre::ensure!(target.bank == Bank::Shared, "IsZero.out must target Shared");
@@ -442,10 +419,12 @@ impl Machine {
     }
 
     fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
-        use super::gadgets::{aliascheck, isequal, iszero, num2bits, poseidon2};
+        use super::gadgets::{aliascheck, iszero, num2bits};
 
         Ok(match kind {
-            PrecomputeKind::Poseidon2 { t } => poseidon2::plain_trace(t, inputs)?,
+            PrecomputeKind::Poseidon2 { .. } => {
+                unreachable!("public Poseidon2 takes the requested-trace path in run_batch")
+            }
             PrecomputeKind::Num2Bits { n } => inputs
                 .iter()
                 .flat_map(|&x| num2bits::plain_trace(x, n))
@@ -454,7 +433,6 @@ impl Machine {
                 .iter()
                 .flat_map(|&x| iszero::plain_trace(x))
                 .collect(),
-            PrecomputeKind::IsEqual => isequal::plain_trace(inputs)?,
             PrecomputeKind::AliasCheck => {
                 eyre::ensure!(
                     inputs.len().is_multiple_of(254),
@@ -473,7 +451,7 @@ impl Machine {
     }
 
     /// Selects each site's witness-live logical result slots out of a gadget's full per-site
-    /// output, flattening site-major. A temporary bridge (see `docs/ARCHITECTURE.md`,
+    /// output, flattening site-major. A temporary bridge (,
     /// "Precomputation"): gadgets other than Poseidon2 still compute and return their *full*
     /// per-site trace (`num_outputs + num_intermediates` values), and this filters the
     /// `PrecomputeBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
@@ -508,36 +486,7 @@ impl Machine {
         Ok(selected)
     }
 
-    fn store_batch_results<T: Clone>(
-        batch: &PrecomputeBatch,
-        results: &[T],
-        expected_bank: Bank,
-        destination: &mut [T],
-    ) -> eyre::Result<()> {
-        eyre::ensure!(
-            results.len() == batch.result_targets.len(),
-            "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
-             slot)",
-            batch.kind,
-            results.len(),
-            batch.result_targets.len()
-        );
-        for (target, value) in batch.result_targets.iter().zip(results) {
-            eyre::ensure!(
-                target.bank == expected_bank,
-                "precompute batch ({:?}) result targets mixed banks unexpectedly",
-                batch.kind
-            );
-            if target.slot != u32::MAX {
-                destination[target.slot as usize] = value.clone();
-            }
-        }
-        Ok(())
-    }
-
-    /// Poseidon2 already returns exactly the CSR-requested values, so consume that vector while
-    /// scattering it into bank slots instead of cloning it through the generic full-trace bridge.
-    fn store_batch_results_owned<T>(
+    fn store_batch_results<T>(
         batch: &PrecomputeBatch,
         results: Vec<T>,
         expected_bank: Bank,
@@ -557,9 +506,7 @@ impl Machine {
                 "precompute batch ({:?}) result targets mixed banks unexpectedly",
                 batch.kind
             );
-            if target.slot != u32::MAX {
-                destination[target.slot as usize] = value;
-            }
+            destination[target.slot as usize] = value;
         }
         Ok(())
     }
@@ -595,7 +542,6 @@ mod tests {
 
     impl VmDriver<Fr> for PanicDriver {
         type Share = Fr;
-        type Local = Fr;
 
         fn begin_run(&mut self) -> eyre::Result<()> {
             match self.lifecycle {
@@ -643,11 +589,7 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn mul_local(&mut self, _a: &Fr, _b: &Fr) -> Fr {
-            unreachable!("minimal panic fixture has no instructions")
-        }
-
-        fn reshare(&mut self, _locals: &[Fr]) -> eyre::Result<Vec<Fr>> {
+        fn mul_vec(&mut self, _a: &[Fr], _b: &[Fr]) -> eyre::Result<Vec<Fr>> {
             unreachable!("minimal panic fixture has no instructions")
         }
 
@@ -655,10 +597,12 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn poseidon2_traces(
+        fn poseidon2_requested_traces(
             &mut self,
             _t: usize,
             _states: &[Fr],
+            _result_requests: &[u32],
+            _result_offsets: &[u32],
         ) -> eyre::Result<Vec<Fr>> {
             unreachable!("minimal panic fixture has no instructions")
         }
@@ -675,7 +619,7 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn is_equal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+        fn is_zero_reveal_traces(&mut self, _inputs: &[Fr]) -> eyre::Result<Vec<(Fr, Fr, Fr)>> {
             unreachable!("minimal panic fixture has no instructions")
         }
 
