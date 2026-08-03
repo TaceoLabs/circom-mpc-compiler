@@ -1,5 +1,17 @@
 # circom-mpc-compiler
 
+## Security boundary and deferred hardening
+
+The current deployment is focused on Merces and treats the circuit source, compiled VM program,
+and zkey as trusted, authentic, mutually matching artifacts. MPC public inputs and every
+`TACEO_REVEAL` site are likewise reviewed as part of that artifact set.
+
+Future hardening should authenticate and bind the program, circuit, and zkey; store and check the
+exact public-witness count; encode an auditable reveal manifest; and perform semantic bytecode
+validation (including initialization, unique input bindings, and schedule consumption). Cleartext
+checking of `assert(...)`, `===`, and Num2Bits range constraints is also deferred: MPC execution
+cannot check secret predicates without changing the protocol or revealing information.
+
 Compiles [circom](https://github.com/iden3/circom) circuits into a witness-extension procedure, then
 runs that procedure for real: a plain (in-the-clear) reference interpreter, and a 3-party rep3 MPC
 driver that produces a co-groth16 proof over the shared witness. It is not a proving-system compiler
