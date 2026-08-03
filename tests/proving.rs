@@ -31,7 +31,7 @@ use common::{circuit_path, inputs_from_test_name, libs_path, manifest_dir};
 fn compiled(name: &str) -> Program<Fr> {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
-    CoCircomCompiler::<Bn254>::compile(circuit_path(name), config)
+    CoCircomCompiler::compile(circuit_path(name), config)
         .unwrap_or_else(|e| panic!("{name} must compile: {e}"))
 }
 
@@ -94,53 +94,63 @@ fn prove_and_verify(name: &str) {
         let values = &values;
         let matrices = &matrices;
         let pkey = &pkey;
-        let results: Vec<(Vec<Rep3PrimeFieldShare<Fr>>, _, Vec<Fr>)> = std::thread::scope(|scope| {
-            extension
-                .into_iter()
-                .zip(proving0)
-                .zip(proving1)
-                .enumerate()
-                .map(|(party, ((ext, p0), p1))| {
-                    let shares = &shares;
-                    scope.spawn(move || {
-                        let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
-                        let mut driver =
-                            Rep3Driver::<Fr, _>::new_for_run(&ext, &mut state, program).unwrap();
-                        let mut next = 0;
-                        let inputs = program.classify_inputs(values, |_v| {
-                            let s = shares[next][party];
-                            next += 1;
-                            s
-                        });
-                        let witness = Machine::run(program, &mut driver, &inputs).unwrap();
-                        let full_witness = witness.clone();
-                        let (public_inputs, secret) =
-                            split_witness(&mut driver, witness, n_pub).unwrap();
-                        let shared = co_circom_types::SharedWitness {
-                            public_inputs: public_inputs.clone(),
-                            witness: secret,
-                        };
-                        let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
-                            &p0, &p1, pkey, matrices, shared,
-                        )
-                        .unwrap();
-                        (full_witness, proof, public_inputs)
+        let results: Vec<(Vec<Rep3PrimeFieldShare<Fr>>, _, Vec<Fr>)> =
+            std::thread::scope(|scope| {
+                extension
+                    .into_iter()
+                    .zip(proving0)
+                    .zip(proving1)
+                    .enumerate()
+                    .map(|(party, ((ext, p0), p1))| {
+                        let shares = &shares;
+                        scope.spawn(move || {
+                            let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
+                            let mut driver =
+                                Rep3Driver::<Fr, _>::new_for_run(&ext, &mut state, program)
+                                    .unwrap();
+                            let mut next = 0;
+                            let inputs = program.classify_inputs(values, |_v| {
+                                let s = shares[next][party];
+                                next += 1;
+                                s
+                            });
+                            let witness = Machine::run(program, &mut driver, &inputs).unwrap();
+                            let full_witness = witness.clone();
+                            let (public_inputs, secret) =
+                                split_witness(&mut driver, witness, n_pub).unwrap();
+                            let shared = co_circom_types::SharedWitness {
+                                public_inputs: public_inputs.clone(),
+                                witness: secret,
+                            };
+                            let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
+                                &p0, &p1, pkey, matrices, shared,
+                            )
+                            .unwrap();
+                            (full_witness, proof, public_inputs)
+                        })
                     })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect()
-        });
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect()
+            });
 
-        let [(w0, _, _), (w1, _, _), (w2, _, _)]: [_; 3] =
-            results.clone().try_into().unwrap_or_else(|_| panic!("{name}: expected 3 parties"));
+        let [(w0, _, _), (w1, _, _), (w2, _, _)]: [_; 3] = results
+            .clone()
+            .try_into()
+            .unwrap_or_else(|_| panic!("{name}: expected 3 parties"));
         let rep3 = combine_field_elements(&w0, &w1, &w2);
-        assert_eq!(rep3, plain, "{name}: input {i}: rep3 reconstruction disagrees with plain");
+        assert_eq!(
+            rep3, plain,
+            "{name}: input {i}: rep3 reconstruction disagrees with plain"
+        );
 
         let (_, proof, public) = &results[0];
         for (_, _, other) in &results[1..] {
-            assert_eq!(public, other, "{name}: input {i}: parties disagree on the public inputs");
+            assert_eq!(
+                public, other,
+                "{name}: input {i}: parties disagree on the public inputs"
+            );
         }
         let vk = pkey.vk.clone();
         Groth16::<Bn254>::verify(&vk, proof, &public[1..]).unwrap_or_else(|e| {
@@ -193,6 +203,9 @@ fn plain_witness_splits_at_the_zkey_boundary() {
     let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
 
     let (public, secret) = split_witness(&mut driver, witness.clone(), n_pub).unwrap();
-    assert_eq!(public, vec![Fr::from(1u64), Fr::from(42u64), Fr::from(7u64)]);
+    assert_eq!(
+        public,
+        vec![Fr::from(1u64), Fr::from(42u64), Fr::from(7u64)]
+    );
     assert_eq!(public.len() + secret.len(), witness.len());
 }

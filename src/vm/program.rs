@@ -235,21 +235,37 @@ impl<F: PrimeField> Program<F> {
             multiplication_rounds: self.rounds.len(),
             multiplication_elements: self.rounds.iter().map(|round| round.len as usize).sum(),
             precompute_batches: self.precompute_batches.len(),
-            precompute_sites: self.precompute_batches.iter().map(|batch| batch.sites).sum(),
-            shared_precompute_batches: self.precompute_batches.iter().filter(|batch| {
-                batch.input_slots.iter().any(|input| input.bank == Bank::Shared)
-            }).count(),
-            fused_is_zero_reveal_batches: self.precompute_batches.iter().filter(|batch| {
-                batch.kind == BatchKind::IsZeroReveal
-            }).count(),
-            public_precompute_results: self.precompute_batches.iter().flat_map(|batch| {
-                &batch.result_targets
-            }).filter(|target| target.bank == Bank::Public).count(),
+            precompute_sites: self
+                .precompute_batches
+                .iter()
+                .map(|batch| batch.sites)
+                .sum(),
+            shared_precompute_batches: self
+                .precompute_batches
+                .iter()
+                .filter(|batch| {
+                    batch
+                        .input_slots
+                        .iter()
+                        .any(|input| input.bank == Bank::Shared)
+                })
+                .count(),
+            fused_is_zero_reveal_batches: self
+                .precompute_batches
+                .iter()
+                .filter(|batch| batch.kind == BatchKind::IsZeroReveal)
+                .count(),
+            public_precompute_results: self
+                .precompute_batches
+                .iter()
+                .flat_map(|batch| &batch.result_targets)
+                .filter(|target| target.bank == Bank::Public)
+                .count(),
         }
     }
     /// Derives the number of fresh Poseidon2 masks one execution needs. The budget is intentionally
     /// not serialized: it is a checked function of executable precompute instructions and their
-    /// version-6 batch table. Walking instructions (rather than the side table alone) ignores
+    /// version-one batch table. Walking instructions (rather than the side table alone) ignores
     /// unreachable entries and counts a deliberately repeated batch reference once per execution.
     #[cfg(feature = "rep3")]
     pub(crate) fn poseidon2_mask_budget(&self) -> eyre::Result<usize> {
@@ -297,7 +313,10 @@ impl<F: PrimeField> Program<F> {
                 Bank::Shared => self.slots.shared,
                 Bank::Local => self.slots.local,
             };
-            eyre::ensure!(slot < limit, "{what} references {bank:?} slot {slot}, but bank size is {limit}");
+            eyre::ensure!(
+                slot < limit,
+                "{what} references {bank:?} slot {slot}, but bank size is {limit}"
+            );
             Ok(())
         };
 
@@ -314,11 +333,17 @@ impl<F: PrimeField> Program<F> {
             self.num_inputs
         );
         for (input, &bank) in self.input_domains.iter().enumerate() {
-            eyre::ensure!(bank != Bank::Local, "input {input} has invalid Local domain");
+            eyre::ensure!(
+                bank != Bank::Local,
+                "input {input} has invalid Local domain"
+            );
         }
         for binding in &self.inputs {
             let input = binding.input_index as usize;
-            eyre::ensure!(input < self.num_inputs, "input binding index {input} is out of range");
+            eyre::ensure!(
+                input < self.num_inputs,
+                "input binding index {input} is out of range"
+            );
             eyre::ensure!(
                 binding.bank == self.input_domains[input],
                 "input {input} binding bank {:?} disagrees with domain {:?}",
@@ -379,8 +404,14 @@ impl<F: PrimeField> Program<F> {
             let result_end = result_start
                 .checked_add(len)
                 .ok_or_else(|| eyre::eyre!("round {index} result range overflows"))?;
-            eyre::ensure!(operand_end <= self.round_operands.len(), "round {index} operand range is out of bounds");
-            eyre::ensure!(result_end <= self.round_results.len(), "round {index} result range is out of bounds");
+            eyre::ensure!(
+                operand_end <= self.round_operands.len(),
+                "round {index} operand range is out of bounds"
+            );
+            eyre::ensure!(
+                result_end <= self.round_results.len(),
+                "round {index} result range is out of bounds"
+            );
             for &slot in &self.round_operands[operand_start..operand_end] {
                 check_slot(Bank::Local, slot, "round operand")?;
             }
@@ -415,12 +446,18 @@ impl<F: PrimeField> Program<F> {
                 batch.input_slots.len()
             );
             for input in &batch.input_slots {
-                eyre::ensure!(input.bank != Bank::Local, "precompute batch {index} has a Local input");
+                eyre::ensure!(
+                    input.bank != Bank::Local,
+                    "precompute batch {index} has a Local input"
+                );
                 check_slot(input.bank, input.slot, "precompute input")?;
             }
             if batch.kind == BatchKind::IsZeroReveal {
                 eyre::ensure!(
-                    batch.input_slots.iter().all(|input| input.bank == Bank::Shared),
+                    batch
+                        .input_slots
+                        .iter()
+                        .all(|input| input.bank == Bank::Shared),
                     "fused IsZeroReveal batch {index} must have only Shared inputs"
                 );
                 eyre::ensure!(
@@ -443,7 +480,10 @@ impl<F: PrimeField> Program<F> {
             eyre::ensure!(
                 batch.result_offsets.first() == Some(&0)
                     && batch.result_offsets.last().copied() == Some(request_count)
-                    && batch.result_offsets.windows(2).all(|window| window[0] <= window[1]),
+                    && batch
+                        .result_offsets
+                        .windows(2)
+                        .all(|window| window[0] <= window[1]),
                 "precompute batch {index} has invalid CSR offsets"
             );
             eyre::ensure!(
@@ -458,31 +498,46 @@ impl<F: PrimeField> Program<F> {
             };
             let normal_result_bank = match batch.kind {
                 BatchKind::Precompute(PrecomputeKind::Reveal { .. }) => Some(Bank::Public),
-                BatchKind::Precompute(_) => Some(if batch
-                    .input_slots
-                    .iter()
-                    .any(|input| input.bank == Bank::Shared)
-                {
-                    Bank::Shared
-                } else {
-                    Bank::Public
-                }),
+                BatchKind::Precompute(_) => Some(
+                    if batch
+                        .input_slots
+                        .iter()
+                        .any(|input| input.bank == Bank::Shared)
+                    {
+                        Bank::Shared
+                    } else {
+                        Bank::Public
+                    },
+                ),
                 BatchKind::IsZeroReveal => None,
             };
             for site in 0..batch.sites {
                 let lo = batch.result_offsets[site] as usize;
                 let hi = batch.result_offsets[site + 1] as usize;
-                eyre::ensure!(hi <= batch.result_requests.len(), "precompute batch {index} CSR row is out of bounds");
+                eyre::ensure!(
+                    hi <= batch.result_requests.len(),
+                    "precompute batch {index} CSR row is out of bounds"
+                );
                 let requests = &batch.result_requests[lo..hi];
                 eyre::ensure!(
                     requests.windows(2).all(|window| window[0] < window[1]),
                     "precompute batch {index} site {site} requests are not strictly ascending"
                 );
                 for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
-                    eyre::ensure!((*request as usize) < capacity, "precompute batch {index} request {request} exceeds capacity {capacity}");
-                    eyre::ensure!(target.bank != Bank::Local, "precompute batch {index} targets Local bank");
+                    eyre::ensure!(
+                        (*request as usize) < capacity,
+                        "precompute batch {index} request {request} exceeds capacity {capacity}"
+                    );
+                    eyre::ensure!(
+                        target.bank != Bank::Local,
+                        "precompute batch {index} targets Local bank"
+                    );
                     let expected_bank = normal_result_bank.unwrap_or({
-                        if *request == 2 { Bank::Public } else { Bank::Shared }
+                        if *request == 2 {
+                            Bank::Public
+                        } else {
+                            Bank::Shared
+                        }
                     });
                     eyre::ensure!(
                         target.bank == expected_bank,
@@ -494,13 +549,19 @@ impl<F: PrimeField> Program<F> {
             }
         }
 
-        eyre::ensure!(!self.witness_sources.is_empty(), "program has an empty witness");
+        eyre::ensure!(
+            !self.witness_sources.is_empty(),
+            "program has an empty witness"
+        );
         eyre::ensure!(
             self.witness_sources.first() == Some(&WitnessSource::One),
             "witness position zero must be the reserved constant one"
         );
         eyre::ensure!(
-            self.witness_sources.iter().skip(1).all(|source| *source != WitnessSource::One),
+            self.witness_sources
+                .iter()
+                .skip(1)
+                .all(|source| *source != WitnessSource::One),
             "reserved constant-one source appears outside witness position zero"
         );
         for source in &self.witness_sources {
@@ -522,7 +583,7 @@ impl<F: PrimeField> Program<F> {
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::{Bn254, Fr};
+    use ark_bn254::Fr;
 
     use crate::{CoCircomCompiler, CompilerConfig};
 
@@ -534,14 +595,15 @@ mod tests {
         config
             .link_library
             .push(format!("{root}/circuits/libs/").into());
-        CoCircomCompiler::<Bn254>::compile(format!("{root}/circuits/{circuit}.circom"), config)
-            .unwrap()
+        CoCircomCompiler::compile(format!("{root}/circuits/{circuit}.circom"), config).unwrap()
     }
 
     #[test]
     fn accepts_a_freshly_compiled_program() {
         program("multiplier2").validate_encoding().unwrap();
-        program("precomputation_iszero_test").validate_encoding().unwrap();
+        program("precomputation_iszero_test")
+            .validate_encoding()
+            .unwrap();
     }
 
     #[test]

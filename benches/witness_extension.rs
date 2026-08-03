@@ -6,7 +6,7 @@
 //! every measured iteration includes `Rep3State` setup, fresh Poseidon2 preprocessing, and online
 //! execution.
 
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use circom_mpc_compiler::fixtures::{self, rep3::run_witness_with_shares, rep3::share_inputs};
@@ -76,7 +76,7 @@ fn config(case: &Case) -> CompilerConfig {
 /// Compiles a case and builds its inputs, printing the round shape so a timing can be read against
 /// it. Compilation is deliberately outside the measured closure.
 fn prepare(case: &Case) -> (Program<Fr>, Vec<Fr>) {
-    let graph = CoCircomCompiler::<Bn254>::parse(case.path.clone(), config(case))
+    let graph = CoCircomCompiler::parse(case.path.clone(), config(case))
         .unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let summary = graph.mpc_summary();
     let values = match case.merces_scenario {
@@ -84,7 +84,9 @@ fn prepare(case: &Case) -> (Program<Fr>, Vec<Fr>) {
             .and_then(|s| s.values(&graph.input_list))
             .unwrap_or_else(|e| panic!("{}: {e}", case.name)),
         // Arbitrary but non-zero, so nothing degenerates into a trivial product.
-        None => (0..graph.num_inputs).map(|i| Fr::from(i as u64 + 1)).collect(),
+        None => (0..graph.num_inputs)
+            .map(|i| Fr::from(i as u64 + 1))
+            .collect(),
     };
     let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{}: {e}", case.name));
     println!(
@@ -120,7 +122,9 @@ fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("witness_extension");
     // Witness entries produced, so throughput is comparable across very different circuit sizes.
     for (case, program, values) in &prepared {
-        group.throughput(Throughput::Elements(program.statistics().witness_values as u64));
+        group.throughput(Throughput::Elements(
+            program.statistics().witness_values as u64,
+        ));
 
         group.bench_with_input(BenchmarkId::new("plain", case.name), &(), |b, ()| {
             b.iter(|| run_plain(program, values));

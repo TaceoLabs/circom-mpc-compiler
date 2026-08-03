@@ -20,15 +20,15 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use ark_ff::UniformRand;
-use clap::Parser;
+use circom_mpc_compiler::fixtures;
 use circom_mpc_compiler::vm::counting_net::CountingNet;
 use circom_mpc_compiler::vm::driver::rep3::Rep3Driver;
 use circom_mpc_compiler::vm::program::Bank;
 use circom_mpc_compiler::vm::{codegen, Machine};
-use circom_mpc_compiler::fixtures;
 use circom_mpc_compiler::{CoCircomCompiler, OptLevel};
+use clap::Parser;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::bytes::Bytes;
@@ -165,16 +165,24 @@ fn run(args: Cli) -> eyre::Result<()> {
     warmup(&net, 1 << 20)?;
     let mut state = Rep3State::new(&net, A2BType::default())?;
     barrier(&net)?;
-    println!("party {my_id}: network established + warmed up in {:.2?}", t.elapsed());
+    println!(
+        "party {my_id}: network established + warmed up in {:.2?}",
+        t.elapsed()
+    );
     let net = CountingNet::new(net);
 
     let mut results = Vec::with_capacity(args.batches.len());
     for n in &args.batches {
-        results.push(bench_batch(my_id, &net, &mut state, *n, opt, args.runs, args.seed)?);
+        results.push(bench_batch(
+            my_id, &net, &mut state, *n, opt, args.runs, args.seed,
+        )?);
     }
 
     println!("party {my_id}: summary");
-    println!("party {my_id}: {:>6}  {:>10}  {:>10}  {:>10}  {:>10}  {:>12}  {:>12}", "N", "min", "median", "max", "total rnds", "total sent", "total recv");
+    println!(
+        "party {my_id}: {:>6}  {:>10}  {:>10}  {:>10}  {:>10}  {:>12}  {:>12}",
+        "N", "min", "median", "max", "total rnds", "total sent", "total recv"
+    );
     for r in &results {
         println!(
             "party {my_id}: {:>6}  {:>10.2?}  {:>10.2?}  {:>10.2?}  {:>10}  {:>12}  {:>12}",
@@ -205,7 +213,7 @@ fn bench_batch(
 
     println!("party {my_id}: batch {n}: circuit {path} (opt={opt:?})");
     let t = Instant::now();
-    let graph = CoCircomCompiler::<Bn254>::parse(path, config)?;
+    let graph = CoCircomCompiler::parse(path, config)?;
     let summary = graph.mpc_summary();
     println!("party {my_id}: batch {n}: parse   {:.2?}", t.elapsed());
     println!(
@@ -235,7 +243,9 @@ fn bench_batch(
     // the same share triples from the same seed, then keeps only its own index - no share
     // distribution, no extra network round.
     let mut rng = StdRng::seed_from_u64(seed);
-    let values: Vec<Fr> = (0..program.statistics().inputs).map(|_| Fr::rand(&mut rng)).collect();
+    let values: Vec<Fr> = (0..program.statistics().inputs)
+        .map(|_| Fr::rand(&mut rng))
+        .collect();
     let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = program
         .input_domains()
         .iter()

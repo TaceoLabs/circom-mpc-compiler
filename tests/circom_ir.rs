@@ -1,4 +1,4 @@
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::Machine;
 use circom_mpc_compiler::CoCircomCompiler;
@@ -27,8 +27,7 @@ macro_rules! witness_extension_test_plain {
                     config.link_library.push(libs_path());
                     config.opt_level = opt_level;
                     let program =
-                        CoCircomCompiler::<Bn254>::compile(circuit_path(stringify!($name)), config)
-                            .unwrap();
+                        CoCircomCompiler::compile(circuit_path(stringify!($name)), config).unwrap();
 
                     assert_eq!(program.statistics().inputs, input.len());
 
@@ -63,8 +62,7 @@ fn repeated_dynamic_operands_are_safe_at_o2() {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
     config.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("repeated_operands_o2"), config)
-        .unwrap();
+    let program = CoCircomCompiler::compile(circuit_path("repeated_operands_o2"), config).unwrap();
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
     assert_eq!(witness[1], Fr::from(436u64));
@@ -74,7 +72,7 @@ fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
     config.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::<Bn254>::compile(circuit_path(circuit), config).unwrap();
+    let program = CoCircomCompiler::compile(circuit_path(circuit), config).unwrap();
     assert_eq!(program.statistics().inputs, 0);
     let mut driver = PlainDriver;
     Machine::run(&program, &mut driver, &[]).unwrap()

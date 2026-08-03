@@ -23,7 +23,7 @@ use circom_mpc_compiler::vm::witness::split_witness;
 use circom_mpc_compiler::vm::{codegen, Machine, Program};
 use circom_mpc_compiler::CoCircomCompiler;
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{Rep3State};
+use mpc_core::protocols::rep3::Rep3State;
 use mpc_net::local::LocalNetwork;
 
 fn manifest_dir() -> &'static str {
@@ -35,7 +35,7 @@ fn manifest_dir() -> &'static str {
 /// codegen depends on the scenario's input values.
 fn compiled(main: &str) -> &'static (Program<Fr>, InputList) {
     fn build(main: &str) -> (Program<Fr>, InputList) {
-        let graph = CoCircomCompiler::<Bn254>::parse(merces_main_path(main), merces_config())
+        let graph = CoCircomCompiler::parse(merces_main_path(main), merces_config())
             .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
         let input_list = graph.input_list.clone();
         let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"));
@@ -92,7 +92,12 @@ fn transfer_arity4_batch1_all_scenarios_run_end_to_end() {
 
 #[test]
 fn transfer_arity4_batch8_all_scenarios_run_end_to_end() {
-    for scenario in ["full_batch", "partial_batch", "multi_withdraw", "invalid_slot"] {
+    for scenario in [
+        "full_batch",
+        "partial_batch",
+        "multi_withdraw",
+        "invalid_slot",
+    ] {
         witness_extension_agrees("transfer_arity4_batch8", scenario);
     }
 }
@@ -109,7 +114,8 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
         let (program, _) = compiled(main);
         let values = scenario_values(main, scenario);
         let (_, preprocessing, online) = run_witness_counted(program, &values);
-        let combined: [usize; 3] = std::array::from_fn(|party| preprocessing[party] + online[party]);
+        let combined: [usize; 3] =
+            std::array::from_fn(|party| preprocessing[party] + online[party]);
 
         assert_eq!(preprocessing, [3, 3, 3], "{main}: preprocessing rounds");
         assert_eq!(online, [69, 71, 71], "{main}: online rounds");
@@ -133,7 +139,10 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
         let (program, _) = compiled(main);
         let sites = program.statistics().precompute_sites;
         let shared_batches = program.statistics().shared_precompute_batches;
-        assert!(sites > 50, "{main}: expected a site-heavy circuit, got {sites}");
+        assert!(
+            sites > 50,
+            "{main}: expected a site-heavy circuit, got {sites}"
+        );
         assert!(
             shared_batches * 4 < sites,
             "{main}: {sites} sites collapsed into only {shared_batches} MPC-driver batches - \
@@ -149,7 +158,7 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
 /// config knob routes around.
 #[test]
 fn client_main_is_still_unsupported() {
-    match CoCircomCompiler::<Bn254>::parse(
+    match CoCircomCompiler::parse(
         merces_main_path("transfer_client_compressed"),
         merces_config(),
     ) {
@@ -253,15 +262,17 @@ fn proves_and_verifies(main: &str, scenario: &str) {
                         s
                     });
                     let witness = Machine::run(program, &mut driver, &inputs).unwrap();
-                    let (public_inputs, secret) = split_witness(&mut driver, witness, n_pub).unwrap();
+                    let (public_inputs, secret) =
+                        split_witness(&mut driver, witness, n_pub).unwrap();
                     let shared = co_circom_types::SharedWitness {
                         public_inputs: public_inputs.clone(),
                         witness: secret,
                     };
                     let public = public_inputs;
-                    let proof =
-                        Rep3CoGroth16::prove::<_, CircomReduction>(&p0, &p1, pkey, matrices, shared)
-                            .unwrap();
+                    let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
+                        &p0, &p1, pkey, matrices, shared,
+                    )
+                    .unwrap();
                     (proof, public)
                 })
             })
@@ -274,7 +285,10 @@ fn proves_and_verifies(main: &str, scenario: &str) {
     // Every party must derive the same public inputs, and any party's proof must verify.
     let (proof, public) = &proofs[0];
     for (_, other) in &proofs[1..] {
-        assert_eq!(public, other, "{main}/{scenario}: parties disagree on the public inputs");
+        assert_eq!(
+            public, other,
+            "{main}/{scenario}: parties disagree on the public inputs"
+        );
     }
     let vk = pkey.vk.clone();
     Groth16::<Bn254>::verify(&vk, proof, &public[1..]).unwrap_or_else(|e| {
@@ -299,7 +313,12 @@ fn transfer_arity4_batch1_all_scenarios_prove_and_verify() {
 #[test]
 #[ignore = "178 MB zkey, 139k-entry witness x4 - minutes and several GB of RAM; run with --ignored"]
 fn transfer_arity4_batch8_all_scenarios_prove_and_verify() {
-    for scenario in ["full_batch", "partial_batch", "multi_withdraw", "invalid_slot"] {
+    for scenario in [
+        "full_batch",
+        "partial_batch",
+        "multi_withdraw",
+        "invalid_slot",
+    ] {
         proves_and_verifies("transfer_arity4_batch8", scenario);
     }
 }

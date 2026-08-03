@@ -7,7 +7,7 @@
 //! iterations (unlike `witness_extension.rs`, which models a fresh connection per run); each
 //! iteration still prepares a fresh program-wide Poseidon2 pool before the online VM.
 
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::StdRng;
@@ -35,8 +35,8 @@ const SEED: u64 = 0;
 /// closure - parsing batch32 alone takes seconds.
 fn prepare(n: usize) -> (Program<Fr>, Vec<Fr>) {
     let path = merces_main_path(&format!("transfer_arity4_batch{n}"));
-    let graph = CoCircomCompiler::<Bn254>::parse(path, merces_config())
-        .unwrap_or_else(|e| panic!("batch{n}: {e}"));
+    let graph =
+        CoCircomCompiler::parse(path, merces_config()).unwrap_or_else(|e| panic!("batch{n}: {e}"));
     let summary = graph.mpc_summary();
     let mut rng = StdRng::seed_from_u64(SEED);
     let values: Vec<Fr> = (0..graph.num_inputs).map(|_| Fr::rand(&mut rng)).collect();
@@ -90,8 +90,7 @@ fn run_rep3(
             .enumerate()
             .map(|(party, (net, state))| {
                 scope.spawn(move || {
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(net, state, program).unwrap();
+                    let mut driver = Rep3Driver::<Fr, _>::new_for_run(net, state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];

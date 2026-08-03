@@ -3,7 +3,7 @@
 //! through a `TACEO_PRECOMPUTATION_*` wrapper or (for `precomputation_unsupported_gadget_test`'s
 //! `Doubler`) not recognized at all.
 
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use circom_mpc_compiler::ir::PrecomputeKind;
 use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::vm::Machine;
@@ -61,7 +61,7 @@ const WRAPPERS: &[Wrapper] = &[
 #[test]
 fn extract_yields_one_site_per_wrapper() {
     for w in WRAPPERS {
-        let graph = CoCircomCompiler::<Bn254>::parse(circuit_path(w.circuit), config())
+        let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let sites = graph.precompute_sites();
         assert_eq!(
@@ -91,7 +91,7 @@ fn extract_yields_one_site_per_wrapper() {
 /// `merkle_root_4.circom` is in with its `Arity4CMux`.
 #[test]
 fn unrecognized_gadget_compiles_its_body() {
-    let graph = CoCircomCompiler::<Bn254>::parse(
+    let graph = CoCircomCompiler::parse(
         circuit_path("precomputation_unsupported_gadget_test"),
         config(),
     )
@@ -102,7 +102,7 @@ fn unrecognized_gadget_compiles_its_body() {
     );
 
     // And the compiled body is correct: Doubler(in) = in + in.
-    let program = CoCircomCompiler::<Bn254>::compile(
+    let program = CoCircomCompiler::compile(
         circuit_path("precomputation_unsupported_gadget_test"),
         config(),
     )
@@ -117,14 +117,17 @@ fn unrecognized_gadget_compiles_its_body() {
 #[test]
 fn signal_span_matches_independent_total() {
     for w in WRAPPERS {
-        let graph = CoCircomCompiler::<Bn254>::parse(circuit_path(w.circuit), config())
+        let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let site = &graph.precompute_sites()[0];
         // main *is* the wrapper for each of these circuits, so the whole circuit's signal count
         // (minus the reserved constant-1 slot) must equal the wrapper's own I/O plus the site's
         // full result span.
-        let expected =
-            graph.num_inputs + graph.num_outputs + site.num_inputs + site.num_outputs + site.num_intermediates;
+        let expected = graph.num_inputs
+            + graph.num_outputs
+            + site.num_inputs
+            + site.num_outputs
+            + site.num_intermediates;
         assert_eq!(graph.num_signals - 1, expected, "{}", w.circuit);
     }
 }
@@ -136,7 +139,7 @@ fn extract_mode_runs_end_to_end_through_the_plain_driver() {
     // completion. This is a smoke test only (all-zero inputs) - see tests/proving.rs's prove+verify
     // tests for a real value comparison.
     for w in WRAPPERS {
-        let program = CoCircomCompiler::<Bn254>::compile(circuit_path(w.circuit), config())
+        let program = CoCircomCompiler::compile(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let values = vec![Fr::from(0u64); program.statistics().inputs];
         let inputs = program.classify_inputs(&values, |v| v);
@@ -155,8 +158,7 @@ fn extract_mode_runs_end_to_end_through_the_plain_driver() {
 #[test]
 fn chained_same_kind_sites_are_staged_into_separate_batches() {
     let graph =
-        CoCircomCompiler::<Bn254>::parse(circuit_path("precomputation_staged_test"), config())
-            .unwrap();
+        CoCircomCompiler::parse(circuit_path("precomputation_staged_test"), config()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.precompute_sites, 2);
     assert_eq!(
@@ -166,8 +168,7 @@ fn chained_same_kind_sites_are_staged_into_separate_batches() {
 
     // And it runs: a*b == 0 for these inputs, so the first IsZero returns 1.
     let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_staged_test"), config())
-            .unwrap();
+        CoCircomCompiler::compile(circuit_path("precomputation_staged_test"), config()).unwrap();
     let values = vec![Fr::from(0u64), Fr::from(7u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut driver = PlainDriver;
@@ -181,8 +182,7 @@ fn chained_same_kind_sites_are_staged_into_separate_batches() {
 #[test]
 fn independent_same_kind_sites_share_one_batch() {
     let graph =
-        CoCircomCompiler::<Bn254>::parse(circuit_path("precomputation_iszero_test"), config())
-            .unwrap();
+        CoCircomCompiler::parse(circuit_path("precomputation_iszero_test"), config()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.precompute_sites, 1);
     assert_eq!(summary.precompute_batches, 1);
@@ -190,11 +190,9 @@ fn independent_same_kind_sites_share_one_batch() {
 
 #[test]
 fn num2bits_zero_returns_an_empty_trace_without_panicking() {
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_num2bits_zero_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_num2bits_zero_test"), config())
+            .unwrap();
     let values = [Fr::from(0u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
@@ -205,15 +203,15 @@ fn num2bits_zero_returns_an_empty_trace_without_panicking() {
 fn all_public_gadgets_stay_public_through_downstream_multiplication() {
     let mut cfg = config();
     cfg.opt_level = circom_mpc_compiler::OptLevel::O2;
-    let graph = CoCircomCompiler::<Bn254>::parse(circuit_path("precomputation_public_test"), cfg.clone())
-        .unwrap();
+    let graph =
+        CoCircomCompiler::parse(circuit_path("precomputation_public_test"), cfg.clone()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.rounds, 0, "{summary:?}");
     assert_eq!(summary.local_muls, 0, "{summary:?}");
     assert_eq!(summary.public_muls, 1, "{summary:?}");
 
-    let program = CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
-        .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_public_test"), cfg).unwrap();
     assert_eq!(program.statistics().precompute_batches, 1);
     assert!(program.statistics().public_precompute_results > 0);
     let values = [Fr::from(0u64), Fr::from(9u64)];

@@ -1,6 +1,6 @@
-use std::{marker::PhantomData, path::PathBuf};
+use std::path::PathBuf;
 
-use ark_ec::pairing::Pairing;
+use ark_bn254::{Bn254, Fr};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,13 +57,11 @@ impl Default for CompilerConfig {
     }
 }
 
-/// Namespace for the two entry points, parameterized by the curve.
-pub struct CoCircomCompiler<P: Pairing> {
-    phantom_data: PhantomData<P>,
-}
+/// Namespace for the BN254 compiler entry points.
+pub struct CoCircomCompiler;
 
-impl<P: Pairing> CoCircomCompiler<P> {
-    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph<P::ScalarField>>
+impl CoCircomCompiler {
+    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph<Fr>>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,
@@ -71,7 +69,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
         tracing::debug!("compiler starts parsing..");
         let opt_level = config.opt_level;
         let mut graph =
-            frontend::build_graph::<P>(PathBuf::from(file).display().to_string(), config)?;
+            frontend::build_graph::<Bn254>(PathBuf::from(file).display().to_string(), config)?;
         graph.verify()?;
         tracing::debug!("graph before passes:\n{:?}", graph);
         passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
@@ -81,7 +79,7 @@ impl<P: Pairing> CoCircomCompiler<P> {
 
     /// `parse`, then lowers the resulting graph into a `vm::Program`, runnable via
     /// `vm::Machine::run` against the plain or rep3 driver.
-    pub fn compile<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<vm::Program<P::ScalarField>>
+    pub fn compile<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<vm::Program<Fr>>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,

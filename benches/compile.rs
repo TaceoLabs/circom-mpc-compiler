@@ -8,7 +8,6 @@
 //! crate does not control, which is precisely why the two are split: a pass-infrastructure regression
 //! would be invisible inside a single combined number.
 
-use ark_bn254::Bn254;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use circom_mpc_compiler::vm::codegen;
@@ -69,7 +68,7 @@ fn bench(c: &mut Criterion) {
     for case in &cases {
         group.bench_with_input(BenchmarkId::from_parameter(case.name), &(), |b, ()| {
             b.iter(|| {
-                CoCircomCompiler::<Bn254>::parse(case.path.clone(), config(case)).unwrap();
+                CoCircomCompiler::parse(case.path.clone(), config(case)).unwrap();
             });
         });
     }
@@ -78,7 +77,7 @@ fn bench(c: &mut Criterion) {
     // `codegen` alone, on an already-parsed graph - the part this crate fully owns.
     let mut group = c.benchmark_group("codegen");
     for case in &cases {
-        let graph = CoCircomCompiler::<Bn254>::parse(case.path.clone(), config(case))
+        let graph = CoCircomCompiler::parse(case.path.clone(), config(case))
             .unwrap_or_else(|e| panic!("{}: {e}", case.name));
         group.bench_with_input(BenchmarkId::from_parameter(case.name), &(), |b, ()| {
             b.iter(|| codegen::compile(&graph).unwrap());
@@ -101,7 +100,7 @@ fn bench(c: &mut Criterion) {
                 b.iter(|| {
                     let mut cfg = config(&case);
                     cfg.opt_level = opt;
-                    CoCircomCompiler::<Bn254>::parse(case.path.clone(), cfg).unwrap();
+                    CoCircomCompiler::parse(case.path.clone(), cfg).unwrap();
                 });
             },
         );

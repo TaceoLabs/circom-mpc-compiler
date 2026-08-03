@@ -25,9 +25,7 @@ use circom_mpc_compiler::CoCircomCompiler;
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{
-    combine_field_elements, Rep3PrimeFieldShare, Rep3State,
-};
+use mpc_core::protocols::rep3::{combine_field_elements, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
 use mpc_net::Network;
 
@@ -126,7 +124,7 @@ fn main() -> eyre::Result<()> {
 
     println!("circuit: {path}");
     let t = Instant::now();
-    let graph = CoCircomCompiler::<Bn254>::parse(path, config)?;
+    let graph = CoCircomCompiler::parse(path, config)?;
     let summary = graph.mpc_summary();
     println!("parse:   {:.2?}", t.elapsed());
     println!(
@@ -213,9 +211,7 @@ fn main() -> eyre::Result<()> {
         "  online rounds={online_rounds:?} by party, max={max_online_rounds}  ({} reshare + {online_gadget_rounds} gadget-internal)",
         summary.rounds,
     );
-    println!(
-        "  combined rounds={combined_rounds:?} by party, max={max_combined_rounds}"
-    );
+    println!("  combined rounds={combined_rounds:?} by party, max={max_combined_rounds}");
     for (party, metrics) in party_metrics.iter().enumerate() {
         println!(
             "  party {party}: combined bytes sent={} recv={}",

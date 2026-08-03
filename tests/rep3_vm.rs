@@ -5,7 +5,7 @@
 //! tests are the value oracle for both drivers.
 #![cfg(feature = "rep3")]
 
-use ark_bn254::{Bn254, Fr};
+use ark_bn254::Fr;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{combine_field_elements, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
@@ -33,8 +33,7 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_staged_test"), config())
-            .unwrap();
+        CoCircomCompiler::compile(circuit_path("precomputation_staged_test"), config()).unwrap();
     assert_eq!(
         program.statistics().precompute_batches,
         2,
@@ -59,11 +58,9 @@ fn staged_precomputation_matches_the_plain_driver_under_rep3() {
 fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_iszero_reveal_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_iszero_reveal_test"), config())
+            .unwrap();
     assert_eq!(program.statistics().precompute_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
     assert_eq!(program.statistics().precompute_sites, 2);
@@ -80,20 +77,27 @@ fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
 fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_isequal_reveal_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_isequal_reveal_test"), config())
+            .unwrap();
     assert_eq!(program.statistics().precompute_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
     assert_eq!(program.statistics().precompute_sites, 3);
 
     for (values, expected) in [
-        ([Fr::from(5u64), Fr::from(5u64), Fr::from(5u64)], [1u64, 1, 1]),
+        (
+            [Fr::from(5u64), Fr::from(5u64), Fr::from(5u64)],
+            [1u64, 1, 1],
+        ),
         // Circom orders public inputs first: [clear, secret[0], secret[1]].
-        ([Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)], [0u64, 0, 1]),
-        ([Fr::from(4u64), Fr::from(4u64), Fr::from(10u64)], [0u64, 1, 0]),
+        (
+            [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)],
+            [0u64, 0, 1],
+        ),
+        (
+            [Fr::from(4u64), Fr::from(4u64), Fr::from(10u64)],
+            [0u64, 1, 0],
+        ),
     ] {
         let plain = {
             let inputs = program.classify_inputs(&values, |v| v);
@@ -113,11 +117,9 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
 fn fused_iszero_reveal_costs_one_online_round() {
     use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
 
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_iszero_reveal_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_iszero_reveal_test"), config())
+            .unwrap();
     let (_, _, online) = run_witness_counted(&program, &[Fr::from(0u64), Fr::from(7u64)]);
     assert_eq!(online, [1, 1, 1]);
 }
@@ -127,11 +129,9 @@ fn fused_iszero_reveal_costs_one_online_round() {
 fn three_fused_isequal_reveal_sites_cost_one_online_round() {
     use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
 
-    let program = CoCircomCompiler::<Bn254>::compile(
-        circuit_path("precomputation_isequal_reveal_test"),
-        config(),
-    )
-    .unwrap();
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_isequal_reveal_test"), config())
+            .unwrap();
     let values = [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)];
     let (_, _, online) = run_witness_counted(&program, &values);
     assert_eq!(online, [1, 1, 1]);
@@ -141,8 +141,7 @@ fn three_fused_isequal_reveal_sites_cost_one_online_round() {
 fn wide_round_vector_products_match_the_plain_driver() {
     use circom_mpc_compiler::vm::driver::plain::PlainDriver;
 
-    let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
     assert_eq!(program.statistics().multiplication_rounds, 1);
     assert_eq!(program.statistics().multiplication_elements, 4);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
@@ -161,8 +160,7 @@ fn all_public_precomputation_uses_the_plain_path_under_rep3() {
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
     let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("precomputation_public_test"), cfg)
-            .unwrap();
+        CoCircomCompiler::compile(circuit_path("precomputation_public_test"), cfg).unwrap();
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
@@ -190,8 +188,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
 
     // One ordinary shared multiplication round and no Poseidon2 service: preparing either driver
     // must be communication-free, while a successful execution costs exactly one round.
-    let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
     assert_eq!(program.statistics().precompute_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
@@ -290,8 +287,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
         reuse_error: String,
     }
 
-    let program =
-        CoCircomCompiler::<Bn254>::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
     assert_eq!(program.statistics().precompute_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
