@@ -10,14 +10,14 @@ use eyre::Result;
 
 use super::build::{to_u64, GraphCompiler};
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Step {
     Up(usize),
     Down(usize),
 }
 
 impl<'a, P: Pairing> GraphCompiler<'a, P> {
-    fn get_step_size(&self, inst: &Instruction) -> (usize, Step) {
+    fn get_step_size(&self, inst: &Instruction) -> Result<(usize, Step)> {
         // must be a top level store
         let (var_index, compute_inst) = if let Instruction::Store(store_bucket) = inst {
             if let LocationRule::Indexed {
@@ -25,21 +25,24 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 template_header: _,
             } = &store_bucket.dest
             {
-                assert!(
+                eyre::ensure!(
                     matches!(store_bucket.dest_address_type, AddressType::Variable),
-                    "must be a variable store for step size"
+                    "loop induction step must store a variable"
                 );
                 let index = self.get_constant_value(location);
                 (index, store_bucket.src.as_ref())
             } else {
-                panic!("must be an indexed store for induction variable")
+                eyre::bail!("loop induction step must use an indexed variable store")
             }
         } else {
-            panic!("must be top level store bucket for step size");
+            eyre::bail!("loop induction step must be a top-level store");
         };
         match compute_inst {
             Instruction::Compute(compute_bucket) => {
-                assert_eq!(compute_bucket.stack.len(), 2, "must be binary op");
+                eyre::ensure!(
+                    compute_bucket.stack.len() == 2,
+                    "loop induction step must be binary"
+                );
                 let lhs = &compute_bucket.stack[0];
                 let rhs = &compute_bucket.stack[1];
                 let step_size = if matches!(lhs.as_ref(), Instruction::Value(_)) {
@@ -47,51 +50,67 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 } else if matches!(rhs.as_ref(), Instruction::Value(_)) {
                     self.get_constant_value(rhs)
                 } else {
-                    panic!("non value inst for compute step size")
+                    eyre::bail!("loop induction step must contain a constant")
                 };
                 let step = match compute_bucket.op {
                     OperatorType::Add => Step::Up(step_size),
                     OperatorType::Sub => Step::Down(step_size),
-                    x => panic!("unsupported induction step operator {}", x.to_string()),
+                    x => eyre::bail!("unsupported loop induction operator {}", x.to_string()),
                 };
-                (var_index, step)
+                eyre::ensure!(step_size != 0, "loop induction step must be nonzero");
+                Ok((var_index, step))
             }
             inst @ Instruction::Value(_) => {
                 // a constant round trip
-                (var_index, Step::Up(self.get_constant_value(inst)))
+                let step = self.get_constant_value(inst);
+                eyre::ensure!(step != 0, "loop induction step must be nonzero");
+                Ok((var_index, Step::Up(step)))
             }
-            x => panic!(
-                "must be compute or value for step size but is {}",
-                x.to_string()
-            ),
+            x => eyre::bail!("unsupported loop induction expression {}", x.to_string()),
         }
     }
 
     // we unroll the loop if it is public - if it is shared we panic for the moment
     pub(crate) fn handle_loop_bucket(&mut self, loop_bucket: &LoopBucket) -> Result<()> {
         // the last instruction of the loop body updates the induction variable
-        let (var_index, step) = self.get_step_size(
-            loop_bucket.body.last().expect("loop body must not be empty"),
-        );
+        let last = loop_bucket
+            .body
+            .last()
+            .ok_or_else(|| eyre::eyre!("loop body must not be empty"))?;
+        let (var_index, step) = self.get_step_size(last)?;
 
         let round_trips =
             if let Instruction::Compute(compute_bucket) = loop_bucket.continue_condition.as_ref() {
-                debug_assert_eq!(
-                    compute_bucket.stack.len(),
-                    2,
-                    "only allows binary ops in loop conditions"
+                eyre::ensure!(
+                    compute_bucket.stack.len() == 2,
+                    "loop condition must be binary"
                 );
                 let lhs = self.get_constant_value(&compute_bucket.stack[0]);
                 let rhs = self.get_constant_value(&compute_bucket.stack[1]);
-                induction_values(&compute_bucket.op, lhs, rhs, step)
+                induction_values(&compute_bucket.op, lhs, rhs, step)?
             } else {
-                panic!("condition not a compute for loop unrolling");
+                eyre::bail!("loop condition must be a comparison");
             };
-        for induction_var in round_trips {
+        for &induction_var in &round_trips {
+            self.add_induction_variable_node(var_index, induction_var);
             for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
-                self.add_induction_variable_node(var_index, induction_var);
+                if stores_variable(inst, var_index, self) {
+                    eyre::bail!("loop body writes to induction variable");
+                }
                 self.handle_inst(inst)?;
             }
+        }
+        let terminal = match (round_trips.last().copied(), step) {
+            (Some(value), Step::Up(step)) => value.checked_add(step),
+            (Some(value), Step::Down(step)) => value.checked_sub(step),
+            (None, _) => None,
+        };
+        if let Some(value) = terminal {
+            self.add_induction_variable_node(var_index, value);
+        } else if let (Some(value), Step::Down(step)) = (round_trips.last().copied(), step) {
+            let value = P::ScalarField::from(to_u64(value)) - P::ScalarField::from(to_u64(step));
+            let node = self.push_constant_value(value);
+            self.var_to_value.insert(var_index, node);
         }
         Ok(())
     }
@@ -105,15 +124,43 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
 }
 
 /// The induction variable's values for a `for (i = lhs; i <op> rhs; i +=/-= step)` loop.
-fn induction_values(op: &OperatorType, lhs: usize, rhs: usize, step: Step) -> Vec<usize> {
-    match (op, step) {
-        (OperatorType::Lesser, Step::Up(step)) => (lhs..rhs).step_by(step).collect(),
-        (OperatorType::LesserEq, Step::Up(step)) => (lhs..=rhs).step_by(step).collect(),
-        (OperatorType::Greater, Step::Down(step)) => (rhs + 1..=lhs).rev().step_by(step).collect(),
-        (OperatorType::GreaterEq, Step::Down(step)) => (rhs..=lhs).rev().step_by(step).collect(),
-        (op, step) => panic!(
-            "unsupported loop shape in unrolling: condition {} with step {step:?}",
-            op.to_string()
+fn induction_values(op: &OperatorType, lhs: usize, rhs: usize, step: Step) -> Result<Vec<usize>> {
+    let condition = |value| match op {
+        OperatorType::Lesser => value < rhs,
+        OperatorType::LesserEq => value <= rhs,
+        OperatorType::Greater => value > rhs,
+        OperatorType::GreaterEq => value >= rhs,
+        _ => false,
+    };
+    eyre::ensure!(
+        matches!(
+            (op, &step),
+            (OperatorType::Lesser | OperatorType::LesserEq, Step::Up(_))
+                | (
+                    OperatorType::Greater | OperatorType::GreaterEq,
+                    Step::Down(_)
+                )
         ),
+        "unsupported loop shape"
+    );
+    let mut values = Vec::new();
+    let mut value = lhs;
+    while condition(value) {
+        values.push(value);
+        let Some(next) = (match step {
+            Step::Up(n) => value.checked_add(n),
+            Step::Down(n) => value.checked_sub(n),
+        }) else { break };
+        value = next;
     }
+    Ok(values)
+}
+
+fn stores_variable<P: Pairing>(
+    inst: &Instruction,
+    var_index: usize,
+    compiler: &GraphCompiler<'_, P>,
+) -> bool {
+    matches!(inst, Instruction::Store(store) if matches!(store.dest_address_type, AddressType::Variable)
+        && matches!(&store.dest, LocationRule::Indexed { location, .. } if compiler.get_constant_value(location) == var_index))
 }
