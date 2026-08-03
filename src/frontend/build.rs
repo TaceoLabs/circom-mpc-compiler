@@ -9,8 +9,8 @@ use ark_ec::pairing::Pairing;
 use ark_ff::{PrimeField, Zero};
 use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction,
-    LoadBucket, LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
+    AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket,
+    LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
 };
 use eyre::Result;
 use num_bigint::BigUint;
@@ -20,8 +20,7 @@ use crate::ir::{Op, PrecomputeKind, ValueId};
 
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
 
-const MAPPED_LOCATION: &str =
-    "unsupported mapped location rule (bus/anonymous component access)";
+const MAPPED_LOCATION: &str = "unsupported mapped location rule (bus/anonymous component access)";
 
 pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
@@ -359,11 +358,35 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         let num_outputs = template_code.number_of_outputs;
 
         let kind = match template_code.name.as_str() {
-            "Poseidon2" => Some(PrecomputeKind::Poseidon2 { t: num_inputs }),
-            "Num2Bits" => Some(PrecomputeKind::Num2Bits { n: num_outputs }),
-            "IsZero" => Some(PrecomputeKind::IsZero),
-            "AliasCheck" => Some(PrecomputeKind::AliasCheck),
-            "TACEO_REVEAL" => Some(PrecomputeKind::Reveal { n: num_inputs }),
+            "Poseidon2" => {
+                eyre::ensure!(num_inputs == num_outputs, "non-canonical Poseidon2 shape");
+                Some(PrecomputeKind::Poseidon2 { t: num_inputs })
+            }
+            "Num2Bits" => {
+                eyre::ensure!(num_inputs == 1, "non-canonical Num2Bits shape");
+                Some(PrecomputeKind::Num2Bits { n: num_outputs })
+            }
+            "IsZero" => {
+                eyre::ensure!(
+                    num_inputs == 1 && num_outputs == 1,
+                    "non-canonical IsZero shape"
+                );
+                Some(PrecomputeKind::IsZero)
+            }
+            "AliasCheck" => {
+                eyre::ensure!(
+                    num_inputs == 254 && num_outputs == 0,
+                    "non-canonical AliasCheck shape"
+                );
+                Some(PrecomputeKind::AliasCheck)
+            }
+            "TACEO_REVEAL" => {
+                eyre::ensure!(
+                    num_inputs == num_outputs,
+                    "TACEO_REVEAL input/output counts differ"
+                );
+                Some(PrecomputeKind::Reveal { n: num_inputs })
+            }
             _ => None,
         };
 
@@ -642,9 +665,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
                 let index = self.get_constant_value(location);
                 Ok(self.read_value_at(&load_bucket.address_type, index))
             }
-            LocationRule::Mapped { .. } => {
-                Err(self.unsupported(MAPPED_LOCATION, load_bucket.line))
-            }
+            LocationRule::Mapped { .. } => Err(self.unsupported(MAPPED_LOCATION, load_bucket.line)),
         }
     }
 
