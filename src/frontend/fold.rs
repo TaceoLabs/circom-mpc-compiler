@@ -11,21 +11,15 @@ use std::cmp::Ordering;
 
 use ark_ff::{BigInteger, PrimeField};
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::Zero as _;
 
 use circom_compiler::intermediate_representation::ir_interface::OperatorType;
-
-use super::build::to_usize;
 
 /// Field elements as an unsigned big integer, matching circom's own semantics for `\`, `<<`, `>>`,
 /// `|`, `&`, `^` (which all operate on the canonical integer representative, not the field element
 /// as such).
 fn to_bigint<F: PrimeField>(f: F) -> BigUint {
     f.into()
-}
-
-fn to_u128<F: PrimeField>(f: F) -> u128 {
-    to_bigint(f).to_u128().expect("does not fit into u128")
 }
 
 /// Evaluates `op(lhs, rhs)` at compile time. Most callers use this for operators that have no
@@ -39,22 +33,34 @@ pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Op
         OperatorType::Add => Some(lhs + rhs),
         OperatorType::Sub => Some(lhs - rhs),
         OperatorType::Mul => Some(lhs * rhs),
-        OperatorType::Div => Some(lhs / rhs),
+        OperatorType::Div => (!rhs.is_zero()).then(|| lhs / rhs),
         OperatorType::IntDiv => {
-            let lhs = to_u128(lhs);
-            let rhs = to_u128(rhs);
-            Some(F::from(lhs / rhs))
+            let lhs = to_bigint(lhs);
+            let rhs = to_bigint(rhs);
+            (!rhs.is_zero()).then(|| F::from(lhs / rhs))
         }
         OperatorType::Pow => Some(lhs.pow(rhs.into_bigint())),
         OperatorType::ShiftL => {
             let val = to_bigint(lhs);
-            let shift = to_usize(rhs);
-            Some(F::from(val << shift))
+            let shift = to_bigint(rhs);
+            let modulus = BigUint::from_bytes_le(&F::MODULUS.to_bytes_le());
+            let factor = BigUint::from(2u8).modpow(&shift, &modulus);
+            Some(F::from((val * factor) % modulus))
         }
         OperatorType::ShiftR => {
             let val = to_bigint(lhs);
-            let shift = to_usize(rhs);
-            Some(F::from(val >> shift))
+            let shift = to_bigint(rhs);
+            if shift.bits() > usize::BITS as u64 {
+                Some(F::zero())
+            } else {
+                let bytes = shift.to_u64_digits();
+                let shift = bytes.first().copied().unwrap_or(0);
+                if shift >= val.bits() {
+                    Some(F::zero())
+                } else {
+                    Some(F::from(val >> shift as usize))
+                }
+            }
         }
         OperatorType::BitOr => Some(F::from(to_bigint(lhs) | to_bigint(rhs))),
         OperatorType::BitAnd => Some(F::from(to_bigint(lhs) & to_bigint(rhs))),
