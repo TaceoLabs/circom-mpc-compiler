@@ -66,6 +66,41 @@ const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// shim: accepting an older layout could produce a plausible-looking wrong witness.
 const VERSION: u32 = 1;
 
+#[derive(Clone, Copy, Debug)]
+pub struct ProgramReadLimits {
+    pub max_serialized_bytes: u64,
+    pub max_estimated_allocation: usize,
+    pub max_table_entries: usize,
+}
+
+impl Default for ProgramReadLimits {
+    fn default() -> Self {
+        Self {
+            max_serialized_bytes: 256 * 1024 * 1024,
+            max_estimated_allocation: 256 * 1024 * 1024,
+            max_table_entries: 16_777_216,
+        }
+    }
+}
+
+fn checked_count<T>(count: u64, limits: ProgramReadLimits, table: &str) -> eyre::Result<usize> {
+    let count =
+        usize::try_from(count).map_err(|_| eyre::eyre!("{table} count does not fit usize"))?;
+    eyre::ensure!(
+        count <= limits.max_table_entries,
+        "{table} count {count} exceeds limit {}",
+        limits.max_table_entries
+    );
+    let bytes = count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| eyre::eyre!("{table} allocation overflows"))?;
+    eyre::ensure!(
+        bytes <= limits.max_estimated_allocation,
+        "{table} allocation exceeds limit"
+    );
+    Ok(count)
+}
+
 impl Opcode {
     fn to_u8(self) -> u8 {
         match self {
@@ -130,8 +165,8 @@ fn write_u32_vec<W: Write>(w: &mut W, values: &[u32]) -> eyre::Result<()> {
     Ok(())
 }
 
-fn read_u32_vec<R: Read>(r: &mut R) -> eyre::Result<Vec<u32>> {
-    let len = r.read_u64::<LittleEndian>()?;
+fn read_u32_vec<R: Read>(r: &mut R, limits: ProgramReadLimits, table: &str) -> eyre::Result<Vec<u32>> {
+    let len = checked_count::<u32>(r.read_u64::<LittleEndian>()?, limits, table)?;
     (0..len)
         .map(|_| Ok(r.read_u32::<LittleEndian>()?))
         .collect()
@@ -289,6 +324,19 @@ impl<F: PrimeField> Program<F> {
 
     /// Deserializes a program written by [`Program::write`].
     pub fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
+        Self::read_with_limits(r, ProgramReadLimits::default())
+    }
+
+    pub fn read_exact<R: Read>(r: &mut R) -> eyre::Result<Self> {
+        let program = Self::read(r)?;
+        let mut trailing = [0u8; 1];
+        eyre::ensure!(r.read(&mut trailing)? == 0, "trailing bytes after program");
+        Ok(program)
+    }
+
+    pub fn read_with_limits<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<Self> {
+        let mut limited = r.take(limits.max_serialized_bytes.saturating_add(1));
+        let r = &mut limited;
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
         eyre::ensure!(
@@ -301,32 +349,36 @@ impl<F: PrimeField> Program<F> {
             "unsupported program format version {version}"
         );
 
-        let instr_count = r.read_u64::<LittleEndian>()?;
-        let mut instructions = Vec::with_capacity(instr_count as usize);
+        let instr_count =
+            checked_count::<Instruction>(r.read_u64::<LittleEndian>()?, limits, "instruction")?;
+        let mut instructions = Vec::with_capacity(instr_count);
         for _ in 0..instr_count {
             let op = Opcode::from_u8(r.read_u8()?)?;
             let mut pad = [0u8; 3];
             r.read_exact(&mut pad)?;
+            eyre::ensure!(pad == [0; 3], "instruction padding must be zero");
             let dst = r.read_u32::<LittleEndian>()?;
             let a = r.read_u32::<LittleEndian>()?;
             let b = r.read_u32::<LittleEndian>()?;
             instructions.push(Instruction { op, dst, a, b });
         }
 
-        let const_count = r.read_u64::<LittleEndian>()?;
-        let mut constants = Vec::with_capacity(const_count as usize);
+        let const_count = checked_count::<F>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
+        let mut constants = Vec::with_capacity(const_count);
         for _ in 0..const_count {
             constants.push(F::deserialize_compressed(&mut *r)?);
         }
 
-        let domain_count = r.read_u64::<LittleEndian>()?;
-        let mut input_domains = Vec::with_capacity(domain_count as usize);
+        let domain_count =
+            checked_count::<Bank>(r.read_u64::<LittleEndian>()?, limits, "input domain")?;
+        let mut input_domains = Vec::with_capacity(domain_count);
         for _ in 0..domain_count {
             input_domains.push(Bank::from_u8(r.read_u8()?)?);
         }
 
-        let binding_count = r.read_u64::<LittleEndian>()?;
-        let mut inputs = Vec::with_capacity(binding_count as usize);
+        let binding_count =
+            checked_count::<InputBinding>(r.read_u64::<LittleEndian>()?, limits, "input binding")?;
+        let mut inputs = Vec::with_capacity(binding_count);
         for _ in 0..binding_count {
             let bank = Bank::from_u8(r.read_u8()?)?;
             let slot = r.read_u32::<LittleEndian>()?;
@@ -338,8 +390,9 @@ impl<F: PrimeField> Program<F> {
             });
         }
 
-        let round_count = r.read_u64::<LittleEndian>()?;
-        let mut rounds = Vec::with_capacity(round_count as usize);
+        let round_count =
+            checked_count::<RoundEntry>(r.read_u64::<LittleEndian>()?, limits, "round")?;
+        let mut rounds = Vec::with_capacity(round_count);
         for _ in 0..round_count {
             let operand_start = r.read_u32::<LittleEndian>()?;
             let len = r.read_u32::<LittleEndian>()?;
@@ -350,30 +403,46 @@ impl<F: PrimeField> Program<F> {
                 result_start,
             });
         }
-        let round_operands = read_u32_vec(r)?;
-        let round_results = read_u32_vec(r)?;
+        let round_operands = read_u32_vec(r, limits, "round operand")?;
+        let round_results = read_u32_vec(r, limits, "round result")?;
 
-        let batch_count = r.read_u64::<LittleEndian>()?;
-        let mut batches = Vec::with_capacity(batch_count as usize);
+        let batch_count = checked_count::<PrecomputeBatch>(
+            r.read_u64::<LittleEndian>()?,
+            limits,
+            "precompute batch",
+        )?;
+        let mut batches = Vec::with_capacity(batch_count);
         for _ in 0..batch_count {
             let kind = BatchKind::read(r)?;
-            let sites = r.read_u64::<LittleEndian>()? as usize;
+            let sites =
+                checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "precompute site")?;
             eyre::ensure!(sites > 0, "precompute batch has no sites");
-            let input_count = r.read_u64::<LittleEndian>()?;
-            let mut input_slots = Vec::with_capacity(input_count as usize);
+            let input_count = checked_count::<SiteInput>(
+                r.read_u64::<LittleEndian>()?,
+                limits,
+                "precompute input",
+            )?;
+            let mut input_slots = Vec::with_capacity(input_count);
             for _ in 0..input_count {
                 let bank = Bank::from_u8(r.read_u8()?)?;
                 eyre::ensure!(bank != Bank::Local, "precompute input bank cannot be Local");
                 let slot = r.read_u32::<LittleEndian>()?;
                 input_slots.push(SiteInput { bank, slot });
             }
-            let result_requests = read_u32_vec(r)?;
-            let result_offsets = read_u32_vec(r)?;
-            let target_count = r.read_u64::<LittleEndian>()?;
-            let mut result_targets = Vec::with_capacity(target_count as usize);
+            let result_requests = read_u32_vec(r, limits, "precompute result request")?;
+            let result_offsets = read_u32_vec(r, limits, "precompute result offset")?;
+            let target_count = checked_count::<ResultTarget>(
+                r.read_u64::<LittleEndian>()?,
+                limits,
+                "precompute target",
+            )?;
+            let mut result_targets = Vec::with_capacity(target_count);
             for _ in 0..target_count {
                 let bank = Bank::from_u8(r.read_u8()?)?;
-                eyre::ensure!(bank != Bank::Local, "precompute result bank cannot be Local");
+                eyre::ensure!(
+                    bank != Bank::Local,
+                    "precompute result bank cannot be Local"
+                );
                 let slot = r.read_u32::<LittleEndian>()?;
                 result_targets.push(ResultTarget { bank, slot });
             }
@@ -409,8 +478,12 @@ impl<F: PrimeField> Program<F> {
             });
         }
 
-        let witness_count = r.read_u64::<LittleEndian>()?;
-        let mut witness_sources = Vec::with_capacity(witness_count as usize);
+        let witness_count = checked_count::<WitnessSource>(
+            r.read_u64::<LittleEndian>()?,
+            limits,
+            "witness source",
+        )?;
+        let mut witness_sources = Vec::with_capacity(witness_count);
         for _ in 0..witness_count {
             let source = match r.read_u8()? {
                 0 => WitnessSource::One,
@@ -428,7 +501,7 @@ impl<F: PrimeField> Program<F> {
             witness_sources.push(source);
         }
 
-        let num_inputs = r.read_u64::<LittleEndian>()? as usize;
+        let num_inputs = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input")?;
 
         let public = r.read_u32::<LittleEndian>()?;
         let shared = r.read_u32::<LittleEndian>()?;
@@ -452,13 +525,14 @@ impl<F: PrimeField> Program<F> {
             },
         };
         program.validate_encoding()?;
+        eyre::ensure!(limited.limit() > 0, "serialized program exceeds byte limit");
         Ok(program)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::{Bn254, Fr};
+    use ark_bn254::Fr;
 
     use crate::vm::driver::plain::PlainDriver;
     use crate::vm::Machine;
@@ -471,12 +545,11 @@ mod tests {
         config
             .link_library
             .push(format!("{root}/circuits/libs/").into());
-        CoCircomCompiler::<Bn254>::compile(format!("{root}/circuits/{circuit}.circom"), config)
-            .unwrap()
+        CoCircomCompiler::compile(format!("{root}/circuits/{circuit}.circom"), config).unwrap()
     }
 
     fn witness(program: &super::Program<Fr>, inputs: &[Fr]) -> Vec<Fr> {
-        let inputs = program.classify_inputs(inputs, |v| v);
+        let inputs = program.classify_inputs(inputs, |v| v).unwrap();
         let mut driver = PlainDriver;
         Machine::run(program, &mut driver, &inputs).unwrap()
     }
@@ -519,14 +592,18 @@ mod tests {
     fn round_trips_an_unbound_zero_witness_source() {
         let original = program("loop_unrolling");
         assert!(original
-            .witness_sources.contains(&super::WitnessSource::Zero));
+            .witness_sources
+            .contains(&super::WitnessSource::Zero));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
         let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
         assert!(read_back
-            .witness_sources.contains(&super::WitnessSource::Zero));
+            .witness_sources
+            .contains(&super::WitnessSource::Zero));
 
-        let inputs: Vec<_> = (1..=original.num_inputs).map(|i| Fr::from(i as u64)).collect();
+        let inputs: Vec<_> = (1..=original.num_inputs)
+            .map(|i| Fr::from(i as u64))
+            .collect();
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
     }
 
@@ -641,8 +718,7 @@ mod tests {
         assert!(invalid_witness.write(&mut Vec::new()).is_err());
 
         let mut invalid_batch = program("precomputation_iszero_test");
-        invalid_batch.precompute_batches[0].result_targets[0].slot =
-            invalid_batch.slots.shared;
+        invalid_batch.precompute_batches[0].result_targets[0].slot = invalid_batch.slots.shared;
         assert!(invalid_batch.validate_encoding().is_err());
 
         let mut invalid_poseidon = program("precomputation_poseidon2_test");

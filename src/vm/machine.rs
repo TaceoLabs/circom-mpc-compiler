@@ -19,6 +19,36 @@ pub enum InputValue<F, S> {
     Secret(S),
 }
 
+pub trait InputValues<F, S> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]>;
+}
+
+impl<F, S> InputValues<F, S> for [InputValue<F, S>] {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+        Ok(self)
+    }
+}
+
+impl<F, S> InputValues<F, S> for Vec<InputValue<F, S>> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+        Ok(self)
+    }
+}
+
+impl<F, S, const N: usize> InputValues<F, S> for [InputValue<F, S>; N] {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+        Ok(self)
+    }
+}
+
+impl<F, S> InputValues<F, S> for eyre::Result<Vec<InputValue<F, S>>> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+        self.as_ref()
+            .map(Vec::as_slice)
+            .map_err(|error| eyre::eyre!(error.to_string()))
+    }
+}
+
 impl<F: PrimeField> Program<F> {
     /// Builds `Machine::run`'s `inputs` array from a flat `&[F]` in circuit signal order,
     /// consulting `Program::input_domains` to wrap each value as `Public` or `Secret`
@@ -30,10 +60,9 @@ impl<F: PrimeField> Program<F> {
         &self,
         values: &[F],
         mut share: impl FnMut(F) -> S,
-    ) -> Vec<InputValue<F, S>> {
-        assert_eq!(
-            values.len(),
-            self.num_inputs,
+    ) -> eyre::Result<Vec<InputValue<F, S>>> {
+        eyre::ensure!(
+            values.len() == self.num_inputs,
             "expected one value per circuit input ({}), got {}",
             self.num_inputs,
             values.len()
@@ -42,9 +71,9 @@ impl<F: PrimeField> Program<F> {
             .iter()
             .zip(values)
             .map(|(bank, &v)| match bank {
-                Bank::Public => InputValue::Public(v),
-                Bank::Shared => InputValue::Secret(share(v)),
-                Bank::Local => unreachable!("an input's domain is never Local"),
+                Bank::Public => Ok(InputValue::Public(v)),
+                Bank::Shared => Ok(InputValue::Secret(share(v))),
+                Bank::Local => eyre::bail!("an input's domain cannot be Local"),
             })
             .collect()
     }
@@ -91,11 +120,12 @@ impl<F: PrimeField, D: VmDriver<F>> Drop for RunGuard<'_, F, D> {
 }
 
 impl Machine {
-    pub fn run<F: PrimeField, D: VmDriver<F>>(
+    pub fn run<F: PrimeField, D: VmDriver<F>, I: InputValues<F, D::Share> + ?Sized>(
         program: &Program<F>,
         driver: &mut D,
-        inputs: &[InputValue<F, D::Share>],
+        inputs: &I,
     ) -> eyre::Result<Vec<D::Share>> {
+        let inputs = inputs.as_inputs()?;
         // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
         // network error, or panic all spend a one-shot prepared driver.
         driver.begin_run()?;
@@ -244,8 +274,7 @@ impl Machine {
                     slot,
                 } => shared[slot as usize].clone(),
                 WitnessSource::Slot {
-                    bank: Bank::Local,
-                    ..
+                    bank: Bank::Local, ..
                 } => unreachable!("codegen never emits a Local witness source"),
             });
         }
@@ -393,7 +422,10 @@ impl Machine {
         for (site, (is_zero, inverse, revealed)) in traces.into_iter().enumerate() {
             let lo = batch.result_offsets[site] as usize;
             let hi = batch.result_offsets[site + 1] as usize;
-            eyre::ensure!(lo <= hi && hi <= batch.result_requests.len(), "invalid fused CSR row");
+            eyre::ensure!(
+                lo <= hi && hi <= batch.result_requests.len(),
+                "invalid fused CSR row"
+            );
             for (&logical, target) in batch.result_requests[lo..hi]
                 .iter()
                 .zip(&batch.result_targets[lo..hi])
@@ -411,7 +443,9 @@ impl Machine {
                         eyre::ensure!(target.bank == Bank::Public, "Reveal.out must target Public");
                         public[target.slot as usize] = revealed;
                     }
-                    other => eyre::bail!("fused IsZero/Reveal requested invalid logical slot {other}"),
+                    other => {
+                        eyre::bail!("fused IsZero/Reveal requested invalid logical slot {other}")
+                    }
                 }
             }
         }
@@ -607,11 +641,7 @@ mod tests {
             unreachable!("minimal panic fixture has no instructions")
         }
 
-        fn num2bits_traces(
-            &mut self,
-            _n: usize,
-            _inputs: &[Fr],
-        ) -> eyre::Result<Vec<Fr>> {
+        fn num2bits_traces(&mut self, _n: usize, _inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
             unreachable!("minimal panic fixture has no instructions")
         }
 

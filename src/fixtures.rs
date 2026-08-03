@@ -36,7 +36,10 @@ pub fn merces_config() -> CompilerConfig {
 
 /// `circuits/merces/main/<main>.circom`.
 pub fn merces_main_path(main: &str) -> String {
-    format!("{}/circuits/merces/main/{main}.circom", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/circuits/merces/main/{main}.circom",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// The 3-party in-process rep3 harness shared by tests, benches and examples: secret-share the
@@ -93,11 +96,13 @@ pub mod rep3 {
                         let mut driver =
                             Rep3Driver::<F, _>::new_for_run(&net, &mut state, program).unwrap();
                         let mut next = 0;
-                        let inputs = program.classify_inputs(values, |_v| {
-                            let s = shares[next][party];
-                            next += 1;
-                            s
-                        });
+                        let inputs = program
+                            .classify_inputs(values, |_v| {
+                                let s = shares[next][party];
+                                next += 1;
+                                s
+                            })
+                            .unwrap();
                         Machine::run(program, &mut driver, &inputs).unwrap()
                     })
                 })
@@ -121,7 +126,10 @@ pub mod rep3 {
         use crate::vm::counting_net::CountingNet;
 
         let shares = share_inputs(program, values);
-        let networks: Vec<_> = LocalNetwork::new(3).into_iter().map(CountingNet::new).collect();
+        let networks: Vec<_> = LocalNetwork::new(3)
+            .into_iter()
+            .map(CountingNet::new)
+            .collect();
         let results: Vec<(Vec<Rep3PrimeFieldShare<F>>, usize, usize)> =
             std::thread::scope(|scope| {
                 networks
@@ -137,11 +145,13 @@ pub mod rep3 {
                             let preparation = net.rounds();
                             net.reset();
                             let mut next = 0;
-                            let inputs = program.classify_inputs(values, |_v| {
-                                let s = shares[next][party];
-                                next += 1;
-                                s
-                            });
+                            let inputs = program
+                                .classify_inputs(values, |_v| {
+                                    let s = shares[next][party];
+                                    next += 1;
+                                    s
+                                })
+                                .unwrap();
                             let witness = Machine::run(program, &mut driver, &inputs).unwrap();
                             (witness, preparation, net.rounds())
                         })
@@ -155,7 +165,11 @@ pub mod rep3 {
         let [(w0, p0, o0), (w1, p1, o1), (w2, p2, o2)]: [_; 3] = results
             .try_into()
             .unwrap_or_else(|_| unreachable!("exactly three parties"));
-        (combine_field_elements(&w0, &w1, &w2), [p0, p1, p2], [o0, o1, o2])
+        (
+            combine_field_elements(&w0, &w1, &w2),
+            [p0, p1, p2],
+            [o0, o1, o2],
+        )
     }
 }
 
@@ -169,10 +183,9 @@ fn parse_field<F: PrimeField>(v: &serde_json::Value) -> eyre::Result<F> {
     let s = match v {
         serde_json::Value::String(s) => s.as_str(),
         serde_json::Value::Number(n) => {
-            return Ok(F::from(
-                n.as_u64()
-                    .ok_or_else(|| eyre::eyre!("input number `{n}` is not a non-negative integer"))?,
-            ))
+            return Ok(F::from(n.as_u64().ok_or_else(|| {
+                eyre::eyre!("input number `{n}` is not a non-negative integer")
+            })?))
         }
         other => eyre::bail!("expected a field element (string or integer), got {other}"),
     };
@@ -180,7 +193,10 @@ fn parse_field<F: PrimeField>(v: &serde_json::Value) -> eyre::Result<F> {
         Some(rest) => (true, rest),
         None => (false, s),
     };
-    let magnitude = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let magnitude = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         BigUint::parse_bytes(hex.as_bytes(), 16)
     } else {
         BigUint::parse_bytes(digits.as_bytes(), 10)
@@ -193,7 +209,11 @@ fn parse_field<F: PrimeField>(v: &serde_json::Value) -> eyre::Result<F> {
 /// Flattens a circom-style input value row-major (last index fastest) into `out`. `path` names the
 /// signal for error messages; nested arrays must be rectangular, since a ragged row would otherwise
 /// silently shift every later element.
-fn push_flat<F: PrimeField>(path: &str, v: &serde_json::Value, out: &mut Vec<F>) -> eyre::Result<()> {
+fn push_flat<F: PrimeField>(
+    path: &str,
+    v: &serde_json::Value,
+    out: &mut Vec<F>,
+) -> eyre::Result<()> {
     match v {
         serde_json::Value::Array(rows) => {
             let mut row_len = None;
@@ -276,9 +296,17 @@ fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -> ey
 /// one circuit serves all three, so it cannot be declared public here without being wrong for
 /// transfers.
 pub fn merces_mpc_public_inputs() -> Vec<String> {
-    ["sender", "receiver", "senderPath", "receiverPath", "depth", "isDeposit", "isWithdraw"]
-        .map(String::from)
-        .to_vec()
+    [
+        "sender",
+        "receiver",
+        "senderPath",
+        "receiverPath",
+        "depth",
+        "isDeposit",
+        "isWithdraw",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// One real protocol input set for a vendored merces main, keyed by `(main, name)`.
@@ -425,10 +453,20 @@ mod tests {
         for s in scenarios("transfer_arity4_batch1").chain(scenarios("transfer_arity4_batch8")) {
             let inputs = s.named_inputs::<Fr>().unwrap();
             for name in ["sender", "receiver"] {
-                assert_eq!(inputs[name].len(), s.batch * 2 * MAX_DEPTH, "{}: {name}", s.file_name());
+                assert_eq!(
+                    inputs[name].len(),
+                    s.batch * 2 * MAX_DEPTH,
+                    "{}: {name}",
+                    s.file_name()
+                );
             }
             for name in ["senderPath", "receiverPath"] {
-                assert_eq!(inputs[name].len(), s.batch * 3 * MAX_DEPTH, "{}: {name}", s.file_name());
+                assert_eq!(
+                    inputs[name].len(),
+                    s.batch * 3 * MAX_DEPTH,
+                    "{}: {name}",
+                    s.file_name()
+                );
             }
             for name in ["amount", "isDeposit", "isWithdraw"] {
                 assert_eq!(inputs[name].len(), s.batch, "{}: {name}", s.file_name());
@@ -476,7 +514,12 @@ mod tests {
                 for flag in [d, w] {
                     assert!(*flag == Fr::zero() || *flag == Fr::one());
                 }
-                assert_eq!(*d * *w, Fr::zero(), "{}: isDeposit * isWithdraw", s.file_name());
+                assert_eq!(
+                    *d * *w,
+                    Fr::zero(),
+                    "{}: isDeposit * isWithdraw",
+                    s.file_name()
+                );
             }
         }
     }

@@ -15,3 +15,4 @@ pub mod witness;
 
 pub use machine::{InputValue, Machine};
 pub use program::Program;
+pub use serialize::ProgramReadLimits;
