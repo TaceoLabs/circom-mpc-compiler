@@ -6,13 +6,11 @@
 //! called once per secret product (`local_mul` then `reshare`). `round_schedule`, the next pass in
 //! the pipeline, batches these singleton rounds into fewer, wider ones.
 
-use ark_ff::PrimeField;
-
 use crate::ir::{Graph, Node, Op, RewriteAction, RoundDesc, RoundId, ValueId};
 
 use super::domain::{compute_domains, Domain};
 
-pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     // The split decision depends only on the *old* graph, so classify it up front. Inside the
     // rewrite closure only the old-space node id is stable (`Graph::rewrite` remaps inputs to
     // new-space ids), so the decision is looked up by that id.
@@ -59,7 +57,7 @@ mod tests {
 
     use super::*;
 
-    fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId) -> Graph<Fr> {
+    fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],

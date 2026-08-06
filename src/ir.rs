@@ -4,7 +4,7 @@
 //! address space: a node's position in the graph *is* the identifier of the single value it
 //! produces (its [`ValueId`]).
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
 
 /// Identifies a node in a [`Graph`] and, equivalently, the single value it produces.
 ///
@@ -205,11 +205,11 @@ pub struct PrecomputeSite {
 /// either rejected outright or, where all its operands are compile-time constants, folded away
 /// before it ever reaches this enum (`frontend::fold`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Op<F: PrimeField> {
+pub enum Op {
     /// Reads a circuit input signal.
     Input(SignalIdx),
     /// A field constant.
-    Constant(F),
+    Constant(Fr),
     Add,
     Sub,
     Mul,
@@ -237,7 +237,7 @@ pub enum Op<F: PrimeField> {
     RoundResult(u32),
 }
 
-impl<F: PrimeField> Op<F> {
+impl Op {
     /// The number of operands this op reads, where that is context-free. `None` for
     /// [`Op::Precompute`] (arity is its site's `num_inputs`) and [`Op::Round`] (its round's `len`);
     /// only [`Graph::verify`] can check those, since it alone has the tables.
@@ -260,7 +260,11 @@ impl<F: PrimeField> Op<F> {
     pub(crate) fn is_pure(&self) -> bool {
         !matches!(
             self,
-            Op::Precompute(_) | Op::PrecomputeResult(_) | Op::MulLocal | Op::Round(_) | Op::RoundResult(_)
+            Op::Precompute(_)
+                | Op::PrecomputeResult(_)
+                | Op::MulLocal
+                | Op::Round(_)
+                | Op::RoundResult(_)
         )
     }
 }
@@ -268,13 +272,13 @@ impl<F: PrimeField> Op<F> {
 /// A single node in the graph. `inputs` references other nodes by [`ValueId`]; every reference
 /// must point strictly earlier in the graph, as enforced by graph verification.
 #[derive(Debug, Clone)]
-pub struct Node<F: PrimeField> {
-    pub op: Op<F>,
+pub struct Node {
+    pub op: Op,
     pub inputs: Vec<ValueId>,
 }
 
-impl<F: PrimeField> Node<F> {
-    pub(crate) fn new(op: Op<F>, inputs: Vec<ValueId>) -> Self {
+impl Node {
+    pub(crate) fn new(op: Op, inputs: Vec<ValueId>) -> Self {
         if let Some(arity) = op.fixed_arity() {
             debug_assert_eq!(
                 inputs.len(),
@@ -288,7 +292,7 @@ impl<F: PrimeField> Node<F> {
 
 /// What a [`Graph::rewrite`] callback decides to do with one original node, in original graph
 /// order.
-pub(crate) enum RewriteAction<F: PrimeField> {
+pub(crate) enum RewriteAction {
     /// Emit the node unchanged (its `inputs`, as seen by the callback, are already remapped to
     /// their new ids).
     Keep,
@@ -298,14 +302,14 @@ pub(crate) enum RewriteAction<F: PrimeField> {
     ReplaceWith(ValueId),
     /// Emit a different node in its place. `node.inputs` must reference only already-emitted
     /// (new-space) values.
-    Emit(Node<F>),
+    Emit(Node),
     /// Emit several nodes in its place; the *last* one is this original node's value (what later
     /// references to it resolve to). Each node's `inputs` may reference any already-emitted value,
     /// including the earlier nodes in this same `Vec` (they are pushed in order, so they are
     /// "already emitted" from the next one's point of view). Used by passes that expand one node
     /// into a small fixed-shape group - e.g. `passes::mpc::mul_split` splitting a secret `Mul` into
     /// its local part, a singleton round, and that round's result.
-    EmitMany(Vec<Node<F>>),
+    EmitMany(Vec<Node>),
 }
 
 /// A list of circuit inputs: (name, witness offset, size).
@@ -314,8 +318,8 @@ pub type InputList = Vec<(String, usize, usize)>;
 /// The compiled, flattened circuit: one value graph plus the metadata needed to feed it inputs
 /// and read back a witness.
 #[derive(Clone)]
-pub struct Graph<F: PrimeField> {
-    nodes: Vec<Node<F>>,
+pub struct Graph {
+    nodes: Vec<Node>,
     /// Circuit-level sinks: which signal each output value is written to. Every subcomponent's
     /// input and output signal is also recorded here (not just main's declared outputs), because
     /// circom's witness vector addresses every signal in the circuit, not only main's I/O.
@@ -342,12 +346,12 @@ pub struct Graph<F: PrimeField> {
     pub num_signals: usize,
 }
 
-impl<F: PrimeField> Graph<F> {
+impl Graph {
     /// Builds a fresh, not-yet-lowered ([`Stage::Plain`], no rounds) graph - the frontend's output,
     /// and what pass-level unit tests build by hand to exercise a single pass in isolation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
-        nodes: Vec<Node<F>>,
+        nodes: Vec<Node>,
         outputs: Vec<(SignalIdx, ValueId)>,
         precompute_sites: Vec<PrecomputeSite>,
         signal_to_witness: Vec<usize>,
@@ -380,11 +384,11 @@ impl<F: PrimeField> Graph<F> {
     // Only exercised by tests so far; kept as the standard single-node accessor for the passes
     // and codegen that land in later steps.
     #[allow(dead_code)]
-    pub(crate) fn node(&self, id: ValueId) -> &Node<F> {
+    pub(crate) fn node(&self, id: ValueId) -> &Node {
         &self.nodes[id.index()]
     }
 
-    pub(crate) fn nodes(&self) -> &[Node<F>] {
+    pub(crate) fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
@@ -402,7 +406,10 @@ impl<F: PrimeField> Graph<F> {
     /// several entries can name the same signal and the witness projection is last-write-wins, so
     /// reordering could change which value ends up in a shared signal slot. Returns whether
     /// anything was dropped.
-    pub(crate) fn retain_outputs(&mut self, mut keep: impl FnMut(SignalIdx, ValueId) -> bool) -> bool {
+    pub(crate) fn retain_outputs(
+        &mut self,
+        mut keep: impl FnMut(SignalIdx, ValueId) -> bool,
+    ) -> bool {
         let before = self.outputs.len();
         self.outputs.retain(|&(signal, value)| keep(signal, value));
         self.outputs.len() != before
@@ -432,10 +439,11 @@ impl<F: PrimeField> Graph<F> {
     /// node an output still depends on is a caller bug, and panics loudly). For passes whose
     /// transformation isn't a node-for-node substitution and so cannot use [`Graph::rewrite`]
     /// (`round_schedule` merges nodes, which changes arity).
-    pub(crate) fn rebuild_nodes(&mut self, nodes: Vec<Node<F>>, remap: &[Option<ValueId>]) {
+    pub(crate) fn rebuild_nodes(&mut self, nodes: Vec<Node>, remap: &[Option<ValueId>]) {
         self.nodes = nodes;
         for (_, value) in self.outputs.iter_mut() {
-            *value = remap[value.index()].expect("rebuild_nodes dropped a node an output depends on");
+            *value =
+                remap[value.index()].expect("rebuild_nodes dropped a node an output depends on");
         }
     }
 
@@ -637,8 +645,12 @@ impl<F: PrimeField> Graph<F> {
                     );
                 }
             }
-            if !self.lowered && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_)) {
-                eyre::bail!("node {i} ({:?}) is an MPC-lowering op but the graph is not lowered", node.op);
+            if !self.lowered && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_))
+            {
+                eyre::bail!(
+                    "node {i} ({:?}) is an MPC-lowering op but the graph is not lowered",
+                    node.op
+                );
             }
             for input in &node.inputs {
                 if input.index() >= i {
@@ -698,7 +710,7 @@ impl<F: PrimeField> Graph<F> {
     /// return value.
     pub(crate) fn rewrite(
         &mut self,
-        mut f: impl FnMut(ValueId, &Node<F>, &[Node<F>]) -> RewriteAction<F>,
+        mut f: impl FnMut(ValueId, &Node, &[Node]) -> RewriteAction,
     ) -> bool {
         let old_len = self.nodes.len();
         let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
@@ -709,9 +721,7 @@ impl<F: PrimeField> Graph<F> {
             let remapped_inputs = node
                 .inputs
                 .iter()
-                .map(|input| {
-                    remap[input.index()].expect("rewrite visited a node before its input")
-                })
+                .map(|input| remap[input.index()].expect("rewrite visited a node before its input"))
                 .collect();
             let remapped_node = Node {
                 op: node.op,
@@ -751,7 +761,7 @@ impl<F: PrimeField> Graph<F> {
     }
 }
 
-impl<F: PrimeField> std::fmt::Debug for Graph<F> {
+impl std::fmt::Debug for Graph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== graph ({} nodes) ===", self.nodes.len())?;
         for (idx, node) in self.nodes.iter().enumerate() {
@@ -772,7 +782,7 @@ mod tests {
 
     // x0 = Input(0); x1 = Constant(2); x2 = Add(x0, x1); x3 = Mul(x0, x1) [dead: no output uses it]
     // output signal 0 <- x2
-    fn sample_graph() -> Graph<Fr> {
+    fn sample_graph() -> Graph {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(0)), vec![]),
             Node::new(Op::Constant(Fr::from(2u64)), vec![]),
@@ -809,7 +819,7 @@ mod tests {
             Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(3))];
-        let graph: Graph<Fr> = Graph::from_parts(
+        let graph: Graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -833,7 +843,7 @@ mod tests {
     fn verify_rejects_a_site_with_no_precompute_node() {
         let nodes = vec![Node::new(Op::Input(SignalIdx::new(1)), vec![])];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph: Graph<Fr> = Graph::from_parts(
+        let graph: Graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -862,7 +872,7 @@ mod tests {
             Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(4))];
-        let mut graph: Graph<Fr> = Graph::from_parts(
+        let mut graph: Graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -889,7 +899,7 @@ mod tests {
             Node::new(Op::Constant(Fr::from(1u64)), vec![]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph: Graph<Fr> =
+        let graph: Graph =
             Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }
@@ -905,7 +915,7 @@ mod tests {
         let mut nodes = nodes;
         nodes.push(bad);
         let outputs = vec![(SignalIdx::new(0), ValueId::new(1))];
-        let graph: Graph<Fr> =
+        let graph: Graph =
             Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }

@@ -75,7 +75,7 @@ fn config(case: &Case) -> CompilerConfig {
 
 /// Compiles a case and builds its inputs, printing the round shape so a timing can be read against
 /// it. Compilation is deliberately outside the measured closure.
-fn prepare(case: &Case) -> (Program<Fr>, Vec<Fr>) {
+fn prepare(case: &Case) -> (Program, Vec<Fr>) {
     let graph = CoCircomCompiler::parse(case.path.clone(), config(case))
         .unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let summary = graph.mpc_summary();
@@ -102,7 +102,7 @@ fn prepare(case: &Case) -> (Program<Fr>, Vec<Fr>) {
     (program, values)
 }
 
-fn run_plain(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
+fn run_plain(program: &Program, values: &[Fr]) -> Vec<Fr> {
     let inputs = program.classify_inputs(values, |v| v);
     let mut driver = PlainDriver;
     Machine::run(program, &mut driver, &inputs).expect("plain run")
@@ -110,7 +110,7 @@ fn run_plain(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
 
 fn bench(c: &mut Criterion) {
     println!("\n--- circuit shapes (round count is the floor MPC time cannot go below) ---");
-    let prepared: Vec<(Case, Program<Fr>, Vec<Fr>)> = cases()
+    let prepared: Vec<(Case, Program, Vec<Fr>)> = cases()
         .into_iter()
         .map(|case| {
             let (program, values) = prepare(&case);

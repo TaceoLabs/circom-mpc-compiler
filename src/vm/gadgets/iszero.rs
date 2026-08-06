@@ -2,15 +2,16 @@
 //! needs to constrain it: `inv <-- in!=0 ? 1/in : 0`, `out <== -in*inv + 1`). See
 //! `ir::PrecomputeKind::IsZero`.
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::{Field, One, Zero};
 
 /// `[out, inv]`.
-pub fn plain_trace<F: PrimeField>(x: F) -> [F; 2] {
+pub fn plain_trace(x: Fr) -> [Fr; 2] {
     if x.is_zero() {
-        [F::one(), F::zero()]
+        [Fr::one(), Fr::zero()]
     } else {
         [
-            F::zero(),
+            Fr::zero(),
             x.inverse().expect("x is non-zero, checked above"),
         ]
     }
@@ -24,11 +25,11 @@ pub fn plain_trace<F: PrimeField>(x: F) -> [F; 2] {
 /// a genuine zero; `helper = inv - is_zero` cancels the mask back out. `out = is_zero`, `inv =
 /// helper`.
 #[cfg(feature = "rep3")]
-pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
-    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+pub fn rep3_trace<N: mpc_net::Network>(
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
     use mpc_core::protocols::rep3::{arithmetic, binary, conversion};
 
     let bits = super::a2b_many_selector(inputs, net, state)?;
@@ -54,42 +55,35 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
 ///
 /// Each input is multiplied by its own fresh secret arithmetic mask and the products are opened
 /// together. A non-zero product gives `inv = mask / product = 1 / input`; a zero product gives the
-/// public zero predicate. A uniformly random mask is itself zero with probability `1/|F|`, which
+/// public zero predicate. A uniformly random mask is itself zero with probability `1/|Fr|`, which
 /// can falsely classify a non-zero input, so the statistical-soundness tradeoff is restricted to
 /// BN254 here as well as in codegen and `Program::validate`.
 #[cfg(feature = "rep3")]
 #[allow(clippy::type_complexity)]
-pub fn rep3_masked_reveal_trace<F: PrimeField, N: mpc_net::Network>(
-    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<
     Vec<(
-        mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>,
-        mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>,
-        F,
+        mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>,
+        mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>,
+        Fr,
     )>,
 > {
-    use ark_ff::BigInteger;
     use mpc_core::protocols::rep3::{arithmetic, Rep3PrimeFieldShare};
     use mpc_core::MpcState;
 
-    eyre::ensure!(
-        F::MODULUS.to_bytes_le() == ark_bn254::Fr::MODULUS.to_bytes_le(),
-        "masked IsZero/Reveal fusion is supported only over BN254"
-    );
     eyre::ensure!(!inputs.is_empty(), "masked IsZero/Reveal batch is empty");
 
-    let masks: Vec<_> = (0..inputs.len())
-        .map(|_| arithmetic::rand(state))
-        .collect();
+    let masks: Vec<_> = (0..inputs.len()).map(|_| arithmetic::rand(state)).collect();
     let opened = arithmetic::mul_open_vec(inputs, &masks, net, state)?;
     Ok(masks
         .into_iter()
         .zip(opened)
         .map(|(mask, product)| {
             if product.is_zero() {
-                let is_zero = F::one();
+                let is_zero = Fr::one();
                 (
                     Rep3PrimeFieldShare::promote_from_trivial(&is_zero, state.id()),
                     Rep3PrimeFieldShare::default(),
@@ -100,7 +94,7 @@ pub fn rep3_masked_reveal_trace<F: PrimeField, N: mpc_net::Network>(
                 (
                     Rep3PrimeFieldShare::default(),
                     arithmetic::mul_public(mask, inverse),
-                    F::zero(),
+                    Fr::zero(),
                 )
             }
         })
@@ -152,16 +146,13 @@ mod tests {
         use crate::vm::gadgets::test_support::run3_counted_with_a2b;
 
         let values = [Fr::from(0u64), Fr::from(7u64)];
-        let (_, rounds) = run3_counted_with_a2b(
-            &values,
-            A2BType::default(),
-            |net, state, shares| {
+        let (_, rounds) =
+            run3_counted_with_a2b(&values, A2BType::default(), |net, state, shares| {
                 Ok(rep3_masked_reveal_trace(shares, net, state)?
                     .into_iter()
                     .flat_map(|(is_zero, inverse, _)| [is_zero, inverse])
                     .collect())
-            },
-        );
+            });
         assert_eq!(rounds.by_party, [1, 1, 1]);
     }
 

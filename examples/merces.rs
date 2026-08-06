@@ -244,7 +244,7 @@ fn main() -> eyre::Result<()> {
 /// across its two peer connections - see `vm::counting_net`), and, if a zkey was given, party 0's
 /// verifying key/proof/public-inputs.
 fn run_rep3(
-    program: &Program<Fr>,
+    program: &Program,
     values: &[Fr],
     zkey: Option<&(ConstraintMatrices<Fr>, ProvingKey<Bn254>)>,
 ) -> (
@@ -285,8 +285,7 @@ fn run_rep3(
                         .iter()
                         .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
                     net.reset();
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                     let preprocessing_rounds = net.rounds();
                     net.reset();
                     let mut next = 0;

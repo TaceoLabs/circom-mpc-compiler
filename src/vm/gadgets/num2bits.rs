@@ -2,17 +2,18 @@
 //! `out[i] = (in >> i) & 1` (`circuits/libs/bitify.circom`). No intermediates: `n` outputs, and
 //! nothing else - see `ir::PrecomputeKind::Num2Bits`.
 
-use ark_ff::{BigInteger, PrimeField};
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, One, PrimeField, Zero};
 
 /// `x`'s canonical representative, as `n` bits, least-significant first.
-pub fn plain_trace<F: PrimeField>(x: F, n: usize) -> Vec<F> {
+pub fn plain_trace(x: Fr, n: usize) -> Vec<Fr> {
     let bigint = x.into_bigint();
     (0..n)
         .map(|i| {
             if bigint.get_bit(i) {
-                F::one()
+                Fr::one()
             } else {
-                F::zero()
+                Fr::zero()
             }
         })
         .collect()
@@ -22,12 +23,12 @@ pub fn plain_trace<F: PrimeField>(x: F, n: usize) -> Vec<F> {
 /// one strategy-selected A2B conversion across every site's input, then one `bit_inject_many`
 /// across every site's bits.
 #[cfg(feature = "rep3")]
-pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
+pub fn rep3_trace<N: mpc_net::Network>(
     n: usize,
-    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
     use mpc_core::protocols::rep3::conversion;
     use num_bigint::BigUint;
     use num_traits::One;

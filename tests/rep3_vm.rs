@@ -215,8 +215,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
                         share
                     });
 
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                     let preparation_rounds = net.rounds();
                     let first = Machine::run(program, &mut driver, &inputs).unwrap();
                     let first_online_rounds = net.rounds() - preparation_rounds;
@@ -230,7 +229,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
 
                     let before_fresh_preparation = net.rounds();
                     let mut fresh_driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                        Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                     let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
                     let before_fresh_run = net.rounds();
                     let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();
@@ -313,8 +312,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
                         next += 1;
                         share
                     });
-                    let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
 
                     let before_error = net.rounds();
                     let execution_error = Machine::run(program, &mut driver, &[])
@@ -330,7 +328,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
 
                     let before_fresh_preparation = net.rounds();
                     let mut fresh_driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&net, &mut state, program).unwrap();
+                        Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                     let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
                     let before_fresh_run = net.rounds();
                     let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();

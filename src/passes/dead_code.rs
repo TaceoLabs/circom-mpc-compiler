@@ -7,11 +7,9 @@
 //! pruning, every dead result slot would stay bound into `outputs`, survive every later pass,
 //! reserve a real codegen slot, and be copied around by `Machine::run`.
 
-use ark_ff::PrimeField;
-
 use crate::ir::Graph;
 
-pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     // Hand-built graphs (pass unit tests, codegen tests) pass an empty `signal_to_witness`.
     // Pruning against an empty witness would delete every output, so skip the pruning there.
     let mut changed = false;
@@ -26,7 +24,10 @@ pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
             }
         }
         changed |= graph.retain_outputs(|signal, _value| {
-            witness_mask.get(signal.index() + 1).copied().unwrap_or(false)
+            witness_mask
+                .get(signal.index() + 1)
+                .copied()
+                .unwrap_or(false)
         });
     }
 

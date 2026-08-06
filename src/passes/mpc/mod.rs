@@ -9,13 +9,11 @@ mod mul_split;
 pub(crate) mod precompute_schedule;
 mod round_schedule;
 
-use ark_ff::PrimeField;
-
 use super::PassFn;
 
 /// The lowering pipeline, in order: split every secret multiplication into its local and network
 /// parts, then batch the resulting rounds by multiplicative depth.
-pub(super) fn pipeline<F: PrimeField>() -> Vec<(&'static str, PassFn<F>)> {
+pub(super) fn pipeline() -> Vec<(&'static str, PassFn)> {
     vec![
         ("mpc::mul_split", mul_split::run),
         ("mpc::round_schedule", round_schedule::run),

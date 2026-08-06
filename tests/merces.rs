@@ -33,16 +33,16 @@ fn manifest_dir() -> &'static str {
 /// Compiles a merces main once and shares it across every scenario in this test binary -
 /// `CoCircomCompiler::parse` costs seconds on `transfer_arity4_batch8`, and nothing about parsing or
 /// codegen depends on the scenario's input values.
-fn compiled(main: &str) -> &'static (Program<Fr>, InputList) {
-    fn build(main: &str) -> (Program<Fr>, InputList) {
+fn compiled(main: &str) -> &'static (Program, InputList) {
+    fn build(main: &str) -> (Program, InputList) {
         let graph = CoCircomCompiler::parse(merces_main_path(main), merces_config())
             .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
         let input_list = graph.input_list.clone();
         let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"));
         (program, input_list)
     }
-    static BATCH1: OnceLock<(Program<Fr>, InputList)> = OnceLock::new();
-    static BATCH8: OnceLock<(Program<Fr>, InputList)> = OnceLock::new();
+    static BATCH1: OnceLock<(Program, InputList)> = OnceLock::new();
+    static BATCH8: OnceLock<(Program, InputList)> = OnceLock::new();
     match main {
         "transfer_arity4_batch1" => BATCH1.get_or_init(|| build(main)),
         "transfer_arity4_batch8" => BATCH8.get_or_init(|| build(main)),
@@ -58,7 +58,7 @@ fn scenario_values(main: &str, name: &str) -> Vec<Fr> {
         .unwrap_or_else(|e| panic!("{main}/{name}: {e}"))
 }
 
-fn plain_witness(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
+fn plain_witness(program: &Program, values: &[Fr]) -> Vec<Fr> {
     let inputs = program.classify_inputs(values, |v| v);
     let mut driver = PlainDriver;
     Machine::run(program, &mut driver, &inputs).unwrap_or_else(|e| panic!("plain run: {e}"))
@@ -254,7 +254,7 @@ fn proves_and_verifies(main: &str, scenario: &str) {
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&ext_net, A2BType::default()).unwrap();
                     let mut driver =
-                        Rep3Driver::<Fr, _>::new_for_run(&ext_net, &mut state, program).unwrap();
+                        Rep3Driver::new_for_run(&ext_net, &mut state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = secret_shares[next][party];

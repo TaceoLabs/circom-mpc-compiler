@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use ark_ec::pairing::Pairing;
+use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
 use circom_compiler::circuit_design::template::TemplateCode;
 use circom_compiler::intermediate_representation::ir_interface::{
@@ -26,7 +26,7 @@ pub(crate) fn to_u64(x: usize) -> u64 {
     u64::try_from(x).expect("fits into u64")
 }
 
-pub(crate) fn to_usize<F: PrimeField>(c: F) -> usize {
+pub(crate) fn to_usize(c: Fr) -> usize {
     let big_int: BigUint = c.into_bigint().into();
     usize::try_from(big_int).expect("field element does not fit into usize")
 }
@@ -40,15 +40,15 @@ pub(crate) fn to_usize<F: PrimeField>(c: F) -> usize {
 /// - [`TemplateOp::SubCmpInput`] / [`TemplateOp::SubCmpOutput`]: a port of a *local* subcomponent
 ///   instance, addressed by that instance's index within this template.
 #[derive(Clone)]
-pub(crate) enum TemplateOp<F: PrimeField> {
+pub(crate) enum TemplateOp {
     LocalSignal(usize),
     LocalSignalWrite(usize),
     SubCmpInput { sub_cmp: usize, port: usize },
     SubCmpOutput { sub_cmp: usize, port: usize },
-    Real(Op<F>),
+    Real(Op),
 }
 
-impl<F: PrimeField> TemplateOp<F> {
+impl TemplateOp {
     fn arity(&self) -> usize {
         match self {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
@@ -64,18 +64,18 @@ impl<F: PrimeField> TemplateOp<F> {
 }
 
 #[derive(Clone)]
-pub(crate) struct TemplateNode<F: PrimeField> {
-    pub(crate) op: TemplateOp<F>,
+pub(crate) struct TemplateNode {
+    pub(crate) op: TemplateOp,
     pub(crate) inputs: Vec<ValueId>,
 }
 
 /// One instantiation of a subcomponent inside a template: which template it is, and at what
 /// signal offset in the enclosing circuit's flat signal space it lives.
 #[derive(Clone)]
-pub(crate) enum SubGraphInstance<F: PrimeField> {
+pub(crate) enum SubGraphInstance {
     /// A regular subcomponent, to be recursively inlined by `frontend/inline.rs`.
     Compiled {
-        template: TemplateGraph<F>,
+        template: TemplateGraph,
         signal_offset: usize,
     },
     /// A recognized gadget template: its body is never compiled - `frontend/inline.rs` turns this
@@ -104,19 +104,19 @@ pub(crate) struct PrecomputedInstance {
 /// subcomponent instantiated by this template's body, in creation order — matching the
 /// `sub_cmp` index used by [`TemplateOp::SubCmpInput`] / [`TemplateOp::SubCmpOutput`].
 #[derive(Clone)]
-pub(crate) struct TemplateGraph<F: PrimeField> {
-    pub(crate) nodes: Vec<TemplateNode<F>>,
-    pub(crate) sub_graphs: Vec<SubGraphInstance<F>>,
+pub(crate) struct TemplateGraph {
+    pub(crate) nodes: Vec<TemplateNode>,
+    pub(crate) sub_graphs: Vec<SubGraphInstance>,
 }
 
-pub(crate) struct GraphCompiler<'a, P: Pairing> {
-    pub(crate) nodes: Vec<TemplateNode<P::ScalarField>>,
+pub(crate) struct GraphCompiler<'a> {
+    pub(crate) nodes: Vec<TemplateNode>,
     pub(crate) var_to_value: FxHashMap<usize, ValueId>,
-    pub(crate) sub_graphs: Vec<SubGraphInstance<P::ScalarField>>,
+    pub(crate) sub_graphs: Vec<SubGraphInstance>,
     pub(crate) code: TemplateCode,
     pub(crate) templates: &'a mut HashMap<String, TemplateCode>,
-    pub(crate) compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
-    pub(crate) constant_table: &'a [P::ScalarField],
+    pub(crate) compiled_graphs: &'a mut FxHashMap<String, TemplateGraph>,
+    pub(crate) constant_table: &'a [Fr],
     /// Every template header's total flat signal count (own signals + everything transitively
     /// instantiated), keyed the same way `templates` is - see
     /// `frontend/mod.rs::compute_signal_spans`. Only consulted for recognized gadget templates, to
@@ -124,12 +124,12 @@ pub(crate) struct GraphCompiler<'a, P: Pairing> {
     pub(crate) precompute_spans: &'a FxHashMap<String, usize>,
 }
 
-impl<'a, P: Pairing> GraphCompiler<'a, P> {
+impl<'a> GraphCompiler<'a> {
     pub(crate) fn new(
         code: TemplateCode,
         templates: &'a mut HashMap<String, TemplateCode>,
-        compiled_graphs: &'a mut FxHashMap<String, TemplateGraph<P::ScalarField>>,
-        constant_table: &'a [P::ScalarField],
+        compiled_graphs: &'a mut FxHashMap<String, TemplateGraph>,
+        constant_table: &'a [Fr],
         precompute_spans: &'a FxHashMap<String, usize>,
     ) -> Self {
         Self {
@@ -144,14 +144,14 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    pub(crate) fn push(&mut self, op: TemplateOp<P::ScalarField>, inputs: Vec<ValueId>) -> ValueId {
+    pub(crate) fn push(&mut self, op: TemplateOp, inputs: Vec<ValueId>) -> ValueId {
         debug_assert_eq!(inputs.len(), op.arity(), "template node arity mismatch");
         let id = ValueId::new(self.nodes.len());
         self.nodes.push(TemplateNode { op, inputs });
         id
     }
 
-    pub(crate) fn push_constant_value(&mut self, constant: P::ScalarField) -> ValueId {
+    pub(crate) fn push_constant_value(&mut self, constant: Fr) -> ValueId {
         self.push(TemplateOp::Real(Op::Constant(constant)), vec![])
     }
 
@@ -309,7 +309,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     fn push_instances(
         &mut self,
         create_cmp_bucket: &CreateCmpBucket,
-        mut make: impl FnMut(usize) -> SubGraphInstance<P::ScalarField>,
+        mut make: impl FnMut(usize) -> SubGraphInstance,
     ) {
         let mut offset = create_cmp_bucket.signal_offset;
         let offset_jump = create_cmp_bucket.signal_offset_jump;
@@ -413,7 +413,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         // the result for every later instantiation to hit the fast path above.
         let template_code = self.templates.remove(&symbol).expect("must be here");
         tracing::debug!("start compilation of {}", symbol);
-        let sub_cmp_compiler = GraphCompiler::<P>::new(
+        let sub_cmp_compiler = GraphCompiler::new(
             template_code,
             self.templates,
             self.compiled_graphs,
@@ -450,7 +450,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     /// iteration - unroll.rs just never rewrites it to a literal `Op::Constant` node the way it
     /// does for the one variable it tracks explicitly - so without this fold it looked
     /// indistinguishable from a real non-constant value.
-    fn eval_constant_node(&self, value_id: ValueId) -> Option<P::ScalarField> {
+    fn eval_constant_node(&self, value_id: ValueId) -> Option<Fr> {
         let node = &self.nodes[value_id.index()];
         match &node.op {
             TemplateOp::Real(Op::Constant(c)) => Some(*c),
@@ -738,7 +738,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     ///
     /// Shares [`Self::eval_constant_node`] with address computation, which needs the identical
     /// capability for `arr[N-1-i]`-style indexing.
-    fn eval_constant_operand(&mut self, inst: &Instruction) -> Option<P::ScalarField> {
+    fn eval_constant_operand(&mut self, inst: &Instruction) -> Option<Fr> {
         let value_id = self.expect_value(inst).ok()?;
         self.eval_constant_node(value_id)
     }
@@ -779,7 +779,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         }
     }
 
-    pub(crate) fn parse(mut self) -> Result<TemplateGraph<P::ScalarField>> {
+    pub(crate) fn parse(mut self) -> Result<TemplateGraph> {
         tracing::debug!("parsing {}", self.code.header);
         let body = std::mem::take(&mut self.code.body);
         for inst in body.iter() {

@@ -33,7 +33,7 @@ const SEED: u64 = 0;
 /// Compiles `transfer_arity4_batch{n}.circom` and builds its seeded-random inputs, printing the
 /// round shape so a timing can be read against it. Compilation is deliberately outside the measured
 /// closure - parsing batch32 alone takes seconds.
-fn prepare(n: usize) -> (Program<Fr>, Vec<Fr>) {
+fn prepare(n: usize) -> (Program, Vec<Fr>) {
     let path = merces_main_path(&format!("transfer_arity4_batch{n}"));
     let graph =
         CoCircomCompiler::parse(path, merces_config()).unwrap_or_else(|e| panic!("batch{n}: {e}"));
@@ -53,7 +53,7 @@ fn prepare(n: usize) -> (Program<Fr>, Vec<Fr>) {
     (program, values)
 }
 
-fn run_plain(program: &Program<Fr>, values: &[Fr]) -> Vec<Fr> {
+fn run_plain(program: &Program, values: &[Fr]) -> Vec<Fr> {
     let inputs = program.classify_inputs(values, |v| v);
     let mut driver = PlainDriver;
     Machine::run(program, &mut driver, &inputs).expect("plain run")
@@ -77,7 +77,7 @@ fn rep3_setup() -> (Vec<LocalNetwork>, Vec<Rep3State>) {
 /// One full 3-party total-cost execution over the long-lived `networks`/`states` `rep3_setup` built
 /// for this `N`, including fresh program-wide Poseidon2 preprocessing on every run.
 fn run_rep3(
-    program: &Program<Fr>,
+    program: &Program,
     values: &[Fr],
     shares: &[[Rep3PrimeFieldShare<Fr>; 3]],
     networks: &[LocalNetwork],
@@ -90,7 +90,7 @@ fn run_rep3(
             .enumerate()
             .map(|(party, (net, state))| {
                 scope.spawn(move || {
-                    let mut driver = Rep3Driver::<Fr, _>::new_for_run(net, state, program).unwrap();
+                    let mut driver = Rep3Driver::new_for_run(net, state, program).unwrap();
                     let mut next = 0;
                     let inputs = program.classify_inputs(values, |_v| {
                         let s = shares[next][party];

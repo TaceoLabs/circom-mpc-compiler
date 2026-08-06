@@ -15,7 +15,9 @@
 //! batch's s-boxes at one round are a single `sbox_layer` call), and `SiteOutput` the sparse sink
 //! that records only requested result slots while the walk still evolves the full state.
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+#[cfg(feature = "rep3")]
+use ark_ff::AdditiveGroup;
 
 use super::poseidon2_constants::{partial_rounds, RoundConstants};
 
@@ -109,37 +111,37 @@ struct SboxTrace<V> {
 
 /// The field operations the walker needs. Everything except [`Self::sbox_layer`] is local work, free
 /// in every domain.
-trait Ops<F: PrimeField> {
+trait Ops {
     type V: Clone;
 
     /// A known constant as a value. The circuit's `RC[..]` signals are real witness positions, so
     /// these must be representable in `V`, not just used as scalars.
-    fn public(&mut self, c: F) -> Self::V;
+    fn public(&mut self, c: Fr) -> Self::V;
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Self::V;
-    fn add_public(&mut self, a: &Self::V, c: F) -> Self::V;
-    fn mul_public(&mut self, a: &Self::V, c: F) -> Self::V;
+    fn add_public(&mut self, a: &Self::V, c: Fr) -> Self::V;
+    fn mul_public(&mut self, a: &Self::V, c: Fr) -> Self::V;
     /// One s-box layer for a whole batch at once - the only step that communicates.
     fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>>;
 }
 
 struct PlainOps;
 
-impl<F: PrimeField> Ops<F> for PlainOps {
-    type V = F;
+impl Ops for PlainOps {
+    type V = Fr;
 
-    fn public(&mut self, c: F) -> F {
+    fn public(&mut self, c: Fr) -> Fr {
         c
     }
-    fn add(&mut self, a: &F, b: &F) -> F {
+    fn add(&mut self, a: &Fr, b: &Fr) -> Fr {
         *a + *b
     }
-    fn add_public(&mut self, a: &F, c: F) -> F {
+    fn add_public(&mut self, a: &Fr, c: Fr) -> Fr {
         *a + c
     }
-    fn mul_public(&mut self, a: &F, c: F) -> F {
+    fn mul_public(&mut self, a: &Fr, c: Fr) -> Fr {
         *a * c
     }
-    fn sbox_layer(&mut self, xs: &[F]) -> eyre::Result<Vec<SboxTrace<F>>> {
+    fn sbox_layer(&mut self, xs: &[Fr]) -> eyre::Result<Vec<SboxTrace<Fr>>> {
         Ok(xs
             .iter()
             .map(|&x| {
@@ -246,12 +248,7 @@ impl Layout {
 
 /// `Acc(n)` over `input`. Records `[out][in[n]][sums[n]]` at `base`, while retaining only the
 /// running sum needed by state evolution.
-fn acc<F: PrimeField, O: Ops<F>>(
-    ops: &mut O,
-    input: &[O::V],
-    trace: &mut SiteOutput<'_, O::V>,
-    base: usize,
-) -> O::V {
+fn acc<O: Ops>(ops: &mut O, input: &[O::V], trace: &mut SiteOutput<'_, O::V>, base: usize) -> O::V {
     let n = input.len();
     trace.record_slice(base + 1, input);
     let mut sum = input[0].clone();
@@ -265,14 +262,14 @@ fn acc<F: PrimeField, O: Ops<F>>(
 }
 
 /// `ExternalMatMul2`/`3`/`4` over exactly 2, 3 or 4 elements.
-fn external_matmul_leaf<F: PrimeField, O: Ops<F>>(
+fn external_matmul_leaf<O: Ops>(
     ops: &mut O,
     input: &[O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
 ) -> Vec<O::V> {
-    let two = F::from(2u64);
-    let four = F::from(4u64);
+    let two = Fr::from(2u64);
+    let four = Fr::from(4u64);
     let t = input.len();
     trace.record_slice(base + t, input);
     let out = match t {
@@ -330,7 +327,7 @@ fn external_matmul_leaf<F: PrimeField, O: Ops<F>>(
 }
 
 /// `ExternalMatMulT(t)`: `[out[t]][in[t]][subtree]`.
-fn external_matmul<F: PrimeField, O: Ops<F>>(
+fn external_matmul<O: Ops>(
     ops: &mut O,
     input: &[O::V],
     trace: &mut SiteOutput<'_, O::V>,
@@ -380,14 +377,14 @@ fn external_matmul<F: PrimeField, O: Ops<F>>(
 
 /// `InternalMatMul2`/`3` - a genuine nested subcomponent for those widths, hence its own block
 /// (`[out[t]][in[t]][sum]`) rather than inlined arithmetic.
-fn internal_matmul_leaf<F: PrimeField, O: Ops<F>>(
+fn internal_matmul_leaf<O: Ops>(
     ops: &mut O,
     input: &[O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
 ) -> Vec<O::V> {
     let t = input.len();
-    let two = F::from(2u64);
+    let two = Fr::from(2u64);
     let mut sum = input[0].clone();
     for x in &input[1..] {
         sum = ops.add(&sum, x);
@@ -413,10 +410,10 @@ fn internal_matmul_leaf<F: PrimeField, O: Ops<F>>(
 
 /// `InternalMatMulT(t)`: `[out[t]][in[t]]` plus either a nested `InternalMatMul2`/`3` subcomponent, or
 /// (for `t >= 4`) the own intermediate `acc` followed by its `Acc(t)` subtree.
-fn internal_matmul<F: PrimeField, O: Ops<F>>(
+fn internal_matmul<O: Ops>(
     ops: &mut O,
     input: &[O::V],
-    diag: &[F],
+    diag: &[Fr],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
 ) -> Vec<O::V> {
@@ -458,11 +455,11 @@ fn record_sbox_e<V: Clone>(
 
 /// Runs the permutation for every site in `states` (each `t` elements, concatenated) in lock-step,
 /// so each round's s-boxes across the whole batch are one [`Ops::sbox_layer`] call.
-fn walk<F: PrimeField, O: Ops<F>>(
+fn walk<O: Ops>(
     ops: &mut O,
     t: usize,
     states: &[O::V],
-    rc: &RoundConstants<F>,
+    rc: &RoundConstants,
     mut outputs: Vec<SiteOutput<'_, O::V>>,
 ) -> eyre::Result<Vec<O::V>> {
     let sites = states.len() / t;
@@ -484,7 +481,7 @@ fn walk<F: PrimeField, O: Ops<F>>(
     let full_round = |ops: &mut O,
                       current: &mut Vec<Vec<O::V>>,
                       outputs: &mut Vec<SiteOutput<'_, O::V>>,
-                      round_rc: &[F],
+                      round_rc: &[Fr],
                       layout_round: usize,
                       state_row: usize|
      -> eyre::Result<()> {
@@ -672,12 +669,12 @@ fn requested_outputs<'a, V: Clone>(
 /// All permutation state and s-box layers are still evaluated, because they feed later rounds. The
 /// optimization is that witness-dead state copies, round constants, and subcomponent intermediates
 /// are never materialized in the returned trace.
-pub fn plain_trace_requested<F: PrimeField>(
+pub fn plain_trace_requested(
     t: usize,
-    states: &[F],
+    states: &[Fr],
     result_requests: &[u32],
     result_offsets: &[u32],
-) -> eyre::Result<Vec<F>> {
+) -> eyre::Result<Vec<Fr>> {
     let sites = check_width(t, states.len())?;
     let capacity = result_slots(t);
     let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
@@ -715,18 +712,18 @@ pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
 /// entry per s-box element across every shared Poseidon2 service in one program execution. The
 /// pool is prepared once, then disjoint slices are consumed in instruction order.
 #[cfg(feature = "rep3")]
-pub(crate) struct Rep3Poseidon2Preprocessing<F: PrimeField> {
-    r: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
-    r2: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
-    r3: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
-    r4: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
-    r5: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>,
+pub(crate) struct Rep3Poseidon2Preprocessing {
+    r: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
+    r2: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
+    r3: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
+    r4: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
+    r5: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
     /// How many elements of the pool have already been handed to a `sbox_layer` call.
     consumed: usize,
 }
 
 #[cfg(feature = "rep3")]
-impl<F: PrimeField> Rep3Poseidon2Preprocessing<F> {
+impl Rep3Poseidon2Preprocessing {
     fn ensure_available(&self, count: usize) -> eyre::Result<()> {
         let end = self
             .consumed
@@ -756,11 +753,11 @@ impl<F: PrimeField> Rep3Poseidon2Preprocessing<F> {
 /// independent of `total_elements`. A zero budget is represented by empty vectors and performs no
 /// network operation.
 #[cfg(feature = "rep3")]
-pub(crate) fn preprocess_rep3<F: PrimeField, N: mpc_net::Network>(
+pub(crate) fn preprocess_rep3<N: mpc_net::Network>(
     total_elements: usize,
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Rep3Poseidon2Preprocessing<F>> {
+) -> eyre::Result<Rep3Poseidon2Preprocessing> {
     use mpc_core::protocols::rep3::arithmetic;
 
     if total_elements == 0 {
@@ -806,26 +803,26 @@ pub(crate) fn preprocess_rep3<F: PrimeField, N: mpc_net::Network>(
 /// rep3 backend. The s-box uses the masked-opening trick (see [`Rep3Ops::sbox_layer`]) so a whole
 /// layer costs **one** network round instead of the three a naive `x^2, x^4, x^5` chain needs.
 #[cfg(feature = "rep3")]
-struct Rep3Ops<'a, F: PrimeField, N: mpc_net::Network> {
+struct Rep3Ops<'a, N: mpc_net::Network> {
     net: &'a N,
     state: &'a mut mpc_core::protocols::rep3::Rep3State,
-    pool: &'a mut Rep3Poseidon2Preprocessing<F>,
+    pool: &'a mut Rep3Poseidon2Preprocessing,
 }
 
 #[cfg(feature = "rep3")]
-impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
-    type V = mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>;
+impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
+    type V = mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>;
 
-    fn public(&mut self, c: F) -> Self::V {
+    fn public(&mut self, c: Fr) -> Self::V {
         mpc_core::protocols::rep3::arithmetic::promote_to_trivial_share(self.state.id, c)
     }
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Self::V {
         mpc_core::protocols::rep3::arithmetic::add(*a, *b)
     }
-    fn add_public(&mut self, a: &Self::V, c: F) -> Self::V {
+    fn add_public(&mut self, a: &Self::V, c: Fr) -> Self::V {
         mpc_core::protocols::rep3::arithmetic::add_public(*a, c, self.state.id)
     }
-    fn mul_public(&mut self, a: &Self::V, c: F) -> Self::V {
+    fn mul_public(&mut self, a: &Self::V, c: Fr) -> Self::V {
         mpc_core::protocols::rep3::arithmetic::mul_public(*a, c)
     }
 
@@ -878,17 +875,17 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
             square = arithmetic::add_public(square, y2, self.state.id);
 
             // x^4 = y^4 + 4y^3 r + 6y^2 r2 + 4y r3 + r4
-            let mut pow4 = arithmetic::mul_public(r, y3 * F::from(4u64));
-            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, y2 * F::from(6u64)));
-            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, y * F::from(4u64)));
+            let mut pow4 = arithmetic::mul_public(r, y3 * Fr::from(4u64));
+            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, y2 * Fr::from(6u64)));
+            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, y * Fr::from(4u64)));
             pow4 = arithmetic::add(pow4, r4);
             pow4 = arithmetic::add_public(pow4, y4, self.state.id);
 
             // x^5 = y^5 + 5y^4 r + 10y^3 r2 + 10y^2 r3 + 5y r4 + r5
-            let mut fifth = arithmetic::mul_public(r, y4 * F::from(5u64));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, y3 * F::from(10u64)));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, y2 * F::from(10u64)));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, y * F::from(5u64)));
+            let mut fifth = arithmetic::mul_public(r, y4 * Fr::from(5u64));
+            fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, y3 * Fr::from(10u64)));
+            fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, y2 * Fr::from(10u64)));
+            fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, y * Fr::from(5u64)));
             fifth = arithmetic::add(fifth, r5);
             fifth = arithmetic::add_public(fifth, y5, self.state.id);
 
@@ -906,15 +903,15 @@ impl<F: PrimeField, N: mpc_net::Network> Ops<F> for Rep3Ops<'_, F, N> {
 /// online `8 + partial_rounds(t)` rounds; preparation is deliberately outside this call. Request
 /// sparsity changes only local trace retention, not the pool slice or round count.
 #[cfg(feature = "rep3")]
-pub(crate) fn rep3_trace_requested_preprocessed<F: PrimeField, N: mpc_net::Network>(
+pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
     t: usize,
-    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+    states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
-    preprocessing: &mut Rep3Poseidon2Preprocessing<F>,
+    preprocessing: &mut Rep3Poseidon2Preprocessing,
     result_requests: &[u32],
     result_offsets: &[u32],
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
     let sites = check_width(t, states.len())?;
     let required = mask_elements(t, sites)?;
     preprocessing.ensure_available(required)?;
@@ -1080,7 +1077,7 @@ mod tests {
     fn rejects_unsupported_width_and_ragged_input() {
         assert!(plain_trace_requested(5, &[Fr::from(0u64); 5], &[], &[0]).is_err());
         assert!(plain_trace_requested(12, &[Fr::from(0u64); 12], &[], &[0]).is_err());
-        assert!(plain_trace_requested::<Fr>(3, &[], &[], &[0]).is_err());
+        assert!(plain_trace_requested(3, &[], &[], &[0]).is_err());
         assert!(plain_trace_requested(3, &[Fr::from(0u64); 4], &[], &[0]).is_err());
     }
 
@@ -1093,7 +1090,7 @@ mod tests {
         ))
         .expect("the vendored constants circuit must be readable");
         for t in SUPPORTED_WIDTHS {
-            let rc = RoundConstants::<Fr>::load(t).unwrap();
+            let rc = RoundConstants::load(t).unwrap();
             assert_eq!(rc.full1.len(), 4 * t, "t={t} rc_full1");
             assert_eq!(rc.full2.len(), 4 * t, "t={t} rc_full2");
             assert_eq!(rc.partial.len(), partial_rounds(t), "t={t} rc_partial");
@@ -1237,7 +1234,7 @@ mod tests {
         let budget = mask_elements(8, 3).unwrap();
         let (_, rounds) =
             run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
-                let preprocessing = preprocess_rep3::<Fr, _>(budget, net, state)?;
+                let preprocessing = preprocess_rep3(budget, net, state)?;
                 eyre::ensure!(preprocessing.r.len() == budget);
                 eyre::ensure!(preprocessing.consumed == 0);
                 Ok(Vec::new())
@@ -1246,7 +1243,7 @@ mod tests {
 
         let (_, zero_rounds) =
             run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
-                let preprocessing = preprocess_rep3::<Fr, _>(0, net, state)?;
+                let preprocessing = preprocess_rep3(0, net, state)?;
                 preprocessing.ensure_consumed()?;
                 Ok(Vec::new())
             });

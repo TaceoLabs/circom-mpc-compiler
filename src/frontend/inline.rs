@@ -12,7 +12,6 @@
 //! (`local_writes`), regardless of nesting level - so a subcomponent reading back its own output
 //! signal resolves the same way a top-level circuit does.
 
-use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
 use super::build::{PrecomputedInstance, SubGraphInstance, TemplateGraph, TemplateOp};
@@ -30,11 +29,11 @@ use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
 ///
 /// Returns this template's own output-port map, so a caller holding a `SubCmpOutput` reference
 /// can resolve it once this call returns.
-pub(super) fn inline_template<F: PrimeField>(
-    nodes: &mut Vec<ir::Node<F>>,
+pub(super) fn inline_template(
+    nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
-    template: TemplateGraph<F>,
+    template: TemplateGraph,
     signal_offset: usize,
     is_root: bool,
     input_mapping: &FxHashMap<usize, ValueId>,
@@ -133,7 +132,14 @@ pub(super) fn inline_template<F: PrimeField>(
         if let Some(instance) = instance {
             // Nothing in this template holds a SubCmpOutput reference to it (that's exactly why
             // it's still Some here) - its port_outputs map has no reader, so discard it.
-            inline_sub_graph_instance(nodes, outputs, precompute_sites, instance, signal_offset, &inputs);
+            inline_sub_graph_instance(
+                nodes,
+                outputs,
+                precompute_sites,
+                instance,
+                signal_offset,
+                &inputs,
+            );
         }
     }
 
@@ -154,11 +160,11 @@ pub(super) fn inline_template<F: PrimeField>(
 /// template that itself instantiates a leaf): the leaf's offset must accumulate the mid template's
 /// own placement, or the leaf's signals collide with whatever unrelated signal happens to occupy that
 /// low, unadjusted offset elsewhere in the flat witness - a silently wrong witness, not a panic.
-fn inline_sub_graph_instance<F: PrimeField>(
-    nodes: &mut Vec<ir::Node<F>>,
+fn inline_sub_graph_instance(
+    nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
-    instance: SubGraphInstance<F>,
+    instance: SubGraphInstance,
     parent_offset: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
@@ -175,9 +181,14 @@ fn inline_sub_graph_instance<F: PrimeField>(
             false,
             sub_cmp_inputs,
         ),
-        SubGraphInstance::Precomputed(site) => {
-            inline_precomputed(nodes, outputs, precompute_sites, site, parent_offset, sub_cmp_inputs)
-        }
+        SubGraphInstance::Precomputed(site) => inline_precomputed(
+            nodes,
+            outputs,
+            precompute_sites,
+            site,
+            parent_offset,
+            sub_cmp_inputs,
+        ),
     }
 }
 
@@ -186,8 +197,8 @@ fn inline_sub_graph_instance<F: PrimeField>(
 /// slots `0..num_outputs` are the gadget's own outputs (signals `signal_offset ..`), slots
 /// `num_outputs..` are its subtree's intermediate signals in flat order (signals
 /// `signal_offset + num_outputs + num_inputs ..`).
-fn inline_precomputed<F: PrimeField>(
-    nodes: &mut Vec<ir::Node<F>>,
+fn inline_precomputed(
+    nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
     precompute_sites: &mut Vec<PrecomputeSite>,
     site: PrecomputedInstance,
@@ -237,7 +248,9 @@ fn inline_precomputed<F: PrimeField>(
         .map(|k| {
             let local_signal = num_outputs + k;
             let value = *sub_cmp_inputs.get(&local_signal).unwrap_or_else(|| {
-                panic!("precomputed component input signal {local_signal} read before it was provided")
+                panic!(
+                    "precomputed component input signal {local_signal} read before it was provided"
+                )
             });
             outputs.push((SignalIdx::new(signal_offset + local_signal), value));
             value

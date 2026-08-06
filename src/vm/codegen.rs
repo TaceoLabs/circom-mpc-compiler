@@ -1,15 +1,15 @@
-//! `Graph<F>` -> `Program<F>`: not a `Pass` (it changes representation, not the IR), called by
+//! `Graph` -> `Program`: not a `Pass` (it changes representation, not the IR), called by
 //! `CoCircomCompiler::compile` once `PassManager` has finished lowering. A single forward walk
 //! over `graph.nodes()` (already topologically ordered - `Graph::verify`) doing three things at
 //! once: classifying each value's `Domain` (reusing `passes::mpc::domain`, the same analysis
 //! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
 //! emission.
 
-use ark_ff::{BigInteger, PrimeField};
+use ark_bn254::Fr;
 
 use crate::ir::{Graph, Op, PrecomputeKind, ValueId};
 use crate::passes::mpc::domain::{compute_domains, signal_domain, Domain};
-use crate::passes::mpc::precompute_schedule::{BatchPlan, plan_precompute_batches};
+use crate::passes::mpc::precompute_schedule::{plan_precompute_batches, BatchPlan};
 
 use super::program::{
     Bank, BatchKind, InputBinding, Instruction, Opcode, PrecomputeBatch, Program, ResultTarget,
@@ -119,18 +119,11 @@ enum RuntimePlan {
 /// Finds whole scheduler batches that can be replaced by the circuit-preserving Rep3 shortcut.
 /// Staying at whole-batch granularity is intentionally conservative: a mixed Reveal batch or an
 /// IsZero batch with even one non-revealed result continues through the ordinary gadget paths.
-fn plan_zero_test_reveal_fusions<F: PrimeField>(
-    graph: &Graph<F>,
+fn plan_zero_test_reveal_fusions(
+    graph: &Graph,
     domains: &[Domain],
     plans: &[BatchPlan],
 ) -> Vec<ZeroTestRevealPlan> {
-    // The fused protocol is reviewed and tested for the project's BN254 deployment. Keep generic
-    // compilation untouched for any other field rather than silently opting it into a
-    // probabilistic zero test.
-    if F::MODULUS.to_bytes_le() != ark_bn254::Fr::MODULUS.to_bytes_le() {
-        return Vec::new();
-    }
-
     let nodes = graph.nodes();
     let sites = graph.precompute_sites();
     let mut consumers = vec![0usize; nodes.len()];
@@ -249,7 +242,7 @@ fn plan_zero_test_reveal_fusions<F: PrimeField>(
 /// slot must still hold the right value after the instruction stream finishes, when the direct
 /// witness-source projection reads it - freeing it mid-stream would let a later instruction
 /// clobber it.
-fn compute_last_use<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
+fn compute_last_use(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
     let mut last_use: Vec<usize> = (0..nodes.len()).collect();
     for (i, node) in nodes.iter().enumerate() {
@@ -271,11 +264,7 @@ fn compute_last_use<F: PrimeField>(graph: &Graph<F>) -> Vec<usize> {
 /// an earlier pass broke that invariant, which is exactly the case
 /// `Unsupported`-style errors elsewhere in this compiler exist to catch instead of silently
 /// mis-encoding.
-fn select_opcode(
-    op: &Op<impl PrimeField>,
-    da: Domain,
-    db: Domain,
-) -> eyre::Result<(Opcode, Bank, bool)> {
+fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank, bool)> {
     if da == Domain::Local || db == Domain::Local {
         eyre::bail!(
             "codegen: a Local-domain value reached {op:?} directly - it must only ever feed a \
@@ -327,7 +316,7 @@ fn precompute_result_bank(kind: PrecomputeKind, domain: Domain) -> eyre::Result<
 
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `CoCircomCompiler::compile`) into a `Program`.
-pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
+pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     let nodes = graph.nodes();
     let domain = compute_domains(graph);
     let mut last_use = compute_last_use(graph);
@@ -390,7 +379,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
     // Public bank: constants, public precompute results, then Public-domain kept Op::Input.
     // Shared bank: shared precompute results, then Shared-domain kept Op::Input.
     let mut slot: Vec<Option<Slot>> = vec![None; nodes.len()];
-    let mut constants: Vec<F> = Vec::new();
+    let mut constants: Vec<Fr> = Vec::new();
     let mut p_next: u32 = 0;
     let mut s_next: u32 = 0;
 
@@ -847,10 +836,9 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         Vec::new()
     } else {
         let mut signal_sources = vec![None; graph.num_signals];
-        *signal_sources
-            .get_mut(0)
-            .ok_or_else(|| eyre::eyre!("codegen: witness-bearing graph has no constant-one signal"))? =
-            Some(WitnessSource::One);
+        *signal_sources.get_mut(0).ok_or_else(|| {
+            eyre::eyre!("codegen: witness-bearing graph has no constant-one signal")
+        })? = Some(WitnessSource::One);
         for &(signal, value) in graph.outputs() {
             let s = slot[value.index()].expect("output value not yet resolved");
             if s.bank == Bank::Local {
@@ -861,7 +849,10 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
             }
             let signal_index = signal.index() + 1;
             let destination = signal_sources.get_mut(signal_index).ok_or_else(|| {
-                eyre::eyre!("codegen: output signal {signal_index} exceeds num_signals={}", graph.num_signals)
+                eyre::eyre!(
+                    "codegen: output signal {signal_index} exceeds num_signals={}",
+                    graph.num_signals
+                )
             })?;
             *destination = Some(WitnessSource::Slot {
                 bank: s.bank,
@@ -871,7 +862,10 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
         for input_index in 0..graph.num_inputs {
             let signal = graph.num_outputs + input_index + 1;
             let destination = signal_sources.get_mut(signal).ok_or_else(|| {
-                eyre::eyre!("codegen: input signal {signal} exceeds num_signals={}", graph.num_signals)
+                eyre::eyre!(
+                    "codegen: input signal {signal} exceeds num_signals={}",
+                    graph.num_signals
+                )
             })?;
             *destination = Some(WitnessSource::Input(
                 u32::try_from(input_index).expect("input index does not fit into u32"),
@@ -910,7 +904,7 @@ pub fn compile<F: PrimeField>(graph: &Graph<F>) -> eyre::Result<Program<F>> {
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::{Fq, Fr};
+    use ark_bn254::Fr;
 
     use super::*;
     use crate::ir::{Node, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx};
@@ -935,7 +929,7 @@ mod tests {
             Node::new(Op::Constant(Fr::from(5u64)), vec![]), // 7
             Node::new(Op::Add, vec![ValueId::new(6), ValueId::new(7)]), // 8 (output)
         ];
-        let graph: Graph<Fr> = Graph::from_parts(
+        let graph: Graph = Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(8))],
             vec![],
@@ -967,7 +961,7 @@ mod tests {
             Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]),
         ];
-        let mut graph: Graph<Fr> = Graph::from_parts(
+        let mut graph: Graph = Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(3))],
             vec![],
@@ -1006,11 +1000,11 @@ mod tests {
     }
 
     fn lowered_graph(
-        nodes: Vec<Node<Fr>>,
+        nodes: Vec<Node>,
         outputs: Vec<(SignalIdx, ValueId)>,
         sites: Vec<PrecomputeSite>,
         num_inputs: usize,
-    ) -> Graph<Fr> {
+    ) -> Graph {
         let mut graph = Graph::from_parts(
             nodes,
             outputs,
@@ -1280,34 +1274,6 @@ mod tests {
         let program = compile(&graph).unwrap();
 
         assert_eq!(program.precompute_batches.len(), 2);
-        assert!(program
-            .precompute_batches
-            .iter()
-            .all(|batch| batch.kind != BatchKind::IsZeroReveal));
-    }
-
-    #[test]
-    fn non_bn254_iszero_reveal_path_is_not_fused() {
-        let nodes: Vec<Node<Fq>> = vec![
-            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
-            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 3
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
-        ];
-        let mut graph: Graph<Fq> = Graph::from_parts(
-            nodes,
-            vec![(SignalIdx::new(0), ValueId::new(4))],
-            vec![iszero_site(), reveal_site(1)],
-            vec![],
-            vec![],
-            vec![],
-            1,
-            1,
-            5,
-        );
-        graph.mark_lowered();
-        let program = compile(&graph).unwrap();
         assert!(program
             .precompute_batches
             .iter()

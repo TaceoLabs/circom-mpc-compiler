@@ -5,31 +5,32 @@
 //! array/signal/component addressing at lowering time). This is the first fold that runs as a
 //! real pass over the graph itself.
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::{One, Zero};
 
 use crate::ir::{Graph, Node, Op, RewriteAction, ValueId};
 
-pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     Ok(graph.rewrite(|_id, node, emitted| fold_node(node, emitted)))
 }
 
 /// Returns `Some(c)` iff `v`'s producer (already emitted, so present in `emitted`) is a resolved
 /// constant.
-fn constant_of<F: PrimeField>(emitted: &[Node<F>], v: ValueId) -> Option<F> {
+fn constant_of(emitted: &[Node], v: ValueId) -> Option<Fr> {
     match &emitted[v.index()].op {
         Op::Constant(c) => Some(*c),
         _ => None,
     }
 }
 
-fn fold_node<F: PrimeField>(node: &Node<F>, emitted: &[Node<F>]) -> RewriteAction<F> {
+fn fold_node(node: &Node, emitted: &[Node]) -> RewriteAction {
     match &node.op {
         Op::Add => {
             let (a, b) = (node.inputs[0], node.inputs[1]);
             match (constant_of(emitted, a), constant_of(emitted, b)) {
                 (Some(x), Some(y)) => RewriteAction::Emit(Node::new(Op::Constant(x + y), vec![])),
-                (Some(x), None) if x == F::zero() => RewriteAction::ReplaceWith(b),
-                (None, Some(y)) if y == F::zero() => RewriteAction::ReplaceWith(a),
+                (Some(x), None) if x == Fr::zero() => RewriteAction::ReplaceWith(b),
+                (None, Some(y)) if y == Fr::zero() => RewriteAction::ReplaceWith(a),
                 _ => RewriteAction::Keep,
             }
         }
@@ -37,7 +38,7 @@ fn fold_node<F: PrimeField>(node: &Node<F>, emitted: &[Node<F>]) -> RewriteActio
             let (a, b) = (node.inputs[0], node.inputs[1]);
             match (constant_of(emitted, a), constant_of(emitted, b)) {
                 (Some(x), Some(y)) => RewriteAction::Emit(Node::new(Op::Constant(x - y), vec![])),
-                (None, Some(y)) if y == F::zero() => RewriteAction::ReplaceWith(a),
+                (None, Some(y)) if y == Fr::zero() => RewriteAction::ReplaceWith(a),
                 _ => RewriteAction::Keep,
             }
         }
@@ -45,11 +46,11 @@ fn fold_node<F: PrimeField>(node: &Node<F>, emitted: &[Node<F>]) -> RewriteActio
             let (a, b) = (node.inputs[0], node.inputs[1]);
             match (constant_of(emitted, a), constant_of(emitted, b)) {
                 (Some(x), Some(y)) => RewriteAction::Emit(Node::new(Op::Constant(x * y), vec![])),
-                (Some(x), _) | (_, Some(x)) if x == F::zero() => {
-                    RewriteAction::Emit(Node::new(Op::Constant(F::zero()), vec![]))
+                (Some(x), _) | (_, Some(x)) if x == Fr::zero() => {
+                    RewriteAction::Emit(Node::new(Op::Constant(Fr::zero()), vec![]))
                 }
-                (Some(x), None) if x == F::one() => RewriteAction::ReplaceWith(b),
-                (None, Some(y)) if y == F::one() => RewriteAction::ReplaceWith(a),
+                (Some(x), None) if x == Fr::one() => RewriteAction::ReplaceWith(b),
+                (None, Some(y)) if y == Fr::one() => RewriteAction::ReplaceWith(a),
                 _ => RewriteAction::Keep,
             }
         }
@@ -65,7 +66,7 @@ mod tests {
 
     use super::*;
 
-    fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId) -> Graph<Fr> {
+    fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],

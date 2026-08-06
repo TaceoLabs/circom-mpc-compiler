@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use ark_bn254::{Bn254, Fr};
-
 use serde::{Deserialize, Serialize};
 
 pub mod fixtures;
@@ -61,15 +59,14 @@ impl Default for CompilerConfig {
 pub struct CoCircomCompiler;
 
 impl CoCircomCompiler {
-    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph<Fr>>
+    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,
     {
         tracing::debug!("compiler starts parsing..");
         let opt_level = config.opt_level;
-        let mut graph =
-            frontend::build_graph::<Bn254>(PathBuf::from(file).display().to_string(), config)?;
+        let mut graph = frontend::build_graph(PathBuf::from(file).display().to_string(), config)?;
         graph.verify()?;
         tracing::debug!("graph before passes:\n{:?}", graph);
         passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
@@ -79,7 +76,7 @@ impl CoCircomCompiler {
 
     /// `parse`, then lowers the resulting graph into a `vm::Program`, runnable via
     /// `vm::Machine::run` against the plain or rep3 driver.
-    pub fn compile<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<vm::Program<Fr>>
+    pub fn compile<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<vm::Program>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,

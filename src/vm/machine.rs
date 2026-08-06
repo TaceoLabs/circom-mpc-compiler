@@ -2,7 +2,8 @@
 //! reference driver) or a real rep3 driver, the only difference being which `VmDriver` is passed
 //! in.
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::{One, Zero};
 
 use crate::ir::PrecomputeKind;
 
@@ -11,56 +12,56 @@ use super::program::{Bank, BatchKind, Opcode, PrecomputeBatch, Program, WitnessS
 
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
-/// `Program::classify_inputs` builds this array from a flat `&[F]` automatically for callers that
+/// `Program::classify_inputs` builds this array from a flat `&[Fr]` automatically for callers that
 /// don't want to track domains themselves (e.g. the plain-driver tests).
 #[derive(Debug, Clone)]
-pub enum InputValue<F, S> {
-    Public(F),
+pub enum InputValue<S> {
+    Public(Fr),
     Secret(S),
 }
 
-pub trait InputValues<F, S> {
-    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]>;
+pub trait InputValues<S> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]>;
 }
 
-impl<F, S> InputValues<F, S> for [InputValue<F, S>] {
-    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+impl<S> InputValues<S> for [InputValue<S>] {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]> {
         Ok(self)
     }
 }
 
-impl<F, S> InputValues<F, S> for Vec<InputValue<F, S>> {
-    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+impl<S> InputValues<S> for Vec<InputValue<S>> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]> {
         Ok(self)
     }
 }
 
-impl<F, S, const N: usize> InputValues<F, S> for [InputValue<F, S>; N] {
-    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+impl<S, const N: usize> InputValues<S> for [InputValue<S>; N] {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]> {
         Ok(self)
     }
 }
 
-impl<F, S> InputValues<F, S> for eyre::Result<Vec<InputValue<F, S>>> {
-    fn as_inputs(&self) -> eyre::Result<&[InputValue<F, S>]> {
+impl<S> InputValues<S> for eyre::Result<Vec<InputValue<S>>> {
+    fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]> {
         self.as_ref()
             .map(Vec::as_slice)
             .map_err(|error| eyre::eyre!(error.to_string()))
     }
 }
 
-impl<F: PrimeField> Program<F> {
-    /// Builds `Machine::run`'s `inputs` array from a flat `&[F]` in circuit signal order,
+impl Program {
+    /// Builds `Machine::run`'s `inputs` array from a flat `&[Fr]` in circuit signal order,
     /// consulting `Program::input_domains` to wrap each value as `Public` or `Secret`
     /// automatically. `share`
-    /// is only invoked for `Secret`-destined values - e.g. `|v| v` for a driver whose `Share = F`
+    /// is only invoked for `Secret`-destined values - e.g. `|v| v` for a driver whose `Share = Fr`
     /// (`PlainDriver`), or an actual secret-sharing routine for a real MPC driver (see
     /// `tests/rep3_vm.rs`).
     pub fn classify_inputs<S>(
         &self,
-        values: &[F],
-        mut share: impl FnMut(F) -> S,
-    ) -> eyre::Result<Vec<InputValue<F, S>>> {
+        values: &[Fr],
+        mut share: impl FnMut(Fr) -> S,
+    ) -> eyre::Result<Vec<InputValue<S>>> {
         eyre::ensure!(
             values.len() == self.num_inputs,
             "expected one value per circuit input ({}), got {}",
@@ -85,18 +86,16 @@ pub struct Machine;
 /// finish path propagates consistency errors; `Drop` deliberately ignores them because replacing an
 /// in-flight panic would hide the original failure. Rep3 transitions to `Spent` before its check in
 /// either path.
-struct RunGuard<'a, F: PrimeField, D: VmDriver<F>> {
+struct RunGuard<'a, D: VmDriver> {
     driver: &'a mut D,
     finished: bool,
-    field: std::marker::PhantomData<F>,
 }
 
-impl<'a, F: PrimeField, D: VmDriver<F>> RunGuard<'a, F, D> {
+impl<'a, D: VmDriver> RunGuard<'a, D> {
     fn new(driver: &'a mut D) -> Self {
         Self {
             driver,
             finished: false,
-            field: std::marker::PhantomData,
         }
     }
 
@@ -111,7 +110,7 @@ impl<'a, F: PrimeField, D: VmDriver<F>> RunGuard<'a, F, D> {
     }
 }
 
-impl<F: PrimeField, D: VmDriver<F>> Drop for RunGuard<'_, F, D> {
+impl<D: VmDriver> Drop for RunGuard<'_, D> {
     fn drop(&mut self) {
         if !self.finished {
             let _ = self.driver.finish_run();
@@ -120,8 +119,8 @@ impl<F: PrimeField, D: VmDriver<F>> Drop for RunGuard<'_, F, D> {
 }
 
 impl Machine {
-    pub fn run<F: PrimeField, D: VmDriver<F>, I: InputValues<F, D::Share> + ?Sized>(
-        program: &Program<F>,
+    pub fn run<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
+        program: &Program,
         driver: &mut D,
         inputs: &I,
     ) -> eyre::Result<Vec<D::Share>> {
@@ -129,7 +128,7 @@ impl Machine {
         // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
         // network error, or panic all spend a one-shot prepared driver.
         driver.begin_run()?;
-        let mut guard = RunGuard::<F, D>::new(driver);
+        let mut guard = RunGuard::<D>::new(driver);
         let run = Self::run_inner(program, guard.driver(), inputs);
         let finish = guard.finish();
         match (run, finish) {
@@ -142,10 +141,10 @@ impl Machine {
         }
     }
 
-    fn run_inner<F: PrimeField, D: VmDriver<F>>(
-        program: &Program<F>,
+    fn run_inner<D: VmDriver>(
+        program: &Program,
         driver: &mut D,
-        inputs: &[InputValue<F, D::Share>],
+        inputs: &[InputValue<D::Share>],
     ) -> eyre::Result<Vec<D::Share>> {
         eyre::ensure!(
             inputs.len() == program.num_inputs,
@@ -154,7 +153,7 @@ impl Machine {
             inputs.len()
         );
 
-        let mut public: Vec<F> = vec![F::zero(); program.slots.public as usize];
+        let mut public: Vec<Fr> = vec![Fr::zero(); program.slots.public as usize];
         let mut shared: Vec<D::Share> = vec![D::Share::default(); program.slots.shared as usize];
 
         for (i, c) in program.constants.iter().enumerate() {
@@ -259,8 +258,8 @@ impl Machine {
         let mut witness = Vec::with_capacity(program.witness_sources.len());
         for source in &program.witness_sources {
             witness.push(match *source {
-                WitnessSource::One => driver.promote(F::one()),
-                WitnessSource::Zero => driver.promote(F::zero()),
+                WitnessSource::One => driver.promote(Fr::one()),
+                WitnessSource::Zero => driver.promote(Fr::zero()),
                 WitnessSource::Input(input_index) => match &inputs[input_index as usize] {
                     InputValue::Public(value) => driver.promote(*value),
                     InputValue::Secret(value) => value.clone(),
@@ -294,10 +293,10 @@ impl Machine {
     /// gadget's per-site length divides evenly (every site of the same kind shares the same
     /// template, hence the same real length), so this is never a flat prefix of the whole batch,
     /// which would spill one site's results into the next site's region.
-    fn run_batch<F: PrimeField, D: VmDriver<F>>(
+    fn run_batch<D: VmDriver>(
         batch: &PrecomputeBatch,
         driver: &mut D,
-        public: &mut [F],
+        public: &mut [Fr],
         shared: &mut [D::Share],
     ) -> eyre::Result<()> {
         if batch.kind == BatchKind::IsZeroReveal {
@@ -317,7 +316,7 @@ impl Machine {
             .any(|input| input.bank == Bank::Shared);
 
         if !needs_mpc {
-            let inputs: Vec<F> = batch
+            let inputs: Vec<Fr> = batch
                 .input_slots
                 .iter()
                 .map(|input| {
@@ -383,10 +382,10 @@ impl Machine {
         Self::store_batch_results(batch, selected, Bank::Shared, shared)
     }
 
-    fn run_is_zero_reveal_batch<F: PrimeField, D: VmDriver<F>>(
+    fn run_is_zero_reveal_batch<D: VmDriver>(
         batch: &PrecomputeBatch,
         driver: &mut D,
-        public: &mut [F],
+        public: &mut [Fr],
         shared: &mut [D::Share],
     ) -> eyre::Result<()> {
         eyre::ensure!(batch.sites > 0, "fused IsZero/Reveal batch has no sites");
@@ -452,7 +451,7 @@ impl Machine {
         Ok(())
     }
 
-    fn run_plain_batch<F: PrimeField>(kind: PrecomputeKind, inputs: &[F]) -> eyre::Result<Vec<F>> {
+    fn run_plain_batch(kind: PrecomputeKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
         use super::gadgets::{aliascheck, iszero, num2bits};
 
         Ok(match kind {
@@ -574,7 +573,7 @@ mod tests {
         }
     }
 
-    impl VmDriver<Fr> for PanicDriver {
+    impl VmDriver for PanicDriver {
         type Share = Fr;
 
         fn begin_run(&mut self) -> eyre::Result<()> {

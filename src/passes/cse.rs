@@ -7,13 +7,12 @@
 //! `Op::RoundResult`) - merging two of those would change how many traces/rounds the runtime must
 //! supply, not just fold away redundant computation.
 
-use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
 use crate::ir::{Graph, Op, RewriteAction, ValueId};
 
-pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
-    let mut seen: FxHashMap<(Op<F>, Vec<ValueId>), ValueId> = FxHashMap::default();
+pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
+    let mut seen: FxHashMap<(Op, Vec<ValueId>), ValueId> = FxHashMap::default();
     Ok(graph.rewrite(|_id, node, emitted| {
         if !node.op.is_pure() {
             return RewriteAction::Keep;
@@ -33,7 +32,7 @@ pub(super) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
 
 /// The key inputs used for hash-consing: sorted for commutative ops, so operand order doesn't
 /// defeat deduplication.
-fn canonical_inputs<F: PrimeField>(op: &Op<F>, inputs: &[ValueId]) -> Vec<ValueId> {
+fn canonical_inputs(op: &Op, inputs: &[ValueId]) -> Vec<ValueId> {
     match op {
         Op::Add | Op::Mul => {
             let mut v = inputs.to_vec();
@@ -46,13 +45,11 @@ fn canonical_inputs<F: PrimeField>(op: &Op<F>, inputs: &[ValueId]) -> Vec<ValueI
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::Fr;
-
     use crate::ir::{Node, Op, SignalIdx, ValueId};
 
     use super::*;
 
-    fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId) -> Graph<Fr> {
+    fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],

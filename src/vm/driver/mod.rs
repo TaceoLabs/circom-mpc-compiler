@@ -6,15 +6,15 @@ pub mod plain;
 #[cfg(feature = "rep3")]
 pub mod rep3;
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
 
 /// What actually executes a compiled `Program`. Linear ops (`add_ss`/`sub_sp`/...) are infallible
 /// local computation - a plain field op for `PlainDriver`, a share-local op for a real MPC driver,
 /// never a network round. `mul_vec` executes one scheduled multiplication stage; the
 /// `*_traces` methods are the precomputation gadgets batched circuit-wide by `Machine::run`'s
 /// precompute services.
-pub trait VmDriver<F: PrimeField> {
-    /// A valid share any linear op may consume - `F` in `PlainDriver`, `Rep3PrimeFieldShare<F>` in
+pub trait VmDriver {
+    /// A valid share any linear op may consume - `Fr` in `PlainDriver`, `Rep3PrimeFieldShare<Fr>` in
     /// a real rep3 driver.
     type Share: Clone + Default;
 
@@ -35,21 +35,17 @@ pub trait VmDriver<F: PrimeField> {
 
     /// Lifts a known-public value into `Share` representation - used when a `Public`-bank value
     /// ends up as a circuit output (the final witness is uniformly `Vec<Self::Share>`).
-    fn promote(&mut self, value: F) -> Self::Share;
+    fn promote(&mut self, value: Fr) -> Self::Share;
 
     fn add_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share;
     fn sub_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share;
-    fn add_sp(&mut self, a: &Self::Share, b: F) -> Self::Share;
-    fn sub_sp(&mut self, a: &Self::Share, b: F) -> Self::Share;
-    fn sub_ps(&mut self, a: F, b: &Self::Share) -> Self::Share;
-    fn mul_sp(&mut self, a: &Self::Share, b: F) -> Self::Share;
+    fn add_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
+    fn sub_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
+    fn sub_ps(&mut self, a: Fr, b: &Self::Share) -> Self::Share;
+    fn mul_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
 
     /// Executes one complete multiplication stage in a single vectorized network call.
-    fn mul_vec(
-        &mut self,
-        a: &[Self::Share],
-        b: &[Self::Share],
-    ) -> eyre::Result<Vec<Self::Share>>;
+    fn mul_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
 
     /// Reveals `shares` to every party, in one batched round.
     ///
@@ -58,8 +54,8 @@ pub trait VmDriver<F: PrimeField> {
     /// remainder, so producing one from this VM's uniformly-shared witness means opening exactly
     /// that prefix (see `vm::witness`).
     ///
-    /// The identity for `PlainDriver`, whose `Share` is already `F`.
-    fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<F>>;
+    /// The identity for `PlainDriver`, whose `Share` is already `Fr`.
+    fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<Fr>>;
 
     /// Poseidon2 traces for a batch of sites. `states` is `sites * t` shares (one length-`t` state
     /// per site, concatenated). `result_offsets` is a CSR row pointer with one row per site; each
@@ -89,7 +85,7 @@ pub trait VmDriver<F: PrimeField> {
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],
-    ) -> eyre::Result<Vec<(Self::Share, Self::Share, F)>>;
+    ) -> eyre::Result<Vec<(Self::Share, Self::Share, Fr)>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
     /// `ir::PrecomputeKind::AliasCheck`'s doc for the exact layout.
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;

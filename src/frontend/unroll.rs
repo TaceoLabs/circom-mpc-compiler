@@ -1,7 +1,7 @@
 //! Loop unrolling: circom loops with a statically known trip count are fully unrolled during
 //! per-template lowering.
 
-use ark_ec::pairing::Pairing;
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use circom_compiler::intermediate_representation::ir_interface::{
     AddressType, Instruction, LocationRule, LoopBucket, OperatorType,
@@ -16,7 +16,7 @@ enum Step {
     Down(usize),
 }
 
-impl<'a, P: Pairing> GraphCompiler<'a, P> {
+impl GraphCompiler<'_> {
     fn get_step_size(&self, inst: &Instruction) -> Result<(usize, Step)> {
         // must be a top level store
         let (var_index, compute_inst) = if let Instruction::Store(store_bucket) = inst {
@@ -108,7 +108,7 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
         if let Some(value) = terminal {
             self.add_induction_variable_node(var_index, value);
         } else if let (Some(value), Step::Down(step)) = (round_trips.last().copied(), step) {
-            let value = P::ScalarField::from(to_u64(value)) - P::ScalarField::from(to_u64(step));
+            let value = Fr::from(to_u64(value)) - Fr::from(to_u64(step));
             let node = self.push_constant_value(value);
             self.var_to_value.insert(var_index, node);
         }
@@ -116,8 +116,8 @@ impl<'a, P: Pairing> GraphCompiler<'a, P> {
     }
 
     pub(crate) fn add_induction_variable_node(&mut self, var_index: usize, induction_var: usize) {
-        let induction_var = <P::ScalarField as PrimeField>::BigInt::from(to_u64(induction_var));
-        let constant = P::ScalarField::from(induction_var);
+        let induction_var = <Fr as PrimeField>::BigInt::from(to_u64(induction_var));
+        let constant = Fr::from(induction_var);
         let value = self.push_constant_value(constant);
         self.var_to_value.insert(var_index, value);
     }
@@ -150,17 +150,15 @@ fn induction_values(op: &OperatorType, lhs: usize, rhs: usize, step: Step) -> Re
         let Some(next) = (match step {
             Step::Up(n) => value.checked_add(n),
             Step::Down(n) => value.checked_sub(n),
-        }) else { break };
+        }) else {
+            break;
+        };
         value = next;
     }
     Ok(values)
 }
 
-fn stores_variable<P: Pairing>(
-    inst: &Instruction,
-    var_index: usize,
-    compiler: &GraphCompiler<'_, P>,
-) -> bool {
+fn stores_variable(inst: &Instruction, var_index: usize, compiler: &GraphCompiler<'_>) -> bool {
     matches!(inst, Instruction::Store(store) if matches!(store.dest_address_type, AddressType::Variable)
         && matches!(&store.dest, LocationRule::Indexed { location, .. } if compiler.get_constant_value(location) == var_index))
 }

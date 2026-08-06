@@ -4,8 +4,6 @@
 //! lets `mul_split` tell a genuine secret product (needs a round) apart from a free public one.
 //! Shared by `mul_split`, `round_schedule`, batch planning, codegen, and diagnostics.
 
-use ark_ff::PrimeField;
-
 use crate::ir::{Graph, Op, PrecomputeKind, SignalIdx};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -17,7 +15,7 @@ pub(crate) enum Domain {
 
 /// Classifies every value in an already-built graph. Unlike `mul_split`'s incremental table, this
 /// analysis only reads the graph, so it can be shared by codegen, batch planning, and diagnostics.
-pub(crate) fn compute_domains<F: PrimeField>(graph: &Graph<F>) -> Vec<Domain> {
+pub(crate) fn compute_domains(graph: &Graph) -> Vec<Domain> {
     let nodes = graph.nodes();
     let mut domains: Vec<Domain> = Vec::with_capacity(graph.len());
     for node in nodes {
@@ -75,7 +73,7 @@ impl Domain {
 /// misclassifying a public value as secret only costs a missed optimization, never a soundness bug
 /// (the reverse would be unsound - which is exactly why `mpc_public_inputs` is a config knob
 /// populated only from `CompilerConfig`, never inferred).
-pub(crate) fn signal_domain<F: PrimeField>(graph: &Graph<F>, sig: SignalIdx) -> Domain {
+pub(crate) fn signal_domain(graph: &Graph, sig: SignalIdx) -> Domain {
     let idx = sig.index();
     if idx < graph.num_outputs {
         return Domain::Shared;

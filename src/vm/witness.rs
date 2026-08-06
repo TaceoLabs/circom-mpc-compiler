@@ -6,7 +6,8 @@
 //! `Program::input_domains` would only be an approximation (the domain analysis falls back to
 //! `Shared` conservatively), and an off-by-one split silently proves the wrong statement.
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::One;
 
 use super::driver::VmDriver;
 
@@ -15,11 +16,11 @@ use super::driver::VmDriver;
 /// `n_pub` must be `ConstraintMatrices::num_instance_variables` for the same circuit - see the module
 /// doc. It counts the leading `1`, so `public_inputs[0] == 1` and a verifier's public input list is
 /// `public_inputs[1..]`.
-pub fn split_witness<F: PrimeField, D: VmDriver<F>>(
+pub fn split_witness<D: VmDriver>(
     driver: &mut D,
     witness: Vec<D::Share>,
     n_pub: usize,
-) -> eyre::Result<(Vec<F>, Vec<D::Share>)> {
+) -> eyre::Result<(Vec<Fr>, Vec<D::Share>)> {
     eyre::ensure!(
         n_pub <= witness.len(),
         "witness has {} entries but the zkey declares {n_pub} instance variables - the program and \
@@ -35,7 +36,7 @@ pub fn split_witness<F: PrimeField, D: VmDriver<F>>(
     let public = driver.open(&witness)?;
     debug_assert_eq!(public.len(), n_pub);
     eyre::ensure!(
-        public[0] == F::one(),
+        public[0] == Fr::one(),
         "witness position 0 must be the reserved constant 1, got something else - either the program \
          is malformed or n_pub is misaligned"
     );
@@ -51,7 +52,12 @@ mod tests {
 
     #[test]
     fn splits_at_n_pub_and_opens_the_prefix() {
-        let witness = vec![Fr::from(1u64), Fr::from(7u64), Fr::from(9u64), Fr::from(4u64)];
+        let witness = vec![
+            Fr::from(1u64),
+            Fr::from(7u64),
+            Fr::from(9u64),
+            Fr::from(4u64),
+        ];
         let (public, secret) = split_witness(&mut PlainDriver, witness, 3).unwrap();
         assert_eq!(public, vec![Fr::from(1u64), Fr::from(7u64), Fr::from(9u64)]);
         assert_eq!(secret, vec![Fr::from(4u64)]);

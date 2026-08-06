@@ -13,11 +13,11 @@ mod poseidon2_constants;
 /// selection here lets every VM gadget preserve circuit-wide batching without silently forcing the
 /// high-round Direct protocol when the driver requested Yao.
 #[cfg(feature = "rep3")]
-fn a2b_many_selector<F: ark_ff::PrimeField, N: mpc_net::Network>(
-    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+fn a2b_many_selector<N: mpc_net::Network>(
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<ark_bn254::Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3BigUintShare<F>>> {
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3BigUintShare<ark_bn254::Fr>>> {
     use mpc_core::protocols::rep3::conversion::{self, A2BType};
 
     match state.a2b_type {

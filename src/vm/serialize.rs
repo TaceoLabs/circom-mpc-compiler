@@ -8,7 +8,8 @@
 
 use std::io::{Read, Write};
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 struct LittleEndian;
 
@@ -165,7 +166,11 @@ fn write_u32_vec<W: Write>(w: &mut W, values: &[u32]) -> eyre::Result<()> {
     Ok(())
 }
 
-fn read_u32_vec<R: Read>(r: &mut R, limits: ProgramReadLimits, table: &str) -> eyre::Result<Vec<u32>> {
+fn read_u32_vec<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+    table: &str,
+) -> eyre::Result<Vec<u32>> {
     let len = checked_count::<u32>(r.read_u64::<LittleEndian>()?, limits, table)?;
     (0..len)
         .map(|_| Ok(r.read_u32::<LittleEndian>()?))
@@ -232,7 +237,7 @@ impl BatchKind {
     }
 }
 
-impl<F: PrimeField> Program<F> {
+impl Program {
     /// Serializes this program. See the module doc for the exact format.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
         self.validate_encoding()?;
@@ -363,10 +368,10 @@ impl<F: PrimeField> Program<F> {
             instructions.push(Instruction { op, dst, a, b });
         }
 
-        let const_count = checked_count::<F>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
+        let const_count = checked_count::<Fr>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
         let mut constants = Vec::with_capacity(const_count);
         for _ in 0..const_count {
-            constants.push(F::deserialize_compressed(&mut *r)?);
+            constants.push(Fr::deserialize_compressed(&mut *r)?);
         }
 
         let domain_count =
@@ -539,7 +544,7 @@ mod tests {
     use crate::{CoCircomCompiler, CompilerConfig};
 
     /// Compiles one fixture through the public path used by serialized programs.
-    fn program(circuit: &str) -> super::Program<Fr> {
+    fn program(circuit: &str) -> super::Program {
         let root = env!("CARGO_MANIFEST_DIR");
         let mut config = CompilerConfig::default();
         config
@@ -548,7 +553,7 @@ mod tests {
         CoCircomCompiler::compile(format!("{root}/circuits/{circuit}.circom"), config).unwrap()
     }
 
-    fn witness(program: &super::Program<Fr>, inputs: &[Fr]) -> Vec<Fr> {
+    fn witness(program: &super::Program, inputs: &[Fr]) -> Vec<Fr> {
         let inputs = program.classify_inputs(inputs, |v| v).unwrap();
         let mut driver = PlainDriver;
         Machine::run(program, &mut driver, &inputs).unwrap()
@@ -571,7 +576,7 @@ mod tests {
             .any(|source| matches!(source, super::WitnessSource::Slot { .. })));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
 
         let inputs = [Fr::from(5u64), Fr::from(10u64)];
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
@@ -582,7 +587,7 @@ mod tests {
         let original = program("precomputation_iszero_test");
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
 
         let inputs = [Fr::from(0u64)];
         assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
@@ -596,7 +601,7 @@ mod tests {
             .contains(&super::WitnessSource::Zero));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
         assert!(read_back
             .witness_sources
             .contains(&super::WitnessSource::Zero));
@@ -618,7 +623,7 @@ mod tests {
         assert_eq!(original.precompute_batches[0].sites, 2);
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
 
         assert_eq!(
             read_back.precompute_batches[0].kind,
@@ -641,7 +646,7 @@ mod tests {
         assert_eq!(original.precompute_batches[0].sites, 3);
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
 
         assert_eq!(
             read_back.precompute_batches[0].kind,
@@ -662,7 +667,7 @@ mod tests {
             .all(|target| target.bank == super::Bank::Public));
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
         assert!(read_back
             .precompute_batches
             .iter()
@@ -686,7 +691,7 @@ mod tests {
         );
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let read_back = super::Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let read_back = super::Program::read(&mut bytes.as_slice()).unwrap();
 
         assert_eq!(read_back.precompute_batches.len(), 2);
         assert_eq!(
@@ -703,7 +708,7 @@ mod tests {
 
     #[test]
     fn read_rejects_bad_magic() {
-        let err = super::Program::<Fr>::read(&mut [0u8; 16].as_slice()).unwrap_err();
+        let err = super::Program::read(&mut [0u8; 16].as_slice()).unwrap_err();
         assert!(err.to_string().contains("bad magic"), "{err}");
     }
 

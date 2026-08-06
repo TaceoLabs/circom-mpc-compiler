@@ -3,7 +3,6 @@
 //! may place an early result consumer before a later independent site; in that case the active
 //! batch is closed and a new one is started instead of rejecting the circuit.
 
-use ark_ff::PrimeField;
 use rustc_hash::FxHashMap;
 
 use crate::ir::{Graph, Op, PrecomputeKind};
@@ -21,10 +20,7 @@ pub(crate) struct BatchPlan {
     deadline: usize,
 }
 
-pub(crate) fn plan_precompute_batches<F: PrimeField>(
-    graph: &Graph<F>,
-    domains: &[Domain],
-) -> Vec<BatchPlan> {
+pub(crate) fn plan_precompute_batches(graph: &Graph, domains: &[Domain]) -> Vec<BatchPlan> {
     let nodes = graph.nodes();
     let sites = graph.precompute_sites();
     if sites.is_empty() {

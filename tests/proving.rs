@@ -28,7 +28,7 @@ mod common;
 
 use common::{circuit_path, inputs_from_test_name, libs_path, manifest_dir};
 
-fn compiled(name: &str) -> Program<Fr> {
+fn compiled(name: &str) -> Program {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
     CoCircomCompiler::compile(circuit_path(name), config)
@@ -106,8 +106,7 @@ fn prove_and_verify(name: &str) {
                         scope.spawn(move || {
                             let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
                             let mut driver =
-                                Rep3Driver::<Fr, _>::new_for_run(&ext, &mut state, program)
-                                    .unwrap();
+                                Rep3Driver::new_for_run(&ext, &mut state, program).unwrap();
                             let mut next = 0;
                             let inputs = program.classify_inputs(values, |_v| {
                                 let s = shares[next][party];

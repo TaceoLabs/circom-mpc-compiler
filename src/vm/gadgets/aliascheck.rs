@@ -13,7 +13,8 @@
 //! (copies of AliasCheck's own 254 inputs, per circom's `==>` semantics), `[255..382] parts[0..127]`,
 //! `[382] sout`, `[383..518] num2bits.out[0..135]`, `[518] num2bits.in` (a second copy of `sout`).
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::{One, Zero};
 
 use super::num2bits;
 
@@ -44,7 +45,7 @@ const CT_BITS_MINUS_ONE: [bool; 254] = [
 ];
 
 /// The 519-slot result trace for one `AliasCheck` site, given its 254 inputs (`in[0..254]`).
-pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
+pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     assert_eq!(
         input.len(),
         254,
@@ -52,10 +53,10 @@ pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
     );
     let ct_bits = &CT_BITS_MINUS_ONE;
 
-    let mut b = F::from(u128::MAX);
-    let mut a = F::one();
-    let mut e = F::one();
-    let mut sum = F::zero();
+    let mut b = Fr::from(u128::MAX);
+    let mut a = Fr::one();
+    let mut e = Fr::one();
+    let mut sum = Fr::zero();
     let mut parts = Vec::with_capacity(127);
 
     for i in 0..127 {
@@ -101,11 +102,11 @@ pub fn plain_trace<F: PrimeField>(input: &[F]) -> Vec<F> {
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
 /// The strategy-selected A2B conversion and `bit_inject_many` are batched the same way.
 #[cfg(feature = "rep3")]
-pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
-    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>],
+pub fn rep3_trace<N: mpc_net::Network>(
+    inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<F>>> {
+) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
     use mpc_core::protocols::rep3::{arithmetic, conversion, Rep3PrimeFieldShare};
     use num_bigint::BigUint;
     use num_traits::One;
@@ -133,9 +134,9 @@ pub fn rep3_trace<F: PrimeField, N: mpc_net::Network>(
     let mut sums = Vec::with_capacity(sites);
     let mut all_parts = Vec::with_capacity(sites);
     for (site, prod) in inputs.chunks_exact(254).zip(products.chunks_exact(127)) {
-        let mut b = F::from(u128::MAX);
-        let mut a = F::one();
-        let mut e = F::one();
+        let mut b = Fr::from(u128::MAX);
+        let mut a = Fr::one();
+        let mut e = Fr::one();
         let mut sum = Rep3PrimeFieldShare::zero_share();
         let mut parts = Vec::with_capacity(127);
         for (i, &smsb_times_slsb) in prod.iter().enumerate() {

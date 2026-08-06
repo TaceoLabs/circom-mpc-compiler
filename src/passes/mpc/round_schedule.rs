@@ -9,13 +9,11 @@
 //! forward pass cannot express. [`Graph::gc`] sets the precedent for reaching past `rewrite` when
 //! it doesn't fit the shape of the transformation.
 
-use ark_ff::PrimeField;
-
 use crate::ir::{Graph, Node, Op, RoundDesc, RoundId, ValueId};
 
 use super::domain::compute_domains;
 
-pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
+pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     let nodes = graph.nodes();
     if nodes.is_empty() {
         return Ok(false);
@@ -63,11 +61,10 @@ pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
 
     let old_len = nodes.len();
     let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
-    let mut new_nodes: Vec<Node<F>> = Vec::with_capacity(old_len);
+    let mut new_nodes: Vec<Node> = Vec::with_capacity(old_len);
     let mut new_rounds: Vec<RoundDesc> = Vec::new();
 
-    for (d, (level_nodes, level_rounds)) in
-        nodes_by_depth.iter().zip(&rounds_by_depth).enumerate()
+    for (d, (level_nodes, level_rounds)) in nodes_by_depth.iter().zip(&rounds_by_depth).enumerate()
     {
         for &i in level_nodes {
             let node = &nodes[i];
@@ -81,7 +78,10 @@ pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
         }
         if !level_rounds.is_empty() {
             let round_id = RoundId::new(new_rounds.len());
-            new_rounds.push(RoundDesc { len: level_rounds.len(), level: d });
+            new_rounds.push(RoundDesc {
+                len: level_rounds.len(),
+                level: d,
+            });
             let round_inputs = level_rounds
                 .iter()
                 .map(|(mul_local, _)| {
@@ -105,21 +105,15 @@ pub(crate) fn run<F: PrimeField>(graph: &mut Graph<F>) -> eyre::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::Fr;
-
     use crate::ir::{Node, Op, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
 
     use super::*;
 
-    fn graph_of(nodes: Vec<Node<Fr>>, output: ValueId) -> Graph<Fr> {
+    fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         graph_with_sites(nodes, output, vec![])
     }
 
-    fn graph_with_sites(
-        nodes: Vec<Node<Fr>>,
-        output: ValueId,
-        sites: Vec<PrecomputeSite>,
-    ) -> Graph<Fr> {
+    fn graph_with_sites(nodes: Vec<Node>, output: ValueId, sites: Vec<PrecomputeSite>) -> Graph {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],

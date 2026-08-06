@@ -4,17 +4,17 @@
 //! operation - constants, inputs, batched MPC rounds, precomputation sites, and the final signal
 //! witness sources.
 
-use ark_ff::{BigInteger, PrimeField};
+use ark_bn254::Fr;
 
 use crate::ir::PrecomputeKind;
 
 /// Which physical slot bank a value lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bank {
-    /// Every party holds the cleartext value directly - `F` in every driver.
+    /// Every party holds the cleartext value directly as [`Fr`].
     Public,
-    /// A valid share any op may consume - `F` in [`crate::vm::driver::plain::PlainDriver`],
-    /// `Rep3PrimeFieldShare<F>` in the rep3 driver.
+    /// A valid share any op may consume - [`Fr`] in [`crate::vm::driver::plain::PlainDriver`],
+    /// `Rep3PrimeFieldShare<Fr>` in the rep3 driver.
     Shared,
     /// A post-`MulLocal`, pre-reshare additive-3 sharing. Only ever an operand of [`Opcode::Reshare`]
     /// - codegen rejects any graph where a `Local` value reaches anything else.
@@ -179,10 +179,10 @@ pub struct SlotCounts {
 /// execute it against a [`crate::vm::driver::VmDriver`]. Produced by
 /// [`crate::vm::codegen::compile`], serializable via [`Program::write`]/[`Program::read`].
 #[derive(Debug, Clone)]
-pub struct Program<F: PrimeField> {
+pub struct Program {
     pub(crate) instructions: Vec<Instruction>,
     /// Preloaded into `Public`-bank slots `0..constants.len()` at init - no const opcode.
-    pub(crate) constants: Vec<F>,
+    pub(crate) constants: Vec<Fr>,
     /// One entry per circuit input (`len == num_inputs`), in flat signal order - `Bank::Local`
     /// never appears. An input whose `Op::Input` node didn't survive `gc` (dead, never read) has
     /// no corresponding entry here; its domain still appears in this table so a caller can tell
@@ -219,7 +219,7 @@ pub struct ProgramStatistics {
     pub public_precompute_results: usize,
 }
 
-impl<F: PrimeField> Program<F> {
+impl Program {
     pub fn input_domains(&self) -> &[Bank] {
         &self.input_domains
     }
@@ -460,10 +460,6 @@ impl<F: PrimeField> Program<F> {
                         .all(|input| input.bank == Bank::Shared),
                     "fused IsZeroReveal batch {index} must have only Shared inputs"
                 );
-                eyre::ensure!(
-                    F::MODULUS.to_bytes_le() == ark_bn254::Fr::MODULUS.to_bytes_le(),
-                    "fused IsZeroReveal batch {index} is supported only over BN254"
-                );
             }
 
             let expected_offsets = batch
@@ -583,13 +579,11 @@ impl<F: PrimeField> Program<F> {
 
 #[cfg(test)]
 mod tests {
-    use ark_bn254::Fr;
-
     use crate::{CoCircomCompiler, CompilerConfig};
 
     use super::*;
 
-    fn program(circuit: &str) -> Program<Fr> {
+    fn program(circuit: &str) -> Program {
         let root = env!("CARGO_MANIFEST_DIR");
         let mut config = CompilerConfig::default();
         config
@@ -652,7 +646,7 @@ mod tests {
     }
 
     #[cfg(feature = "rep3")]
-    fn poseidon_budget_program(bank: Bank, sites: usize, executions: usize) -> Program<Fr> {
+    fn poseidon_budget_program(bank: Bank, sites: usize, executions: usize) -> Program {
         let t = 3;
         let input_slots = (0..sites * t)
             .map(|_| SiteInput { bank, slot: 0 })
@@ -716,7 +710,7 @@ mod tests {
         original.validate_encoding().unwrap();
         let mut bytes = Vec::new();
         original.write(&mut bytes).unwrap();
-        let decoded = Program::<Fr>::read(&mut bytes.as_slice()).unwrap();
+        let decoded = Program::read(&mut bytes.as_slice()).unwrap();
         assert_eq!(decoded.poseidon2_mask_budget().unwrap(), 320);
     }
 

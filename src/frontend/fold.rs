@@ -9,7 +9,8 @@
 
 use std::cmp::Ordering;
 
-use ark_ff::{BigInteger, PrimeField};
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, Field, PrimeField};
 use num_bigint::BigUint;
 use num_traits::Zero as _;
 
@@ -18,7 +19,7 @@ use circom_compiler::intermediate_representation::ir_interface::OperatorType;
 /// Field elements as an unsigned big integer, matching circom's own semantics for `\`, `<<`, `>>`,
 /// `|`, `&`, `^` (which all operate on the canonical integer representative, not the field element
 /// as such).
-fn to_bigint<F: PrimeField>(f: F) -> BigUint {
+fn to_bigint(f: Fr) -> BigUint {
     f.into()
 }
 
@@ -28,7 +29,7 @@ fn to_bigint<F: PrimeField>(f: F) -> BigUint {
 ///
 /// Returns `None` if `op` has no compile-time-constant arithmetic semantics here (comparisons,
 /// booleans, `Mod`, ...).
-pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Option<F> {
+pub(super) fn fold_binary(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<Fr> {
     match op {
         OperatorType::Add => Some(lhs + rhs),
         OperatorType::Sub => Some(lhs - rhs),
@@ -37,34 +38,34 @@ pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Op
         OperatorType::IntDiv => {
             let lhs = to_bigint(lhs);
             let rhs = to_bigint(rhs);
-            (!rhs.is_zero()).then(|| F::from(lhs / rhs))
+            (!rhs.is_zero()).then(|| Fr::from(lhs / rhs))
         }
         OperatorType::Pow => Some(lhs.pow(rhs.into_bigint())),
         OperatorType::ShiftL => {
             let val = to_bigint(lhs);
             let shift = to_bigint(rhs);
-            let modulus = BigUint::from_bytes_le(&F::MODULUS.to_bytes_le());
+            let modulus = BigUint::from_bytes_le(&Fr::MODULUS.to_bytes_le());
             let factor = BigUint::from(2u8).modpow(&shift, &modulus);
-            Some(F::from((val * factor) % modulus))
+            Some(Fr::from((val * factor) % modulus))
         }
         OperatorType::ShiftR => {
             let val = to_bigint(lhs);
             let shift = to_bigint(rhs);
             if shift.bits() > usize::BITS as u64 {
-                Some(F::zero())
+                Some(Fr::zero())
             } else {
                 let bytes = shift.to_u64_digits();
                 let shift = bytes.first().copied().unwrap_or(0);
                 if shift >= val.bits() {
-                    Some(F::zero())
+                    Some(Fr::zero())
                 } else {
-                    Some(F::from(val >> shift as usize))
+                    Some(Fr::from(val >> shift as usize))
                 }
             }
         }
-        OperatorType::BitOr => Some(F::from(to_bigint(lhs) | to_bigint(rhs))),
-        OperatorType::BitAnd => Some(F::from(to_bigint(lhs) & to_bigint(rhs))),
-        OperatorType::BitXor => Some(F::from(to_bigint(lhs) ^ to_bigint(rhs))),
+        OperatorType::BitOr => Some(Fr::from(to_bigint(lhs) | to_bigint(rhs))),
+        OperatorType::BitAnd => Some(Fr::from(to_bigint(lhs) & to_bigint(rhs))),
+        OperatorType::BitXor => Some(Fr::from(to_bigint(lhs) ^ to_bigint(rhs))),
         _ => None,
     }
 }
@@ -72,10 +73,10 @@ pub(super) fn fold_binary<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Op
 /// Orders canonical field representatives the way circom orders them: values from
 /// `floor(p / 2) + 1` through `p - 1` represent negative integers and therefore precede the
 /// non-negative half. Within either half, the canonical representatives retain their usual order.
-fn circom_cmp<F: PrimeField>(lhs: F, rhs: F) -> Ordering {
+fn circom_cmp(lhs: Fr, rhs: Fr) -> Ordering {
     let lhs = to_bigint(lhs);
     let rhs = to_bigint(rhs);
-    let modulus = BigUint::from_bytes_le(&F::MODULUS.to_bytes_le());
+    let modulus = BigUint::from_bytes_le(&Fr::MODULUS.to_bytes_le());
     let negative_threshold = (modulus >> 1usize) + BigUint::from(1u8);
     match (lhs >= negative_threshold, rhs >= negative_threshold) {
         (true, false) => Ordering::Less,
@@ -96,7 +97,7 @@ fn circom_cmp<F: PrimeField>(lhs: F, rhs: F) -> Ordering {
 ///
 /// Ordering uses circom's signed field convention: canonical representatives at or above
 /// `floor(p / 2) + 1` denote negative integers.
-pub(super) fn fold_condition<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) -> Option<bool> {
+pub(super) fn fold_condition(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<bool> {
     match op {
         // `Eq(n)`'s payload is an array length: `n == 1` is the scalar comparison circom emits for
         // `a == b` on single signals/vars. A wider compare is a genuine element-wise array
@@ -114,7 +115,7 @@ pub(super) fn fold_condition<F: PrimeField>(op: OperatorType, lhs: F, rhs: F) ->
 }
 
 /// The unary counterpart of [`fold_condition`], for `if (!x)`.
-pub(super) fn fold_unary_condition<F: PrimeField>(op: OperatorType, operand: F) -> Option<bool> {
+pub(super) fn fold_unary_condition(op: OperatorType, operand: Fr) -> Option<bool> {
     match op {
         OperatorType::BoolNot => Some(operand.is_zero()),
         _ => None,

@@ -7,7 +7,6 @@ mod dead_code;
 // pub(crate), not private: `vm::codegen` reuses `mpc::domain` and `mpc::precompute_schedule`.
 pub(crate) mod mpc;
 
-use ark_ff::PrimeField;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::Graph;
@@ -29,20 +28,20 @@ pub enum OptLevel {
 }
 
 /// One pass: runs once over the graph, returns whether it changed anything.
-type PassFn<F> = fn(&mut Graph<F>) -> eyre::Result<bool>;
+type PassFn = fn(&mut Graph) -> eyre::Result<bool>;
 
 /// Drives the classical passes to a fixpoint (bounded, so an oscillating pass cannot hang the
 /// compiler), then runs the MPC lowering pipeline once, unconditionally - lowering is the
 /// compiler's actual output, not an optimization to converge on.
-pub(crate) struct PassManager<F: PrimeField> {
-    optimize: Vec<(&'static str, PassFn<F>)>,
-    lower: Vec<(&'static str, PassFn<F>)>,
+pub(crate) struct PassManager {
+    optimize: Vec<(&'static str, PassFn)>,
+    lower: Vec<(&'static str, PassFn)>,
     max_iterations: usize,
 }
 
-impl<F: PrimeField> PassManager<F> {
+impl PassManager {
     pub(crate) fn for_opt_level(opt: OptLevel) -> Self {
-        let mut optimize: Vec<(&'static str, PassFn<F>)> = vec![("dead_code", dead_code::run)];
+        let mut optimize: Vec<(&'static str, PassFn)> = vec![("dead_code", dead_code::run)];
         if opt >= OptLevel::O1 {
             optimize.push(("const_fold", const_fold::run));
         }
@@ -59,7 +58,7 @@ impl<F: PrimeField> PassManager<F> {
     /// Runs the classical passes to a fixpoint, then the MPC lowering pipeline once. `graph` must
     /// already have passed [`Graph::verify`]; this re-verifies after every pass in debug builds so
     /// a pass that broke an invariant fails loudly and immediately.
-    pub(crate) fn run(&mut self, graph: &mut Graph<F>) -> eyre::Result<()> {
+    pub(crate) fn run(&mut self, graph: &mut Graph) -> eyre::Result<()> {
         for _ in 0..self.max_iterations {
             let mut changed = false;
             for (name, pass) in &self.optimize {

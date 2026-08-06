@@ -13,7 +13,7 @@ mod unroll;
 
 use std::collections::HashMap;
 
-use ark_ec::pairing::Pairing;
+use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use circom_compiler::compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP};
 use circom_constraint_generation::BuildConfig;
@@ -41,8 +41,9 @@ fn compute_signal_spans(vcp: &VCP) -> FxHashMap<String, usize> {
             return cached;
         }
         let template = &vcp.templates[id];
-        let mut total =
-            template.number_of_inputs + template.number_of_outputs + template.number_of_intermediates;
+        let mut total = template.number_of_inputs
+            + template.number_of_outputs
+            + template.number_of_intermediates;
         for trigger in &template.triggers {
             total += span(vcp, trigger.template_id, memo);
         }
@@ -58,11 +59,8 @@ fn compute_signal_spans(vcp: &VCP) -> FxHashMap<String, usize> {
         .collect()
 }
 
-fn get_program_archive<F: PrimeField>(
-    file: String,
-    config: &CompilerConfig,
-) -> Result<ProgramArchive> {
-    let field = F::MODULUS;
+fn get_program_archive(file: String, config: &CompilerConfig) -> Result<ProgramArchive> {
+    let field = Fr::MODULUS;
     let field_dig = circom_compiler::num_bigint::BigInt::from_bytes_be(
         circom_compiler::num_bigint::Sign::Plus,
         field.to_bytes_be().as_slice(),
@@ -119,16 +117,16 @@ fn build_circuit(
         main_inputs_log: false,
         wat_flag: false,
     };
-    Ok((CircomCircuit::build(vcp, flags, &config.version), signal_spans))
+    Ok((
+        CircomCircuit::build(vcp, flags, &config.version),
+        signal_spans,
+    ))
 }
 
 /// Parses `file` all the way down to a flat, verified (but not yet garbage-collected)
 /// [`ir::Graph`]. The caller (`CoCircomCompiler::parse`) runs `gc`/`verify` on the result.
-pub(crate) fn build_graph<P: Pairing>(
-    file: String,
-    config: CompilerConfig,
-) -> Result<ir::Graph<P::ScalarField>> {
-    let program_archive = get_program_archive::<P::ScalarField>(file, &config)?;
+pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Graph> {
+    let program_archive = get_program_archive(file, &config)?;
     let public_inputs = program_archive.public_inputs.clone();
     let mpc_public_inputs = config.mpc_public_inputs.clone();
     let (mut circuit, signal_spans) = build_circuit(program_archive, &config)?;
@@ -136,7 +134,7 @@ pub(crate) fn build_graph<P: Pairing>(
         .c_producer
         .get_field_constant_list()
         .iter()
-        .map(|s| s.parse::<P::ScalarField>())
+        .map(|s| s.parse::<Fr>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| eyre::eyre!("cannot parse string in constant list"))?;
 
@@ -185,7 +183,7 @@ pub(crate) fn build_graph<P: Pairing>(
     );
 
     let mut compiled_graphs = FxHashMap::default();
-    let main_graph_compiler = GraphCompiler::<P>::new(
+    let main_graph_compiler = GraphCompiler::new(
         main_template,
         &mut templates,
         &mut compiled_graphs,

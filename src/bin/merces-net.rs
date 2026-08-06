@@ -272,7 +272,7 @@ fn bench_batch(
         let stats_before = net.get_connection_stats();
         let rounds_before = net.rounds();
         let t = Instant::now();
-        let mut driver = Rep3Driver::<Fr, _>::new_for_run(net, state, &program)?;
+        let mut driver = Rep3Driver::new_for_run(net, state, &program)?;
         Machine::run(&program, &mut driver, &inputs)?;
         let elapsed = t.elapsed();
         net.flush()?;

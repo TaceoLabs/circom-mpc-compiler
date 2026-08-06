@@ -10,7 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use ark_ff::PrimeField;
+use ark_bn254::Fr;
+use ark_ff::{PrimeField, Zero};
 use num_bigint::BigUint;
 
 use crate::ir::InputList;
@@ -47,7 +48,7 @@ pub fn merces_main_path(main: &str) -> String {
 /// reconstruct the witness.
 #[cfg(feature = "rep3")]
 pub mod rep3 {
-    use ark_ff::PrimeField;
+    use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
     use mpc_core::protocols::rep3::{
         combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
@@ -60,10 +61,7 @@ pub mod rep3 {
 
     /// One `[share; 3]` triple per `Shared`-domain input, in the order `Program::classify_inputs`
     /// visits them - each party takes its own component.
-    pub fn share_inputs<F: PrimeField>(
-        program: &Program<F>,
-        values: &[F],
-    ) -> Vec<[Rep3PrimeFieldShare<F>; 3]> {
+    pub fn share_inputs(program: &Program, values: &[Fr]) -> Vec<[Rep3PrimeFieldShare<Fr>; 3]> {
         let mut rng = rand::thread_rng();
         program
             .input_domains
@@ -75,18 +73,18 @@ pub mod rep3 {
     }
 
     /// Runs `values` through real 3-party rep3 and returns the reconstructed witness.
-    pub fn run_witness<F: PrimeField>(program: &Program<F>, values: &[F]) -> Vec<F> {
+    pub fn run_witness(program: &Program, values: &[Fr]) -> Vec<Fr> {
         run_witness_with_shares(program, values, &share_inputs(program, values))
     }
 
     /// [`run_witness`] with caller-supplied input shares (benches share once across iterations).
-    pub fn run_witness_with_shares<F: PrimeField>(
-        program: &Program<F>,
-        values: &[F],
-        shares: &[[Rep3PrimeFieldShare<F>; 3]],
-    ) -> Vec<F> {
+    pub fn run_witness_with_shares(
+        program: &Program,
+        values: &[Fr],
+        shares: &[[Rep3PrimeFieldShare<Fr>; 3]],
+    ) -> Vec<Fr> {
         let networks = LocalNetwork::new(3);
-        let witnesses: Vec<Vec<Rep3PrimeFieldShare<F>>> = std::thread::scope(|scope| {
+        let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
             networks
                 .into_iter()
                 .enumerate()
@@ -94,7 +92,7 @@ pub mod rep3 {
                     scope.spawn(move || {
                         let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                         let mut driver =
-                            Rep3Driver::<F, _>::new_for_run(&net, &mut state, program).unwrap();
+                            Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                         let mut next = 0;
                         let inputs = program
                             .classify_inputs(values, |_v| {
@@ -112,17 +110,17 @@ pub mod rep3 {
                 .collect()
         });
 
-        let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<F>>; 3] = witnesses.try_into().unwrap();
+        let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
         combine_field_elements(&w0, &w1, &w2)
     }
 
     /// [`run_witness`], additionally reporting each party's network rounds, split into
     /// (driver preparation, online execution).
     #[cfg(feature = "round-counting")]
-    pub fn run_witness_counted<F: PrimeField>(
-        program: &Program<F>,
-        values: &[F],
-    ) -> (Vec<F>, [usize; 3], [usize; 3]) {
+    pub fn run_witness_counted(
+        program: &Program,
+        values: &[Fr],
+    ) -> (Vec<Fr>, [usize; 3], [usize; 3]) {
         use crate::vm::counting_net::CountingNet;
 
         let shares = share_inputs(program, values);
@@ -130,7 +128,7 @@ pub mod rep3 {
             .into_iter()
             .map(CountingNet::new)
             .collect();
-        let results: Vec<(Vec<Rep3PrimeFieldShare<F>>, usize, usize)> =
+        let results: Vec<(Vec<Rep3PrimeFieldShare<Fr>>, usize, usize)> =
             std::thread::scope(|scope| {
                 networks
                     .into_iter()
@@ -141,7 +139,7 @@ pub mod rep3 {
                             let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                             net.reset();
                             let mut driver =
-                                Rep3Driver::<F, _>::new_for_run(&net, &mut state, program).unwrap();
+                                Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                             let preparation = net.rounds();
                             net.reset();
                             let mut next = 0;
@@ -175,15 +173,15 @@ pub mod rep3 {
 
 /// A circuit's inputs by name, each already flattened row-major the way circom numbers a
 /// multi-dimensional input signal.
-type NamedInputs<F> = BTreeMap<String, Vec<F>>;
+type NamedInputs = BTreeMap<String, Vec<Fr>>;
 
 /// Parses one circom input leaf: a decimal string (optionally `-`-prefixed), a `0x`-prefixed hex
 /// string, or a JSON integer. Reduced mod p, matching circom's own input semantics.
-fn parse_field<F: PrimeField>(v: &serde_json::Value) -> eyre::Result<F> {
+fn parse_field(v: &serde_json::Value) -> eyre::Result<Fr> {
     let s = match v {
         serde_json::Value::String(s) => s.as_str(),
         serde_json::Value::Number(n) => {
-            return Ok(F::from(n.as_u64().ok_or_else(|| {
+            return Ok(Fr::from(n.as_u64().ok_or_else(|| {
                 eyre::eyre!("input number `{n}` is not a non-negative integer")
             })?))
         }
@@ -202,18 +200,14 @@ fn parse_field<F: PrimeField>(v: &serde_json::Value) -> eyre::Result<F> {
         BigUint::parse_bytes(digits.as_bytes(), 10)
     }
     .ok_or_else(|| eyre::eyre!("`{s}` is not a decimal or 0x-prefixed hex integer"))?;
-    let value = F::from_le_bytes_mod_order(&magnitude.to_bytes_le());
+    let value = Fr::from_le_bytes_mod_order(&magnitude.to_bytes_le());
     Ok(if negative { -value } else { value })
 }
 
 /// Flattens a circom-style input value row-major (last index fastest) into `out`. `path` names the
 /// signal for error messages; nested arrays must be rectangular, since a ragged row would otherwise
 /// silently shift every later element.
-fn push_flat<F: PrimeField>(
-    path: &str,
-    v: &serde_json::Value,
-    out: &mut Vec<F>,
-) -> eyre::Result<()> {
+fn push_flat(path: &str, v: &serde_json::Value, out: &mut Vec<Fr>) -> eyre::Result<()> {
     match v {
         serde_json::Value::Array(rows) => {
             let mut row_len = None;
@@ -245,7 +239,7 @@ fn push_flat<F: PrimeField>(
 
 /// A circom-style `input.json` as [`NamedInputs`]: nested arrays flatten row-major, bare scalars
 /// become one-element vectors.
-fn from_input_json<F: PrimeField>(json: &serde_json::Value) -> eyre::Result<NamedInputs<F>> {
+fn from_input_json(json: &serde_json::Value) -> eyre::Result<NamedInputs> {
     let object = json
         .as_object()
         .ok_or_else(|| eyre::eyre!("input.json must be a JSON object of `name: value` pairs"))?;
@@ -258,15 +252,15 @@ fn from_input_json<F: PrimeField>(json: &serde_json::Value) -> eyre::Result<Name
     Ok(inputs)
 }
 
-/// Orders `inputs` into the flat `&[F]` `Program::classify_inputs` expects, using the circuit's own
+/// Orders `inputs` into the flat `&[Fr]` `Program::classify_inputs` expects, using the circuit's own
 /// `Graph::input_list` (`(name, start, size)` per input signal) rather than any assumed ordering.
 ///
 /// Errors if a name the circuit declares is missing, its length disagrees with what the circuit
 /// expects, or `inputs` carries a name the circuit does not declare at all (a stale key in a
 /// hand-edited scenario file, otherwise a silent no-op).
-fn flatten<F: PrimeField>(inputs: &NamedInputs<F>, input_list: &InputList) -> eyre::Result<Vec<F>> {
+fn flatten(inputs: &NamedInputs, input_list: &InputList) -> eyre::Result<Vec<Fr>> {
     let total = input_list.iter().map(|(_, _, size)| size).sum();
-    let mut flat = vec![F::zero(); total];
+    let mut flat = vec![Fr::zero(); total];
     let mut claimed: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (name, start, size) in input_list {
         claimed.insert(name.as_str());
@@ -397,14 +391,14 @@ pub const MERCES_SCENARIOS: &[Scenario] = &[
 
 impl Scenario {
     /// This scenario's inputs, parsed but not yet flattened against a circuit.
-    fn named_inputs<F: PrimeField>(&self) -> eyre::Result<NamedInputs<F>> {
+    fn named_inputs(&self) -> eyre::Result<NamedInputs> {
         let json: serde_json::Value = serde_json::from_str(self.json)
             .map_err(|e| eyre::eyre!("{}: {e}", self.file_name()))?;
         from_input_json(&json).map_err(|e| eyre::eyre!("{}: {e}", self.file_name()))
     }
 
     /// This scenario's inputs, flattened against a circuit's declared `input_list`.
-    pub fn values<F: PrimeField>(&self, input_list: &InputList) -> eyre::Result<Vec<F>> {
+    pub fn values(&self, input_list: &InputList) -> eyre::Result<Vec<Fr>> {
         flatten(&self.named_inputs()?, input_list)
     }
 
@@ -442,7 +436,7 @@ mod tests {
     #[test]
     fn every_scenario_parses() {
         for s in MERCES_SCENARIOS {
-            s.named_inputs::<Fr>()
+            s.named_inputs()
                 .unwrap_or_else(|e| panic!("{}: {e}", s.file_name()));
         }
     }
@@ -451,7 +445,7 @@ mod tests {
     fn server_scenario_shapes_match_the_batch_size() {
         const MAX_DEPTH: usize = 13;
         for s in scenarios("transfer_arity4_batch1").chain(scenarios("transfer_arity4_batch8")) {
-            let inputs = s.named_inputs::<Fr>().unwrap();
+            let inputs = s.named_inputs().unwrap();
             for name in ["sender", "receiver"] {
                 assert_eq!(
                     inputs[name].len(),
@@ -479,7 +473,7 @@ mod tests {
     #[test]
     fn index_bits_are_bits_and_zero_beyond_depth() {
         for s in scenarios("transfer_arity4_batch1").chain(scenarios("transfer_arity4_batch8")) {
-            let inputs = s.named_inputs::<Fr>().unwrap();
+            let inputs = s.named_inputs().unwrap();
             let depth = inputs["depth"][0];
             for name in ["sender", "receiver"] {
                 for (slot, bits) in inputs[name].chunks(26).enumerate() {
@@ -509,7 +503,7 @@ mod tests {
     #[test]
     fn flags_are_bits_and_never_both_set() {
         for s in scenarios("transfer_arity4_batch1").chain(scenarios("transfer_arity4_batch8")) {
-            let inputs = s.named_inputs::<Fr>().unwrap();
+            let inputs = s.named_inputs().unwrap();
             for (d, w) in inputs["isDeposit"].iter().zip(&inputs["isWithdraw"]) {
                 for flag in [d, w] {
                     assert!(*flag == Fr::zero() || *flag == Fr::one());
@@ -527,23 +521,23 @@ mod tests {
     #[test]
     fn parse_rejects_ragged_rows() {
         let json: serde_json::Value = serde_json::json!({"a": [["1", "2"], ["3"]]});
-        let err = from_input_json::<Fr>(&json).unwrap_err().to_string();
+        let err = from_input_json(&json).unwrap_err().to_string();
         assert!(err.contains("row-major"), "{err}");
     }
 
     #[test]
     fn parse_rejects_non_integer_leaves() {
         let json: serde_json::Value = serde_json::json!({"a": "not a number"});
-        assert!(from_input_json::<Fr>(&json).is_err());
+        assert!(from_input_json(&json).is_err());
         let json: serde_json::Value = serde_json::json!({"a": true});
-        let err = from_input_json::<Fr>(&json).unwrap_err().to_string();
+        let err = from_input_json(&json).unwrap_err().to_string();
         assert!(err.contains("field element"), "{err}");
     }
 
     #[test]
     fn parse_accepts_hex_and_negative_and_json_integers() {
         let json: serde_json::Value = serde_json::json!({"a": "0x10", "b": "-1", "c": 5});
-        let inputs = from_input_json::<Fr>(&json).unwrap();
+        let inputs = from_input_json(&json).unwrap();
         assert_eq!(inputs["a"], vec![Fr::from(16u64)]);
         assert_eq!(inputs["b"], vec![-Fr::one()]);
         assert_eq!(inputs["c"], vec![Fr::from(5u64)]);
@@ -551,7 +545,7 @@ mod tests {
 
     #[test]
     fn flatten_reports_a_missing_or_misshaped_input_by_name() {
-        let mut inputs: NamedInputs<Fr> = BTreeMap::new();
+        let mut inputs: NamedInputs = BTreeMap::new();
         inputs.insert("depth".to_owned(), vec![Fr::from(3u64)]);
 
         let list: InputList = vec![("nope".to_owned(), 0, 1)];
@@ -565,7 +559,7 @@ mod tests {
 
     #[test]
     fn flatten_rejects_an_unclaimed_input_name() {
-        let mut inputs: NamedInputs<Fr> = BTreeMap::new();
+        let mut inputs: NamedInputs = BTreeMap::new();
         inputs.insert("a".to_owned(), vec![Fr::from(1u64)]);
         inputs.insert("stale".to_owned(), vec![Fr::from(2u64)]);
         let list: InputList = vec![("a".to_owned(), 0, 1)];
@@ -575,7 +569,7 @@ mod tests {
 
     #[test]
     fn flatten_places_values_at_the_declared_offsets() {
-        let mut inputs: NamedInputs<Fr> = BTreeMap::new();
+        let mut inputs: NamedInputs = BTreeMap::new();
         inputs.insert("a".to_owned(), vec![Fr::from(1u64), Fr::from(2u64)]);
         inputs.insert("b".to_owned(), vec![Fr::from(3u64)]);
         // Deliberately not in alphabetical order, to prove the offsets drive placement.

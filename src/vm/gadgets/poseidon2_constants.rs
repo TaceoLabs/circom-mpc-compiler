@@ -7,6 +7,7 @@
 //! that specific curve's scalar field. Decoded with `PrimeField::from_be_bytes_mod_order`, so this
 //! module needs neither `num_bigint` nor `mpc-core`.
 
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 
 /// How many partial rounds `Poseidon2(t)` runs - `amount_partial_rounds` in the circuit.
@@ -17,7 +18,6 @@ pub(super) const fn partial_rounds(t: usize) -> usize {
         57
     }
 }
-
 
 /// `load_rc_full1(2)`, flattened row-major (4 rounds x 2).
 const RC_FULL1_T2: &[&str] = &[
@@ -666,17 +666,17 @@ const DIAG_T16: &[&str] = &[
 ];
 
 /// Every table for one width, decoded once per batch rather than per site.
-pub(super) struct RoundConstants<F> {
+pub(super) struct RoundConstants {
     /// 4 rounds x `t`, row-major.
-    pub(super) full1: Vec<F>,
-    pub(super) partial: Vec<F>,
+    pub(super) full1: Vec<Fr>,
+    pub(super) partial: Vec<Fr>,
     /// 4 rounds x `t`, row-major.
-    pub(super) full2: Vec<F>,
+    pub(super) full2: Vec<Fr>,
     /// Empty for `t` in {2, 3}, which use a hardcoded internal matrix instead of a diagonal.
-    pub(super) diag: Vec<F>,
+    pub(super) diag: Vec<Fr>,
 }
 
-impl<F: PrimeField> RoundConstants<F> {
+impl RoundConstants {
     pub(super) fn load(t: usize) -> eyre::Result<Self> {
         let (full1, partial, full2, diag): (&[&str], &[&str], &[&str], &[&str]) = match t {
             2 => (RC_FULL1_T2, RC_PARTIAL_T2, RC_FULL2_T2, &[]),
@@ -702,14 +702,14 @@ impl<F: PrimeField> RoundConstants<F> {
     }
 }
 
-fn decode<F: PrimeField>(hex: &[&str]) -> Vec<F> {
+fn decode(hex: &[&str]) -> Vec<Fr> {
     hex.iter().map(|s| parse_hex(s)).collect()
 }
 
 /// `0x`-prefixed big-endian hex to a field element. The circuit's literals are all canonical
 /// (< modulus), so the `mod_order` reduction never actually reduces anything - it is just the
 /// available constructor.
-fn parse_hex<F: PrimeField>(s: &str) -> F {
+fn parse_hex(s: &str) -> Fr {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let mut bytes = Vec::with_capacity(s.len() / 2 + 1);
     // Pad an odd-length literal on the left so the byte split lands correctly.
@@ -723,5 +723,5 @@ fn parse_hex<F: PrimeField>(s: &str) -> F {
         let lo = (chunk[1] as char).to_digit(16).expect("hex literal");
         bytes.push((hi * 16 + lo) as u8);
     }
-    F::from_be_bytes_mod_order(&bytes)
+    Fr::from_be_bytes_mod_order(&bytes)
 }
