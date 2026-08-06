@@ -819,7 +819,7 @@ mod tests {
             Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(3))];
-        let graph: Graph = Graph::from_parts(
+        let graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -843,7 +843,7 @@ mod tests {
     fn verify_rejects_a_site_with_no_precompute_node() {
         let nodes = vec![Node::new(Op::Input(SignalIdx::new(1)), vec![])];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph: Graph = Graph::from_parts(
+        let graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -872,7 +872,7 @@ mod tests {
             Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(4))];
-        let mut graph: Graph = Graph::from_parts(
+        let mut graph = Graph::from_parts(
             nodes,
             outputs,
             vec![iszero_site()],
@@ -899,8 +899,7 @@ mod tests {
             Node::new(Op::Constant(Fr::from(1u64)), vec![]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph: Graph =
-            Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
+        let graph = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }
 
@@ -915,8 +914,7 @@ mod tests {
         let mut nodes = nodes;
         nodes.push(bad);
         let outputs = vec![(SignalIdx::new(0), ValueId::new(1))];
-        let graph: Graph =
-            Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
+        let graph = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
         assert!(graph.verify().is_err());
     }
 

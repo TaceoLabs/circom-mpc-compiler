@@ -520,23 +520,23 @@ mod tests {
 
     #[test]
     fn parse_rejects_ragged_rows() {
-        let json: serde_json::Value = serde_json::json!({"a": [["1", "2"], ["3"]]});
+        let json = serde_json::json!({"a": [["1", "2"], ["3"]]});
         let err = from_input_json(&json).unwrap_err().to_string();
         assert!(err.contains("row-major"), "{err}");
     }
 
     #[test]
     fn parse_rejects_non_integer_leaves() {
-        let json: serde_json::Value = serde_json::json!({"a": "not a number"});
+        let json = serde_json::json!({"a": "not a number"});
         assert!(from_input_json(&json).is_err());
-        let json: serde_json::Value = serde_json::json!({"a": true});
+        let json = serde_json::json!({"a": true});
         let err = from_input_json(&json).unwrap_err().to_string();
         assert!(err.contains("field element"), "{err}");
     }
 
     #[test]
     fn parse_accepts_hex_and_negative_and_json_integers() {
-        let json: serde_json::Value = serde_json::json!({"a": "0x10", "b": "-1", "c": 5});
+        let json = serde_json::json!({"a": "0x10", "b": "-1", "c": 5});
         let inputs = from_input_json(&json).unwrap();
         assert_eq!(inputs["a"], vec![Fr::from(16u64)]);
         assert_eq!(inputs["b"], vec![-Fr::one()]);

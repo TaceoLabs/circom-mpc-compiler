@@ -929,7 +929,7 @@ mod tests {
             Node::new(Op::Constant(Fr::from(5u64)), vec![]), // 7
             Node::new(Op::Add, vec![ValueId::new(6), ValueId::new(7)]), // 8 (output)
         ];
-        let graph: Graph = Graph::from_parts(
+        let graph = Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(8))],
             vec![],
@@ -961,7 +961,7 @@ mod tests {
             Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]),
         ];
-        let mut graph: Graph = Graph::from_parts(
+        let mut graph = Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(3))],
             vec![],
