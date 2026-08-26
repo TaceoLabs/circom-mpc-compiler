@@ -80,6 +80,67 @@ impl Program {
     }
 }
 
+/// One site's injected trace, shaped like co-snarks' `ComponentAcceleratorOutput` -
+/// `output`/`intermediate` are exactly `PrecomputeSite`'s own outputs and intermediates, so a
+/// producer never has to reason about the VM's physical slot layout.
+#[derive(Debug, Clone)]
+pub struct SiteTrace<S> {
+    pub output: Vec<S>,
+    pub intermediate: Vec<S>,
+}
+
+impl<S> SiteTrace<S> {
+    pub fn new(output: Vec<S>, intermediate: Vec<S>) -> Self {
+        Self {
+            output,
+            intermediate,
+        }
+    }
+}
+
+/// A FIFO queue of `BatchKind::Injected` batch traces, one entry per batch in
+/// [`Program::injected_batches`] order. `Machine::run_with_injection` consumes one entry each
+/// time it reaches an injected batch in the instruction stream, and errors if anything is left
+/// over once the run finishes - the same "supplied exactly what was consumed" contract
+/// `Rep3Poseidon2Preprocessing::ensure_consumed` enforces for the driver-serviced Poseidon2 mask
+/// pool.
+#[derive(Debug, Clone)]
+pub struct GadgetInjection<S> {
+    batches: std::collections::VecDeque<Vec<SiteTrace<S>>>,
+}
+
+impl<S> GadgetInjection<S> {
+    pub fn new() -> Self {
+        Self {
+            batches: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Queues one batch's traces, one [`SiteTrace`] per site, in the same site order as the
+    /// batch's `PrecomputeBatch`.
+    pub fn push_batch(&mut self, sites: Vec<SiteTrace<S>>) {
+        self.batches.push_back(sites);
+    }
+
+    fn pop(&mut self) -> Option<Vec<SiteTrace<S>>> {
+        self.batches.pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batches.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.batches.len()
+    }
+}
+
+impl<S> Default for GadgetInjection<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Machine;
 
 /// Ensures `finish_run` executes while unwinding as well as on every ordinary return. The explicit
@@ -119,32 +180,54 @@ impl<D: VmDriver> Drop for RunGuard<'_, D> {
 }
 
 impl Machine {
+    /// Same as [`Machine::run_with_injection`] with an empty injection - errors if the program has
+    /// any `BatchKind::Injected` batch rather than silently producing a zero witness value for it.
     pub fn run<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
         program: &Program,
         driver: &mut D,
         inputs: &I,
+    ) -> eyre::Result<Vec<D::Share>> {
+        Self::run_with_injection(program, driver, inputs, GadgetInjection::new())
+    }
+
+    /// Like [`Machine::run`], but `injection` supplies the trace for every `TACEO_INJECTED_*`
+    /// site instead of the driver computing it: one [`SiteTrace`] per site, queued batch-by-batch
+    /// in [`Program::injected_batches`] order. Errors if `injection` is short, mismatched, or has
+    /// anything left over once the run finishes.
+    pub fn run_with_injection<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
+        program: &Program,
+        driver: &mut D,
+        inputs: &I,
+        mut injection: GadgetInjection<D::Share>,
     ) -> eyre::Result<Vec<D::Share>> {
         let inputs = inputs.as_inputs()?;
         // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
         // network error, or panic all spend a one-shot prepared driver.
         driver.begin_run()?;
         let mut guard = RunGuard::<D>::new(driver);
-        let run = Self::run_inner(program, guard.driver(), inputs);
+        let run = Self::run_inner(program, guard.driver(), inputs, &mut injection);
         let finish = guard.finish();
-        match (run, finish) {
+        let witness = match (run, finish) {
             (Ok(witness), Ok(())) => Ok(witness),
             (Err(error), Ok(())) => Err(error),
             (Ok(_), Err(error)) => Err(error),
             (Err(run_error), Err(finish_error)) => Err(eyre::eyre!(
                 "{run_error:#}; driver finalization also failed: {finish_error:#}"
             )),
-        }
+        }?;
+        eyre::ensure!(
+            injection.is_empty(),
+            "GadgetInjection has {} unconsumed batch(es) after the run",
+            injection.len()
+        );
+        Ok(witness)
     }
 
     fn run_inner<D: VmDriver>(
         program: &Program,
         driver: &mut D,
         inputs: &[InputValue<D::Share>],
+        injection: &mut GadgetInjection<D::Share>,
     ) -> eyre::Result<Vec<D::Share>> {
         eyre::ensure!(
             inputs.len() == program.num_inputs,
@@ -244,6 +327,7 @@ impl Machine {
                     driver,
                     &mut public,
                     &mut shared,
+                    injection,
                 )?,
             }
         }
@@ -298,12 +382,16 @@ impl Machine {
         driver: &mut D,
         public: &mut [Fr],
         shared: &mut [D::Share],
+        injection: &mut GadgetInjection<D::Share>,
     ) -> eyre::Result<()> {
         if batch.kind == BatchKind::IsZeroReveal {
             return Self::run_is_zero_reveal_batch(batch, driver, public, shared);
         }
+        if let BatchKind::InjectedPoseidon2 { t } = batch.kind {
+            return Self::run_injected_batch(t, batch, injection, shared);
+        }
         let BatchKind::Precompute(kind) = batch.kind else {
-            unreachable!("fused batch handled above")
+            unreachable!("fused and injected batches handled above")
         };
         // Whether this batch needs a genuine MPC call, rather than inferring it from result targets:
         // for every kind but `Reveal` the two coincide (a site's inputs are all-`Public` exactly
@@ -446,6 +534,76 @@ impl Machine {
                         eyre::bail!("fused IsZero/Reveal requested invalid logical slot {other}")
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Services a `BatchKind::InjectedPoseidon2` batch: instead of calling the driver, pops the
+    /// next queued [`SiteTrace`] group off `injection` and writes it straight into the `Shared`
+    /// bank through the batch's own CSR result table - the same request/target machinery every
+    /// other batch kind uses. `Program::validate` already guarantees every result target here is
+    /// `Bank::Shared`, so this never touches `public`.
+    fn run_injected_batch<S: Clone>(
+        t: usize,
+        batch: &PrecomputeBatch,
+        injection: &mut GadgetInjection<S>,
+        shared: &mut [S],
+    ) -> eyre::Result<()> {
+        let num_outputs = t;
+        let sites = injection.pop().ok_or_else(|| {
+            eyre::eyre!(
+                "missing injected trace for a Poseidon2{{t={t}}} batch ({} sites) - \
+                 GadgetInjection was exhausted before the run reached it",
+                batch.sites
+            )
+        })?;
+        eyre::ensure!(
+            sites.len() == batch.sites,
+            "injected Poseidon2{{t={t}}} batch was supplied {} site trace(s), expected {}",
+            sites.len(),
+            batch.sites
+        );
+        eyre::ensure!(
+            batch.result_offsets.len() == batch.sites + 1
+                && batch.result_requests.len() == batch.result_targets.len(),
+            "malformed injected batch CSR result table"
+        );
+        for (site, trace) in sites.iter().enumerate() {
+            eyre::ensure!(
+                trace.output.len() == num_outputs,
+                "injected Poseidon2{{t={t}}} site {site} supplied {} outputs, expected \
+                 {num_outputs}",
+                trace.output.len()
+            );
+            let lo = batch.result_offsets[site] as usize;
+            let hi = batch.result_offsets[site + 1] as usize;
+            eyre::ensure!(
+                lo <= hi && hi <= batch.result_requests.len(),
+                "invalid injected batch CSR row"
+            );
+            for (&logical, target) in batch.result_requests[lo..hi]
+                .iter()
+                .zip(&batch.result_targets[lo..hi])
+            {
+                eyre::ensure!(
+                    target.bank == Bank::Shared,
+                    "injected Poseidon2{{t={t}}} result must target Shared"
+                );
+                let logical = logical as usize;
+                let value = if logical < num_outputs {
+                    trace.output[logical].clone()
+                } else {
+                    let idx = logical - num_outputs;
+                    trace.intermediate.get(idx).cloned().ok_or_else(|| {
+                        eyre::eyre!(
+                            "injected Poseidon2{{t={t}}} site {site} requested intermediate slot \
+                             {idx}, but only {} were supplied",
+                            trace.intermediate.len()
+                        )
+                    })?
+                };
+                shared[target.slot as usize] = value;
             }
         }
         Ok(())

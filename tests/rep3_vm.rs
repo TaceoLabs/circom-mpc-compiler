@@ -369,3 +369,112 @@ fn execution_error_spends_prepared_driver_without_communication() {
     let expected = Machine::run(&program, &mut PlainDriver, &expected_inputs).unwrap();
     assert_eq!(fresh, expected);
 }
+
+/// Precomputing a Poseidon2 permutation with [`circom_mpc_compiler::vm::gadgets::poseidon2::Poseidon2Service`]
+/// and injecting its trace removes that permutation's rounds from the proof run entirely - the
+/// whole point of `TACEO_INJECTED_Poseidon2`. The precompute phase still pays for the permutation
+/// once (3 preprocessing + `8 + partial_rounds(t)` online), but the proof run's own online round
+/// count for it drops to zero, and the reconstructed witness still matches the ordinary
+/// `TACEO_PRECOMPUTATION_Poseidon2` circuit run under `PlainDriver`.
+#[cfg(feature = "round-counting")]
+#[test]
+fn injecting_poseidon2_removes_its_rounds_from_the_proof_run() {
+    use circom_mpc_compiler::vm::counting_net::CountingNet;
+    use circom_mpc_compiler::vm::driver::plain::PlainDriver;
+    use circom_mpc_compiler::vm::gadgets::poseidon2::Poseidon2Service;
+    use circom_mpc_compiler::vm::GadgetInjection;
+
+    let program =
+        CoCircomCompiler::compile(circuit_path("injected_poseidon2_test"), config()).unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+    let expected = {
+        let baseline =
+            CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config())
+                .unwrap();
+        let inputs = baseline.classify_inputs(&values, |v| v);
+        Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
+    };
+
+    let shares = share_inputs(&program, &values);
+    let networks: Vec<_> = LocalNetwork::new(3)
+        .into_iter()
+        .map(CountingNet::new)
+        .collect();
+
+    struct PartyRun {
+        witness: Vec<Rep3PrimeFieldShare<Fr>>,
+        precompute_rounds: usize,
+        online_rounds: usize,
+    }
+
+    let runs: Vec<PartyRun> = std::thread::scope(|scope| {
+        networks
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                let values = &values;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let my_shares: Vec<Rep3PrimeFieldShare<Fr>> =
+                        shares.iter().map(|s| s[party]).collect();
+
+                    // Precompute phase: run the permutation once, up front, over its own network
+                    // rounds - exactly what a host would do before the values it hashes even
+                    // exist as circuit inputs (e.g. before revealing a new leaf commitment to
+                    // build a Merkle path from).
+                    net.reset();
+                    let mut service = Poseidon2Service::new(3, 1, &net, &mut state).unwrap();
+                    let traces = service.trace(3, &my_shares, &net, &mut state).unwrap();
+                    service.finish().unwrap();
+                    let precompute_rounds = net.rounds();
+
+                    let mut injection = GadgetInjection::new();
+                    injection.push_batch(traces);
+
+                    // The proof run: preparing `Rep3Driver` derives a zero Poseidon2 mask budget
+                    // (its only Poseidon2 batch is injected, not driver-serviced), and running it
+                    // makes no further network calls for that site at all.
+                    net.reset();
+                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let mut next = 0;
+                    let inputs = program
+                        .classify_inputs(values, |_v| {
+                            let s = shares[next][party];
+                            next += 1;
+                            s
+                        })
+                        .unwrap();
+                    let witness =
+                        Machine::run_with_injection(program, &mut driver, &inputs, injection)
+                            .unwrap();
+                    let online_rounds = net.rounds();
+
+                    PartyRun {
+                        witness,
+                        precompute_rounds,
+                        online_rounds,
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    for run in &runs {
+        assert_eq!(
+            run.precompute_rounds,
+            3 + 8 + 56,
+            "Poseidon2(t=3) has 56 partial rounds"
+        );
+        assert_eq!(
+            run.online_rounds, 0,
+            "no driver-serviced Poseidon2 batch should remain in the proof run"
+        );
+    }
+    let got = combine_field_elements(&runs[0].witness, &runs[1].witness, &runs[2].witness);
+    assert_eq!(got, expected);
+}

@@ -100,6 +100,12 @@ pub enum BatchKind {
     Precompute(PrecomputeKind),
     /// Computes a zero test's `[out, inv]` shares and the explicitly revealed `out` together.
     IsZeroReveal,
+    /// A `TACEO_INJECTED_Poseidon2` site: the host supplies this batch's trace instead of
+    /// `vm::gadgets` servicing it. Poseidon2 is the only injectable gadget, and its result bank
+    /// is always `Shared` - see `Machine::run_with_injection`.
+    InjectedPoseidon2 {
+        t: usize,
+    },
 }
 
 /// One requested batch result's physical destination. Per-result (not per-batch) because a fused
@@ -202,6 +208,13 @@ pub struct Program {
     pub(crate) slots: SlotCounts,
 }
 
+/// One `BatchKind::Injected` batch's shape, as reported by [`Program::injected_batches`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InjectedBatch {
+    pub kind: PrecomputeKind,
+    pub sites: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgramStatistics {
     pub instructions: usize,
@@ -217,6 +230,9 @@ pub struct ProgramStatistics {
     pub shared_precompute_batches: usize,
     pub fused_is_zero_reveal_batches: usize,
     pub public_precompute_results: usize,
+    /// Batches whose trace the host supplies at run time (`BatchKind::Injected`) rather than
+    /// `vm::gadgets`.
+    pub injected_batches: usize,
 }
 
 impl Program {
@@ -261,6 +277,11 @@ impl Program {
                 .flat_map(|batch| &batch.result_targets)
                 .filter(|target| target.bank == Bank::Public)
                 .count(),
+            injected_batches: self
+                .precompute_batches
+                .iter()
+                .filter(|batch| matches!(batch.kind, BatchKind::InjectedPoseidon2 { .. }))
+                .count(),
         }
     }
     /// Derives the number of fresh Poseidon2 masks one execution needs. The budget is intentionally
@@ -301,6 +322,33 @@ impl Program {
             })?;
         }
         Ok(total)
+    }
+
+    /// One `BatchKind::Injected` batch's shape, in the order `Machine::run_with_injection`
+    /// consumes it (`Program::injected_batches`).
+    pub fn injected_batches(&self) -> eyre::Result<Vec<InjectedBatch>> {
+        let mut batches = Vec::new();
+        for (instruction_index, instruction) in self.instructions.iter().enumerate() {
+            if instruction.op != Opcode::Precompute {
+                continue;
+            }
+            let batch = self
+                .precompute_batches
+                .get(instruction.a as usize)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "instruction {instruction_index} references missing precompute batch {}",
+                        instruction.a
+                    )
+                })?;
+            if let BatchKind::InjectedPoseidon2 { t } = batch.kind {
+                batches.push(InjectedBatch {
+                    kind: PrecomputeKind::Poseidon2 { t },
+                    sites: batch.sites,
+                });
+            }
+        }
+        Ok(batches)
     }
 
     /// Checks every side-table and slot reference before execution. This is intentionally usable
@@ -435,6 +483,13 @@ impl Program {
                 BatchKind::Precompute(PrecomputeKind::AliasCheck) => 254,
                 BatchKind::Precompute(PrecomputeKind::Reveal { n }) => n,
                 BatchKind::IsZeroReveal => 1,
+                BatchKind::InjectedPoseidon2 { t } => {
+                    eyre::ensure!(
+                        super::gadgets::poseidon2::SUPPORTED_WIDTHS.contains(&t),
+                        "precompute batch {index} has unsupported injected Poseidon2 width {t}"
+                    );
+                    t
+                }
             };
             let expected_inputs = batch
                 .sites
@@ -452,13 +507,15 @@ impl Program {
                 );
                 check_slot(input.bank, input.slot, "precompute input")?;
             }
-            if batch.kind == BatchKind::IsZeroReveal {
+            if batch.kind == BatchKind::IsZeroReveal
+                || matches!(batch.kind, BatchKind::InjectedPoseidon2 { .. })
+            {
                 eyre::ensure!(
                     batch
                         .input_slots
                         .iter()
                         .all(|input| input.bank == Bank::Shared),
-                    "fused IsZeroReveal batch {index} must have only Shared inputs"
+                    "fused IsZeroReveal / injected batch {index} must have only Shared inputs"
                 );
             }
 
@@ -490,6 +547,11 @@ impl Program {
                 BatchKind::Precompute(kind) => kind.expected_results().ok_or_else(|| {
                     eyre::eyre!("precompute batch {index} has no declared result capacity")
                 })?,
+                BatchKind::InjectedPoseidon2 { t } => PrecomputeKind::Poseidon2 { t }
+                    .expected_results()
+                    .ok_or_else(|| {
+                        eyre::eyre!("precompute batch {index} has no declared result capacity")
+                    })?,
                 BatchKind::IsZeroReveal => 3,
             };
             let normal_result_bank = match batch.kind {
@@ -505,6 +567,9 @@ impl Program {
                         Bank::Public
                     },
                 ),
+                // An injected site is always `Shared`-domain by construction (see
+                // `precompute_result_bank`); a batch built any other way is rejected above.
+                BatchKind::InjectedPoseidon2 { .. } => Some(Bank::Shared),
                 BatchKind::IsZeroReveal => None,
             };
             for site in 0..batch.sites {

@@ -126,6 +126,7 @@ mod tests {
             num_inputs,
             num_outputs,
             num_intermediates: 0,
+            injected: false,
         }
     }
 

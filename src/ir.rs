@@ -97,6 +97,10 @@ pub struct MpcSummary {
     pub precompute_batches: usize,
     /// Batch services that require an MPC driver call rather than local public evaluation.
     pub shared_precompute_batches: usize,
+    /// Batch services whose trace comes from the host (`TACEO_INJECTED_*`) rather than
+    /// `vm::gadgets` - a subset of `shared_precompute_batches` (an injected site is always
+    /// `Shared`-domain).
+    pub injected_batches: usize,
 }
 
 /// Which precomputation gadget a [`PrecomputeSite`] runs. Resolved from the instantiated
@@ -196,6 +200,11 @@ pub struct PrecomputeSite {
     pub num_inputs: usize,
     pub num_outputs: usize,
     pub num_intermediates: usize,
+    /// Whether this site is wrapped in `TACEO_INJECTED_Poseidon2` rather than
+    /// `TACEO_PRECOMPUTATION_*`: its trace comes from the host, not from `vm::gadgets`. Only ever
+    /// true for a [`PrecomputeKind::Poseidon2`] kind - `Graph::verify` rejects any other
+    /// combination.
+    pub injected: bool,
 }
 
 /// One operation of the value graph. Every variant produces exactly one value.
@@ -472,6 +481,7 @@ impl Graph {
             .iter()
             .filter(|batch| batch.domain == crate::passes::mpc::domain::Domain::Shared)
             .count();
+        let injected_batches = batches.iter().filter(|batch| batch.injected).count();
         MpcSummary {
             rounds: self.rounds.len(),
             reshare_elements,
@@ -482,6 +492,7 @@ impl Graph {
             precompute_sites: self.precompute_sites.len(),
             precompute_batches,
             shared_precompute_batches,
+            injected_batches,
         }
     }
 
@@ -690,6 +701,15 @@ impl Graph {
                 );
             }
         }
+        for (i, site) in self.precompute_sites.iter().enumerate() {
+            if site.injected && !matches!(site.kind, PrecomputeKind::Poseidon2 { .. }) {
+                eyre::bail!(
+                    "precompute site {i} ({:?}) is marked injected but only Poseidon2 is \
+                     injectable",
+                    site.kind
+                );
+            }
+        }
         Ok(())
     }
 
@@ -805,6 +825,7 @@ mod tests {
             num_inputs: 1,
             num_outputs: 1,
             num_intermediates: 1,
+            injected: false,
         }
     }
 

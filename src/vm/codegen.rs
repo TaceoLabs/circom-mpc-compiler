@@ -296,13 +296,28 @@ fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank,
 /// Which bank a precomputation site's results live in. Every kind but [`PrecomputeKind::Reveal`]
 /// keeps the site's own domain (deterministic public work stays `Public`, a real share stays
 /// `Shared`) - `Reveal`'s entire purpose is to leave the `Public` domain regardless of whether its
-/// own input was `Shared`, since that is exactly what a genuine MPC open does.
-fn precompute_result_bank(kind: PrecomputeKind, domain: Domain) -> eyre::Result<Bank> {
+/// own input was `Shared`, since that is exactly what a genuine MPC open does. An `injected` site
+/// must be `Shared` - the host has nothing to compute for an all-public site, so seeing one here
+/// is a circuit-authoring mistake (should have used `TACEO_PRECOMPUTATION_*` instead) rather than
+/// something to encode.
+fn precompute_result_bank(
+    kind: PrecomputeKind,
+    domain: Domain,
+    injected: bool,
+) -> eyre::Result<Bank> {
     if domain == Domain::Local {
         eyre::bail!(
             "codegen: a precomputation site reads a Local (un-reshared MulLocal) value - it must \
              be reshared first; this is a lowering invariant violation"
         );
+    }
+    if injected {
+        eyre::ensure!(
+            domain == Domain::Shared,
+            "codegen: an injected {kind:?} site is all-Public - nothing for the host to \
+             precompute, use the plain TACEO_PRECOMPUTATION_* wrapper instead"
+        );
+        return Ok(Bank::Shared);
     }
     if matches!(kind, PrecomputeKind::Reveal { .. }) {
         return Ok(Bank::Public);
@@ -432,7 +447,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
     let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.precompute_sites().len());
     for (site_id, site) in graph.precompute_sites().iter().enumerate() {
-        let bank = precompute_result_bank(site.kind, site_domains[site_id])?;
+        let bank = precompute_result_bank(site.kind, site_domains[site_id], site.injected)?;
         let base = match bank {
             Bank::Public => p_next,
             Bank::Shared => s_next,
@@ -800,7 +815,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 let base = site_result_base[site_id];
                 debug_assert_eq!(
                     base.bank,
-                    precompute_result_bank(plan.kind, plan.domain)
+                    precompute_result_bank(plan.kind, plan.domain, plan.injected)
                         .expect("already validated while reserving site_result_base")
                 );
                 for (pos, &logical) in live_slots[site_id].iter().enumerate() {
@@ -816,7 +831,19 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 );
             }
             PrecomputeBatch {
-                kind: BatchKind::Precompute(plan.kind),
+                kind: if plan.injected {
+                    let PrecomputeKind::Poseidon2 { t } = plan.kind else {
+                        unreachable!(
+                            "an injected plan is always Poseidon2 - the frontend never marks any \
+                             other kind injected (build.rs) and Graph::verify rejects one that \
+                             slips through, got {:?}",
+                            plan.kind
+                        );
+                    };
+                    BatchKind::InjectedPoseidon2 { t }
+                } else {
+                    BatchKind::Precompute(plan.kind)
+                },
                 sites: plan.sites.len(),
                 input_slots,
                 result_requests,
@@ -986,6 +1013,7 @@ mod tests {
             num_inputs: 1,
             num_outputs: 1,
             num_intermediates: 1,
+            injected: false,
         }
     }
 
@@ -996,6 +1024,7 @@ mod tests {
             num_inputs: n,
             num_outputs: n,
             num_intermediates: 0,
+            injected: false,
         }
     }
 
@@ -1465,6 +1494,7 @@ mod tests {
             num_inputs: 1,
             num_outputs: 1,
             num_intermediates: 2,
+            injected: false,
         };
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0

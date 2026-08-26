@@ -65,7 +65,7 @@ use super::program::{
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
 /// shim: accepting an older layout could produce a plausible-looking wrong witness.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProgramReadLimits {
@@ -224,6 +224,10 @@ impl BatchKind {
                 kind.write(w)?;
             }
             BatchKind::IsZeroReveal => w.write_u8(1)?,
+            BatchKind::InjectedPoseidon2 { t } => {
+                w.write_u8(2)?;
+                w.write_u32::<LittleEndian>(*t as u32)?;
+            }
         }
         Ok(())
     }
@@ -232,6 +236,9 @@ impl BatchKind {
         Ok(match r.read_u8()? {
             0 => BatchKind::Precompute(PrecomputeKind::read(r)?),
             1 => BatchKind::IsZeroReveal,
+            2 => BatchKind::InjectedPoseidon2 {
+                t: r.read_u32::<LittleEndian>()? as usize,
+            },
             other => eyre::bail!("unknown BatchKind tag {other}"),
         })
     }
@@ -635,8 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_a_fused_isequal_reveal_batch_in_version_one() {
-        assert_eq!(super::VERSION, 1);
+    fn round_trips_a_fused_isequal_reveal_batch() {
         let original = program("precomputation_isequal_reveal_test");
         assert_eq!(original.precompute_batches.len(), 1);
         assert_eq!(

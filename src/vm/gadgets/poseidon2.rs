@@ -682,6 +682,52 @@ pub fn plain_trace_requested(
     walk(&mut PlainOps, t, states, &rc, outputs)
 }
 
+/// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
+/// `t` output elements) and `intermediate` (its round trace) - exactly `PrecomputeSite`'s own
+/// outputs/intermediates, and exactly the shape `Machine::run_with_injection` expects. A thin,
+/// full-CSR-request wrapper over [`plain_trace_requested`] for a host that wants to precompute a
+/// `TACEO_INJECTED_Poseidon2` site's trace outside a `Machine::run`.
+pub fn plain_trace(t: usize, states: &[Fr]) -> eyre::Result<Vec<crate::vm::SiteTrace<Fr>>> {
+    let sites = check_width(t, states.len())?;
+    let capacity = result_slots(t);
+    let flat = plain_trace_requested(
+        t,
+        states,
+        &full_requests(sites, capacity),
+        &full_offsets(sites, capacity),
+    )?;
+    Ok(split_into_site_traces(t, capacity, flat))
+}
+
+/// A full ascending CSR request table asking for every logical slot of every site: `sites` copies
+/// of `0..capacity`, one per site row - shared by every "give me everything" entry point below.
+fn full_requests(sites: usize, capacity: usize) -> Vec<u32> {
+    (0..sites).flat_map(|_| 0..capacity as u32).collect()
+}
+
+/// The matching CSR row-pointer table for [`full_requests`]: `sites` equal-width rows.
+fn full_offsets(sites: usize, capacity: usize) -> Vec<u32> {
+    (0..=sites)
+        .map(|i| u32::try_from(i * capacity).expect("Poseidon2 trace length does not fit into u32"))
+        .collect()
+}
+
+/// Splits a flat, site-major, full-capacity trace (as produced by a `full_requests`/`full_offsets`
+/// call) into one [`crate::vm::SiteTrace`] per site - slots `0..t` are the permutation's outputs
+/// (`Layout::states == t`), the rest its intermediates.
+fn split_into_site_traces<V>(
+    t: usize,
+    capacity: usize,
+    flat: Vec<V>,
+) -> Vec<crate::vm::SiteTrace<V>>
+where
+    V: Clone,
+{
+    flat.chunks_exact(capacity)
+        .map(|chunk| crate::vm::SiteTrace::new(chunk[..t].to_vec(), chunk[t..].to_vec()))
+        .collect()
+}
+
 // --- rep3 ---
 
 /// Number of fresh masks one Poseidon2 service consumes. There are eight full-round s-box layers
@@ -931,6 +977,78 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
         ops.pool.consumed - consumed_before
     );
     Ok(out)
+}
+
+/// A standalone Poseidon2 trace producer, usable outside a `Machine::run` - e.g. to precompute a
+/// batch of `TACEO_INJECTED_Poseidon2` sites' traces before a proof run, so the proof run can
+/// inline them via `Machine::run_with_injection` instead of paying their online rounds twice.
+/// Round cost is exactly what the same permutations would cost inside the VM: 3 preprocessing
+/// rounds (amortized once per `new`) plus `8 + partial_rounds(t)` online rounds per [`Self::trace`]
+/// call, independent of how many sites that call covers.
+///
+/// `mpc_core::gadgets::poseidon2::Poseidon2`'s own
+/// `rep3_permutation_in_place_with_precomputation_intermediate` computes the same permutation, but
+/// its trace vector is a *different shape* from the one this module (and hence
+/// `Machine::run_with_injection`) expects - see this module's own
+/// `plain_output_matches_mpc_core_poseidon2_output` test. Use this type, not mpc-core's trace
+/// directly, to build an injectable [`crate::vm::SiteTrace`].
+#[cfg(feature = "rep3")]
+pub struct Poseidon2Service {
+    t: usize,
+    preprocessing: Rep3Poseidon2Preprocessing,
+}
+
+#[cfg(feature = "rep3")]
+impl Poseidon2Service {
+    /// Prepares the correlated randomness for `sites` sites' worth of Poseidon2(t) traces, in
+    /// exactly 3 rounds.
+    pub fn new<N: mpc_net::Network>(
+        t: usize,
+        sites: usize,
+        net: &N,
+        state: &mut mpc_core::protocols::rep3::Rep3State,
+    ) -> eyre::Result<Self> {
+        let preprocessing = preprocess_rep3(mask_elements(t, sites)?, net, state)?;
+        Ok(Self { t, preprocessing })
+    }
+
+    /// Runs the permutation over `states` (`sites * t` shares, one length-`t` state per site,
+    /// concatenated) and returns each site's full trace. Consumes exactly this call's share of the
+    /// pool `new` prepared; calling it for more sites than `new` was sized for fails cleanly rather
+    /// than running out of randomness mid-round.
+    pub fn trace<N: mpc_net::Network>(
+        &mut self,
+        t: usize,
+        states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
+        net: &N,
+        rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
+    ) -> eyre::Result<Vec<crate::vm::SiteTrace<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>>>
+    {
+        eyre::ensure!(
+            t == self.t,
+            "Poseidon2Service was prepared for t={}, called with t={t}",
+            self.t
+        );
+        let sites = check_width(t, states.len())?;
+        let capacity = result_slots(t);
+        let flat = rep3_trace_requested_preprocessed(
+            t,
+            states,
+            net,
+            rep3_state,
+            &mut self.preprocessing,
+            &full_requests(sites, capacity),
+            &full_offsets(sites, capacity),
+        )?;
+        Ok(split_into_site_traces(t, capacity, flat))
+    }
+
+    /// Verifies every prepared mask was actually consumed - a caller that sized `new` for more
+    /// sites than it ever called `trace` for has a bug worth surfacing, the same way
+    /// `Rep3Driver::finish_run` surfaces it for the VM's own pool.
+    pub fn finish(self) -> eyre::Result<()> {
+        self.preprocessing.ensure_consumed()
+    }
 }
 
 #[cfg(test)]
@@ -1342,5 +1460,95 @@ mod tests {
             rep3_requested(t, shares, net, state, &requests, &offsets)
         });
         assert_eq!(sparse_rounds, 3 + 8 + partial_rounds(t));
+    }
+
+    /// [`plain_trace`] splits the same flat trace [`plain_full`] uses into `output`/`intermediate`
+    /// at exactly `t` - the layout `Machine::run_with_injection` expects.
+    #[test]
+    fn plain_trace_splits_output_and_intermediate_at_t() {
+        for t in SUPPORTED_WIDTHS {
+            let states: Vec<Fr> = (0..2 * t).map(|i| Fr::from(i as u64 + 1)).collect();
+            let flat = plain_full(t, &states);
+            let traces = plain_trace(t, &states).unwrap();
+            assert_eq!(traces.len(), 2, "t={t}");
+            let capacity = result_slots(t);
+            for (site, trace) in traces.iter().enumerate() {
+                assert_eq!(
+                    trace.output,
+                    flat[site * capacity..site * capacity + t],
+                    "t={t} site={site}"
+                );
+                assert_eq!(
+                    trace.intermediate,
+                    flat[site * capacity + t..(site + 1) * capacity],
+                    "t={t} site={site}"
+                );
+            }
+        }
+    }
+
+    /// [`Poseidon2Service`] must agree with the plain driver and consume exactly the masks it
+    /// prepared - the standalone entry point a host uses to precompute a `TACEO_INJECTED_Poseidon2`
+    /// site's trace outside a `Machine::run`.
+    #[cfg(feature = "rep3")]
+    #[test]
+    fn poseidon2_service_matches_plain_and_consumes_its_pool() {
+        use crate::vm::gadgets::test_support::run3;
+
+        for t in SUPPORTED_WIDTHS {
+            let sites = 2;
+            let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 3)).collect();
+            let expected = plain_trace(t, &states).unwrap();
+            let got = run3(&states, |net, state, shares| {
+                let mut service = Poseidon2Service::new(t, sites, net, state)?;
+                let traces = service.trace(t, shares, net, state)?;
+                service.finish()?;
+                Ok(traces
+                    .into_iter()
+                    .flat_map(|trace| trace.output.into_iter().chain(trace.intermediate))
+                    .collect())
+            });
+            let got: Vec<crate::vm::SiteTrace<Fr>> = got
+                .chunks_exact(result_slots(t))
+                .map(|chunk| crate::vm::SiteTrace::new(chunk[..t].to_vec(), chunk[t..].to_vec()))
+                .collect();
+            assert_eq!(
+                got.iter()
+                    .map(|s| (&s.output, &s.intermediate))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|s| (&s.output, &s.intermediate))
+                    .collect::<Vec<_>>(),
+                "t={t}"
+            );
+        }
+    }
+
+    /// `mpc_core::gadgets::poseidon2::Poseidon2` and this module compute the same permutation, so
+    /// their final states must agree - but their *intermediate trace* vectors are not the same
+    /// shape (e.g. 2019 values at t=3 there vs this module's 2032, which is
+    /// `PrecomputeKind::Poseidon2 { t: 3 }.expected_results() - 3`, cross-checked against the real
+    /// circuit's signal layout in `frontend/inline.rs`). A caller building [`crate::vm::SiteTrace`]
+    /// from mpc-core's own accelerator therefore cannot use its trace vector as-is; only the
+    /// permutation output is a drop-in match.
+    #[cfg(feature = "rep3")]
+    #[test]
+    fn plain_output_matches_mpc_core_poseidon2_output() {
+        use mpc_core::gadgets::poseidon2::{CircomTracePlainHasher, Poseidon2};
+
+        fn check<const T: usize>() {
+            let state: [Fr; T] = std::array::from_fn(|i| Fr::from(i as u64 + 7));
+            let (mpc_core_out, _mpc_core_trace) = Poseidon2::<Fr, T, 5>::default()
+                .plain_permutation_intermediate(state)
+                .unwrap();
+            let ours = &plain_trace(T, &state).unwrap()[0];
+            assert_eq!(ours.output, mpc_core_out.to_vec(), "t={T}");
+        }
+        // `CircomTracePlainHasher` is only implemented for these widths.
+        check::<2>();
+        check::<3>();
+        check::<4>();
+        check::<16>();
     }
 }

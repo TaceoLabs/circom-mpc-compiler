@@ -11,7 +11,7 @@
 
 #![allow(clippy::type_complexity)] // the per-party (witness, metrics, proof) tuples
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ark_bn254::{Bn254, Fr};
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
@@ -55,6 +55,10 @@ struct PartyMetrics {
     online_rounds: usize,
     bytes_sent: usize,
     bytes_recv: usize,
+    setup_time: Duration,
+    preprocessing_time: Duration,
+    witness_time: Duration,
+    prove_time: Option<Duration>,
 }
 
 impl PartyMetrics {
@@ -181,6 +185,7 @@ fn main() -> eyre::Result<()> {
     );
 
     let zkey_path = zkey_arg.or_else(|| default_zkey_path(root, &arg, is_merces_main));
+    let t = Instant::now();
     let zkey = zkey_path.as_deref().and_then(|p| {
         std::fs::metadata(p)
             .is_ok()
@@ -190,6 +195,13 @@ fn main() -> eyre::Result<()> {
                 None
             })
     });
+    if zkey.is_some() {
+        println!(
+            "zkey:    {:.2?}  (read {})",
+            t.elapsed(),
+            zkey_path.as_deref().unwrap()
+        );
+    }
 
     let t = Instant::now();
     let (rep3, party_metrics, proof) = run_rep3(&program, &values, zkey.as_ref());
@@ -200,10 +212,19 @@ fn main() -> eyre::Result<()> {
     let max_online_rounds = online_rounds.iter().copied().max().unwrap_or(0);
     let max_combined_rounds = combined_rounds.iter().copied().max().unwrap_or(0);
     let online_gadget_rounds = max_online_rounds.saturating_sub(summary.rounds);
-    println!(
-        "rep3:    {:.2?}  (3 parties over an in-process LocalNetwork)",
-        t.elapsed()
-    );
+    println!("  total:         {:.2?}", t.elapsed());
+    for (party, metrics) in party_metrics.iter().enumerate() {
+        match metrics.prove_time {
+            Some(prove) => println!(
+                "  party {party}: state setup {:.2?}, preprocessing {:.2?}, witness ext {:.2?}, prove {:.2?}",
+                metrics.setup_time, metrics.preprocessing_time, metrics.witness_time, prove,
+            ),
+            None => println!(
+                "  party {party}: state setup {:.2?}, preprocessing {:.2?}, witness ext {:.2?}",
+                metrics.setup_time, metrics.preprocessing_time, metrics.witness_time,
+            ),
+        }
+    }
     println!(
         "  preprocessing rounds={preprocessing_rounds:?} by party, max={max_preprocessing_rounds}"
     );
@@ -227,13 +248,18 @@ fn main() -> eyre::Result<()> {
     );
 
     if let Some((vk, proof, public)) = proof {
+        let t = Instant::now();
         Groth16::<Bn254>::verify(&vk, &proof, &public[1..]).unwrap_or_else(|e| {
             panic!(
                 "the proof did not verify: {e} - this points at this compiler's witness (layout \
                  or a gadget), not at the zkey or the inputs"
             )
         });
-        println!("proof verifies against {}", zkey_path.unwrap());
+        println!(
+            "verify:  {:.2?}  (proof verifies against {})",
+            t.elapsed(),
+            zkey_path.unwrap()
+        );
     }
     Ok(())
 }
@@ -256,7 +282,10 @@ fn run_rep3(
         Vec<Fr>,
     )>,
 ) {
+    let t = Instant::now();
     let shares = fixtures::rep3::share_inputs(program, values);
+    println!("rep3:    (3 parties over an in-process LocalNetwork)");
+    println!("  share inputs:  {:.2?}", t.elapsed());
 
     // A second and third connection per party are only needed if we are actually proving.
     let extension_nets = LocalNetwork::new(3);
@@ -279,13 +308,17 @@ fn run_rep3(
                 let p1 = proving1.as_mut().map(|it| it.next().unwrap());
                 scope.spawn(move || {
                     let net = CountingNet::new(net);
+                    let t = Instant::now();
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let setup_time = t.elapsed();
                     let (setup_sent, setup_recv) = net
                         .get_connection_stats()
                         .iter()
                         .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
                     net.reset();
+                    let t = Instant::now();
                     let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let preprocessing_time = t.elapsed();
                     let preprocessing_rounds = net.rounds();
                     net.reset();
                     let mut next = 0;
@@ -294,7 +327,9 @@ fn run_rep3(
                         next += 1;
                         s
                     });
+                    let t = Instant::now();
                     let witness = Machine::run(program, &mut driver, &inputs).unwrap();
+                    let witness_time = t.elapsed();
                     let online_rounds = net.rounds();
                     let full_witness = witness.clone();
                     let (total_sent, total_recv) = net
@@ -304,6 +339,7 @@ fn run_rep3(
                     let bytes_sent = total_sent.saturating_sub(setup_sent);
                     let bytes_recv = total_recv.saturating_sub(setup_recv);
 
+                    let t = Instant::now();
                     let proof = zkey.map(|(matrices, pkey)| {
                         let n_pub = matrices.num_instance_variables;
                         let (public_inputs, secret) =
@@ -322,6 +358,7 @@ fn run_rep3(
                         .unwrap();
                         (proof, public_inputs)
                     });
+                    let prove_time = proof.is_some().then(|| t.elapsed());
 
                     (
                         full_witness,
@@ -330,6 +367,10 @@ fn run_rep3(
                             online_rounds,
                             bytes_sent,
                             bytes_recv,
+                            setup_time,
+                            preprocessing_time,
+                            witness_time,
+                            prove_time,
                         },
                         proof,
                     )
@@ -352,9 +393,9 @@ fn run_rep3(
         (pkey.vk.clone(), proof, public)
     });
 
-    (
-        combine_field_elements(&w0, &w1, &w2),
-        [metrics0, metrics1, metrics2],
-        proof,
-    )
+    let t = Instant::now();
+    let witness = combine_field_elements(&w0, &w1, &w2);
+    println!("  combine:       {:.2?}", t.elapsed());
+
+    (witness, [metrics0, metrics1, metrics2], proof)
 }

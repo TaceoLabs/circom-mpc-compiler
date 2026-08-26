@@ -98,6 +98,9 @@ pub(crate) struct PrecomputedInstance {
     pub(crate) num_inputs: usize,
     pub(crate) num_outputs: usize,
     pub(crate) num_intermediates: usize,
+    /// Whether this instance is wrapped in `TACEO_INJECTED_*` rather than
+    /// `TACEO_PRECOMPUTATION_*` - see `PrecomputeSite::injected`.
+    pub(crate) injected: bool,
 }
 
 /// The not-yet-inlined value graph of a single template. `sub_graphs[i]` is the i-th
@@ -345,9 +348,9 @@ impl<'a> GraphCompiler<'a> {
         }
 
         // A gadget this compiler services out-of-band is always cut into a precomputation site:
-        // its body is never compiled, and `vm::gadgets` supplies its trace instead. Resolved from
-        // the *instantiated* template's name, so this fires the same way whether or not the
-        // enclosing template wraps it.
+        // its body is never compiled, and `vm::gadgets` supplies its trace instead (or, for an
+        // `injected` site, the host does). Resolved from the *instantiated* template's name, so
+        // this fires the same way regardless of which wrapper (if any) encloses it.
         //
         // Peek, never remove: the wrapped component's body is never compiled at all (see
         // `SubGraphInstance::Precomputed`), so its entry in `templates` must stay put for every
@@ -391,6 +394,21 @@ impl<'a> GraphCompiler<'a> {
         };
 
         if let Some(kind) = kind {
+            // `TACEO_INJECTED_Poseidon2` marks a site whose trace the host supplies instead of
+            // `vm::gadgets` - the *enclosing* template's name, since the inner gadget's own name
+            // (matched just above) is unchanged either way. `self.code` is that enclosing
+            // template's own `GraphCompiler`. Poseidon2 is the only gadget this compiler allows
+            // to be injected.
+            let injected = self.code.name == "TACEO_INJECTED_Poseidon2";
+            if injected {
+                eyre::ensure!(
+                    matches!(kind, PrecomputeKind::Poseidon2 { .. }),
+                    "`{}` wraps `{}`, but only Poseidon2 is an injectable gadget",
+                    self.code.name,
+                    template_code.name
+                );
+            }
+
             let span = *self.precompute_spans.get(&header).unwrap_or_else(|| {
                 panic!("no signal-span entry for precomputed template `{header}`")
             });
@@ -404,6 +422,7 @@ impl<'a> GraphCompiler<'a> {
                     num_inputs,
                     num_outputs,
                     num_intermediates,
+                    injected,
                 })
             });
             return Ok(());

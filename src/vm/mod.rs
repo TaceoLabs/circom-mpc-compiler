@@ -13,6 +13,6 @@ pub mod program;
 mod serialize;
 pub mod witness;
 
-pub use machine::{InputValue, Machine};
+pub use machine::{GadgetInjection, InputValue, Machine, SiteTrace};
 pub use program::Program;
 pub use serialize::ProgramReadLimits;

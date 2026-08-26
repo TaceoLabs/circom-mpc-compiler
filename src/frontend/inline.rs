@@ -212,6 +212,7 @@ fn inline_precomputed(
         num_inputs,
         num_outputs,
         num_intermediates,
+        injected,
     } = site;
     let signal_offset = parent_offset + signal_offset;
     // Cross-checks the circuit's actual signal layout against what the gadget's VM
@@ -235,6 +236,7 @@ fn inline_precomputed(
         num_inputs,
         num_outputs,
         num_intermediates,
+        injected,
     });
 
     // The site's inputs, in port order. `TemplateOp::SubCmpInput`'s `port` (and `sub_cmp_inputs`'

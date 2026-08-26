@@ -192,6 +192,7 @@ mod tests {
                 num_inputs: 1,
                 num_outputs: 1,
                 num_intermediates: 1,
+                injected: false,
             }],
         );
         super::super::mul_split::run(&mut graph).unwrap();
@@ -228,6 +229,7 @@ mod tests {
                 num_inputs: 1,
                 num_outputs: 1,
                 num_intermediates: 1,
+                injected: false,
             })
             .collect();
         let mut graph = graph_with_sites(nodes, ValueId::new(7), sites);

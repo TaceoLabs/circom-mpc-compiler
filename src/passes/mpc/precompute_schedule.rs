@@ -1,7 +1,9 @@
 //! Placement analysis for precomputation batches, shared by codegen and `Graph::mpc_summary`.
-//! Sites normally coalesce by `(kind, network stage, domain)`. A valid but non-level-sorted graph
-//! may place an early result consumer before a later independent site; in that case the active
-//! batch is closed and a new one is started instead of rejecting the circuit.
+//! Sites normally coalesce by `(kind, network stage, domain, injected)`. A valid but
+//! non-level-sorted graph may place an early result consumer before a later independent site; in
+//! that case the active batch is closed and a new one is started instead of rejecting the
+//! circuit. `injected` is part of the key so a host-supplied site never coalesces with one the
+//! driver still has to service.
 
 use rustc_hash::FxHashMap;
 
@@ -17,6 +19,7 @@ pub(crate) struct BatchPlan {
     pub(crate) sites: Vec<(usize, usize)>,
     pub(crate) anchor: usize,
     pub(crate) stage: usize,
+    pub(crate) injected: bool,
     deadline: usize,
 }
 
@@ -50,12 +53,12 @@ pub(crate) fn plan_precompute_batches(graph: &Graph, domains: &[Domain]) -> Vec<
     }
 
     let mut plans = Vec::<BatchPlan>::new();
-    let mut active = FxHashMap::<(PrecomputeKind, usize, Domain), usize>::default();
+    let mut active = FxHashMap::<(PrecomputeKind, usize, Domain, bool), usize>::default();
     for (site_id, site) in sites.iter().enumerate() {
         let node = site_node[site_id];
         let stage = stages[site_id];
         let domain = domains[node];
-        let key = (site.kind, stage, domain);
+        let key = (site.kind, stage, domain, site.injected);
 
         let append_to = active.get(&key).copied().filter(|&idx| {
             let plan = &plans[idx];
@@ -74,6 +77,7 @@ pub(crate) fn plan_precompute_batches(graph: &Graph, domains: &[Domain]) -> Vec<
                 sites: vec![(site_id, node)],
                 anchor: node,
                 stage,
+                injected: site.injected,
                 deadline: first_reader[site_id],
             });
             active.insert(key, idx);
