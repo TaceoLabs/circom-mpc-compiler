@@ -1,12 +1,5 @@
 pragma circom 2.2.2;
 
-include "taceo/poseidon2.circom";
+include "taceo/accelerators.circom";
 
-template WrapPoseidon2(T) {
-    signal input in[T];
-    signal output out[T];
-
-    out <== Poseidon2(T)(in);
-}
-
-component main = WrapPoseidon2(3);
+component main = TACEO_ACCELERATOR_Poseidon2(3);

@@ -17,7 +17,7 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
     }
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::precompute` call
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Accelerator`)
 /// (the same technique the co-snarks accelerator uses, `circom-mpc-vm/src/accelerator.rs`'s
 /// `register_iszero`, generalized from one value to a batch): convert every input to binary with
 /// the strategy selected on `Rep3State`, test the binary shares for zero, and inject the result

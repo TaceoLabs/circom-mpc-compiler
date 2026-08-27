@@ -1,12 +1,5 @@
 pragma circom 2.2.2;
 
-include "comparators.circom";
+include "taceo/accelerators.circom";
 
-template WrapIsZero() {
-    signal input in;
-    signal output out;
-
-    out <== IsZero()(in);
-}
-
-component main = WrapIsZero();
+component main = TACEO_ACCELERATOR_IsZero();

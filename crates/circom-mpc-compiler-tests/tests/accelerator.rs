@@ -217,35 +217,3 @@ fn all_public_gadgets_stay_public_through_downstream_multiplication() {
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
     assert_eq!(witness[1], Fr::from(0u64));
 }
-
-/// `CompilerConfig::accelerate_poseidon2` gates whether an unwrapped `Poseidon2` is cut into an
-/// accelerator site: on (the default, exercised by `extract_yields_one_site_per_wrapper` above)
-/// it is; off, recognition is skipped and the frontend falls through to compiling `Poseidon2`'s
-/// body like any ordinary subcomponent. For the vendored `taceo/poseidon2.circom` that fallback
-/// itself does not succeed - its round-constant loading lowers to a circom `CallBucket`, which
-/// this compiler's non-gadget frontend can't handle (`handle_compute_bucket` only ever survives
-/// `Add`/`Sub`/`Mul`) - a pre-existing gap this flag doesn't introduce and isn't scoped to fix. So
-/// what this asserts is the flag's actual, current effect: a different failure than the
-/// site-shape/injectability errors above, proving recognition was genuinely skipped rather than
-/// just producing a different site.
-#[test]
-fn disabling_poseidon2_acceleration_skips_recognition() {
-    let mut cfg = config();
-    cfg.accelerate_poseidon2 = false;
-    let err = CoCircomCompiler::parse(circuit_path("accelerator_poseidon2_test"), cfg).unwrap_err();
-    assert!(
-        err.to_string().contains("unsupported instruction"),
-        "expected a body-compilation error now that Poseidon2 isn't recognized, got: {err}"
-    );
-}
-
-/// `TACEO_PRECOMPUTATION_Poseidon2` is host-precomputed regardless of `accelerate_poseidon2` - the
-/// flag only governs an *unwrapped* `Poseidon2`.
-#[test]
-fn disabling_poseidon2_acceleration_does_not_affect_the_precomputation_marker() {
-    let mut cfg = config();
-    cfg.accelerate_poseidon2 = false;
-    let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), cfg).unwrap();
-    assert_eq!(program.statistics().precomputed_batches, 1);
-}

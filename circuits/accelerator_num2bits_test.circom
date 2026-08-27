@@ -1,12 +1,5 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
+include "taceo/accelerators.circom";
 
-template WrapNum2Bits(n) {
-    signal input in;
-    signal output out[n];
-
-    out <== Num2Bits(n)(in);
-}
-
-component main = WrapNum2Bits(8);
+component main = TACEO_ACCELERATOR_Num2Bits(8);

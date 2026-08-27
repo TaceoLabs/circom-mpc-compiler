@@ -489,7 +489,7 @@ impl Graph {
                     })?;
                     if node.inputs.len() != site.num_inputs {
                         eyre::bail!(
-                            "node {i} (Precompute({})) has {} inputs, expected {} (site num_inputs)",
+                            "node {i} (Accelerator({})) has {} inputs, expected {} (site num_inputs)",
                             site_id.index(),
                             node.inputs.len(),
                             site.num_inputs
@@ -532,7 +532,7 @@ impl Graph {
                 let referenced = &self.nodes[node.inputs[0].index()];
                 let Op::Accelerator(site_id) = &referenced.op else {
                     eyre::bail!(
-                        "node {i} (AcceleratorResult) does not reference a Precompute node"
+                        "node {i} (AcceleratorResult) does not reference an Accelerator node"
                     );
                 };
                 let site = &self.accelerator_sites[site_id.index()];
@@ -552,7 +552,7 @@ impl Graph {
                 for input in &node.inputs {
                     if matches!(self.nodes[input.index()].op, Op::MulLocal) {
                         eyre::bail!(
-                            "node {i} (Precompute({})) reads value {} which is an un-reshared \
+                            "node {i} (Accelerator({})) reads value {} which is an un-reshared \
                              MulLocal - an accelerator gadget needs a genuine share",
                             site_id.index(),
                             input.index()
@@ -593,7 +593,7 @@ impl Graph {
         }
         // Exactly one `Op::Accelerator` node per site. Several things already assume this without
         // checking it: `vm::codegen` groups sites into batches and reserves one contiguous result
-        // range per site, and `gc` roots every `Precompute` node so a "dead" site can't shift a
+        // range per site, and `gc` roots every `Accelerator` node so a "dead" site can't shift a
         // later same-kind site's slot range. Two nodes for one site would silently service it twice
         // and desynchronize both.
         let mut nodes_per_site = vec![0usize; self.accelerator_sites.len()];

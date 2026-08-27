@@ -45,13 +45,6 @@ struct Cli {
     /// Shows logs during compilation.
     #[arg(long)]
     verbose: bool,
-    /// Compiles an unwrapped `Poseidon2` template as an ordinary subcomponent instead of cutting
-    /// it into an accelerator site. `TACEO_PRECOMPUTATION_Poseidon2` is unaffected - it is always
-    /// host-precomputed. See `CompilerConfig::accelerate_poseidon2` for a caveat: this only
-    /// compiles if `Poseidon2`'s body avoids circom bucket code this compiler's non-gadget
-    /// frontend doesn't support, which the vendored `poseidon2.circom` does not.
-    #[arg(long)]
-    no_poseidon2_accelerator: bool,
 }
 
 fn install_tracing() {
@@ -100,10 +93,6 @@ fn build_config(cli: &Cli) -> eyre::Result<CompilerConfig> {
     if cli.verbose {
         config.verbose = true;
     }
-    if cli.no_poseidon2_accelerator {
-        config.accelerate_poseidon2 = false;
-    }
-
     Ok(config)
 }
 

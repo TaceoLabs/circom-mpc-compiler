@@ -35,26 +35,10 @@ pub struct CompilerConfig {
     /// the SNARK statement split, which the zkey's `num_instance_variables` decides.
     #[serde(default)]
     pub mpc_public_inputs: Vec<String>,
-    /// Whether an unwrapped `Poseidon2` instantiation is cut into an accelerator site serviced by
-    /// `vm::gadgets` (`true`, the default) or compiled as an ordinary subcomponent. A
-    /// `TACEO_PRECOMPUTATION_Poseidon2` site is host-precomputed regardless of this flag.
-    ///
-    /// Turning this off only compiles if `Poseidon2`'s own body lowers to circom bucket code this
-    /// compiler's non-gadget frontend supports (`Add`/`Sub`/`Mul` only - see
-    /// `frontend::build::handle_compute_bucket`). The vendored
-    /// `circuits/libs/taceo/poseidon2.circom` does not: its round-constant loading survives
-    /// circom's own optimizer as a `CallBucket`, which is unsupported outside the gadget path, so
-    /// disabling this flag fails to compile that template today.
-    #[serde(default = "default_true")]
-    pub accelerate_poseidon2: bool,
 }
 
 fn default_version() -> String {
     "2.2.2".to_owned()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for CompilerConfig {
@@ -66,7 +50,6 @@ impl Default for CompilerConfig {
             inspect: false,
             opt_level: OptLevel::default(),
             mpc_public_inputs: vec![],
-            accelerate_poseidon2: true,
         }
     }
 }

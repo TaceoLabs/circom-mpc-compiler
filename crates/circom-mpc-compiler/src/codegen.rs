@@ -430,7 +430,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     for (i, node) in nodes.iter().enumerate() {
         if let Op::AcceleratorResult(k) = &node.op {
             let Op::Accelerator(site_id) = &nodes[node.inputs[0].index()].op else {
-                unreachable!("Graph::verify guarantees AcceleratorResult's input is Precompute");
+                unreachable!("Graph::verify guarantees AcceleratorResult's input is Accelerator");
             };
             live_slots[site_id.index()].push(*k);
             live_nodes[site_id.index()].push(i);
@@ -690,13 +690,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     });
                 }
                 site_inputs[site_id.index()] = inputs;
-                // The Precompute node's own value is never read directly (only via
+                // The Accelerator node's own value is never read directly (only via
                 // AcceleratorResult) - it needs no slot.
             }
             Op::AcceleratorResult(_) => {
                 let Op::Accelerator(site_id) = &nodes[node.inputs[0].index()].op else {
                     unreachable!(
-                        "Graph::verify guarantees AcceleratorResult's input is Precompute"
+                        "Graph::verify guarantees AcceleratorResult's input is Accelerator"
                     );
                 };
                 let base = site_result_base[site_id.index()];
@@ -1490,7 +1490,7 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
-            // A computed value whose only graph reader is site 0's Precompute node.
+            // A computed value whose only graph reader is site 0's Accelerator node.
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 2
             Node::new(
                 Op::Accelerator(AcceleratorId::new(0)),

@@ -1,11 +1,5 @@
 pragma circom 2.2.2;
 
-include "aliascheck.circom";
+include "taceo/accelerators.circom";
 
-template WrapAliasCheck() {
-    signal input in[254];
-
-    AliasCheck()(in);
-}
-
-component main = WrapAliasCheck();
+component main = TACEO_ACCELERATOR_AliasCheck();

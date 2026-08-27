@@ -189,7 +189,6 @@ pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Gr
         &mut compiled_graphs,
         &constant_table,
         &signal_spans,
-        config.accelerate_poseidon2,
     );
     let main_template_graph = main_graph_compiler.parse()?;
 

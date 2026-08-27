@@ -91,7 +91,7 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     trace
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::precompute` call.
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Accelerator`).
 /// Ported from `~/repos/merces`'s `alias_check_trace_helper_rep3`
 /// (`crates/merces-core/src/circom_proof/cosnark.rs`), generalized from one site to a batch and
 /// from merces' own (518-slot, zero-padded) trace convention to the real 519-slot layout above -

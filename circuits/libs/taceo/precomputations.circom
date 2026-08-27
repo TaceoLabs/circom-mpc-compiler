@@ -12,8 +12,7 @@ include "poseidon2.circom";
 //
 // Standard-library gadgets (`Num2Bits`, `IsZero`, `AliasCheck`) need no wrapper at all: the compiler
 // recognizes them by their own circom name and always cuts them into an accelerator site. An
-// unwrapped `Poseidon2` is recognized the same way, gated by `CompilerConfig::accelerate_poseidon2`
-// (default on) - with it off, `Poseidon2` compiles as ordinary circuit ops instead.
+// unwrapped `Poseidon2` is recognized and accelerated the same way.
 
 template TACEO_PRECOMPUTATION_Poseidon2(T) {
     signal input in[T];

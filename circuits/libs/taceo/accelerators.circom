@@ -9,9 +9,9 @@ include "comparators.circom";
 // (`vm::gadgets`). The compiler recognizes these gadgets by their own circom name
 // (`Poseidon2`/`Num2Bits`/`IsZero`/`AliasCheck`) regardless of whether a wrapper encloses them, so
 // these templates exist purely to document intent at merces' call sites - not for compiler
-// recognition. Kept as a separate include from `precomputations.circom` (whose
-// `TACEO_PRECOMPUTATION_Poseidon2` marks the unrelated, host-precomputed case) so a circuit that
-// only wants accelerator wrappers doesn't pull in the precomputation/reveal marker too.
+// recognition. Kept as a separate include from `precomputations.circom`, which holds the two
+// templates with special runtime semantics (the host-precomputation marker and the `TACEO_REVEAL`
+// declassification) that a circuit should only pull into scope deliberately.
 
 template TACEO_ACCELERATOR_Poseidon2(T) {
     signal input in[T];

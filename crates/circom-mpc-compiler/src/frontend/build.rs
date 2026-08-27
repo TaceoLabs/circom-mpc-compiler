@@ -125,10 +125,6 @@ pub(crate) struct GraphCompiler<'a> {
     /// `frontend/mod.rs::compute_signal_spans`. Only consulted for recognized gadget templates, to
     /// size their site's `num_intermediates`.
     pub(crate) accelerator_spans: &'a FxHashMap<String, usize>,
-    /// `CompilerConfig::accelerate_poseidon2` - whether an unwrapped `Poseidon2` instantiation is
-    /// cut into an accelerator site or compiled as ordinary circuit ops. Doesn't affect
-    /// `TACEO_PRECOMPUTATION_Poseidon2`, which is always host-precomputed.
-    pub(crate) accelerate_poseidon2: bool,
 }
 
 impl<'a> GraphCompiler<'a> {
@@ -138,7 +134,6 @@ impl<'a> GraphCompiler<'a> {
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph>,
         constant_table: &'a [Fr],
         accelerator_spans: &'a FxHashMap<String, usize>,
-        accelerate_poseidon2: bool,
     ) -> Self {
         Self {
             sub_graphs: Vec::with_capacity(code.number_of_components),
@@ -148,7 +143,6 @@ impl<'a> GraphCompiler<'a> {
             compiled_graphs,
             constant_table,
             accelerator_spans,
-            accelerate_poseidon2,
             var_to_value: FxHashMap::default(),
         }
     }
@@ -371,12 +365,11 @@ impl<'a> GraphCompiler<'a> {
         // `vm::gadgets` - the *enclosing* template's name, since the inner gadget's own name
         // (matched just below) is unchanged either way. `self.code` is that enclosing template's
         // own `GraphCompiler`. Poseidon2 is the only gadget this compiler allows to be
-        // host-precomputed, and a `TACEO_PRECOMPUTATION_Poseidon2` site is always accelerated
-        // regardless of `accelerate_poseidon2` - the host supplies its trace either way.
+        // host-precomputed.
         let precomputed = self.code.name == "TACEO_PRECOMPUTATION_Poseidon2";
 
         let kind = match template_code.name.as_str() {
-            "Poseidon2" if precomputed || self.accelerate_poseidon2 => {
+            "Poseidon2" => {
                 eyre::ensure!(num_inputs == num_outputs, "non-canonical Poseidon2 shape");
                 Some(AcceleratorKind::Poseidon2 { t: num_inputs })
             }
@@ -447,7 +440,6 @@ impl<'a> GraphCompiler<'a> {
             self.compiled_graphs,
             self.constant_table,
             self.accelerator_spans,
-            self.accelerate_poseidon2,
         );
         let sub_cmp = sub_cmp_compiler.parse()?;
         self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
@@ -493,7 +485,7 @@ impl<'a> GraphCompiler<'a> {
                 self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Input(_))
-            // Precompute/AcceleratorResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
+            // Accelerator/AcceleratorResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
             // only ops (see TemplateOp::arity above) and never appear here, but are included so
             // this match stays exhaustive as Op grows.
             | TemplateOp::Real(Op::Accelerator(_))
