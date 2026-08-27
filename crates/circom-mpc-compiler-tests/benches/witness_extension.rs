@@ -9,11 +9,13 @@
 use ark_bn254::Fr;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use circom_mpc_compiler::fixtures::{self, rep3::run_witness_with_shares, rep3::share_inputs};
-use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_compiler::codegen;
-use circom_mpc_vm::{Machine, Program};
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler_tests::fixtures::{
+    self, rep3::run_witness_with_shares, rep3::share_inputs,
+};
+use circom_mpc_vm::driver::plain::PlainDriver;
+use circom_mpc_vm::{Machine, Program};
 
 fn manifest_dir() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../..")

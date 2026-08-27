@@ -1,9 +1,9 @@
 use ark_bn254::Fr;
-use circom_mpc_vm::driver::plain::PlainDriver;
-use circom_mpc_vm::Machine;
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler::OptLevel;
+use circom_mpc_vm::driver::plain::PlainDriver;
+use circom_mpc_vm::Machine;
 
 mod common;
 

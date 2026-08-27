@@ -3,17 +3,15 @@
 //! compare against the plain driver's - this is what proves the rep3 driver agrees with the plain
 //! one on genuinely secret-shared data, not just in the clear. `tests/proving.rs`'s prove+verify
 //! tests are the value oracle for both drivers.
-#![cfg(feature = "rep3")]
-
 use ark_bn254::Fr;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{combine_field_elements, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;
 
-use circom_mpc_compiler::fixtures::rep3::{run_witness, share_inputs};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler_tests::fixtures::rep3::{run_witness, share_inputs};
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::Machine;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 
@@ -112,10 +110,9 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     }
 }
 
-#[cfg(feature = "round-counting")]
 #[test]
 fn fused_iszero_reveal_costs_one_online_round() {
-    use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
+    use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
         CoCircomCompiler::compile(circuit_path("precomputation_iszero_reveal_test"), config())
@@ -124,10 +121,9 @@ fn fused_iszero_reveal_costs_one_online_round() {
     assert_eq!(online, [1, 1, 1]);
 }
 
-#[cfg(feature = "round-counting")]
 #[test]
 fn three_fused_isequal_reveal_sites_cost_one_online_round() {
-    use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
+    use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
         CoCircomCompiler::compile(circuit_path("precomputation_isequal_reveal_test"), config())
@@ -154,8 +150,8 @@ fn wide_round_vector_products_match_the_plain_driver() {
 
 #[test]
 fn all_public_precomputation_uses_the_plain_path_under_rep3() {
-    use circom_mpc_vm::driver::plain::PlainDriver;
     use circom_mpc_compiler::OptLevel;
+    use circom_mpc_vm::driver::plain::PlainDriver;
 
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
@@ -169,7 +165,6 @@ fn all_public_precomputation_uses_the_plain_path_under_rep3() {
     assert_eq!(run_witness(&program, &values), plain);
 }
 
-#[cfg(feature = "round-counting")]
 #[test]
 fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
     use circom_mpc_vm::counting_net::CountingNet;
@@ -270,7 +265,6 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
     assert_eq!(fresh, expected);
 }
 
-#[cfg(feature = "round-counting")]
 #[test]
 fn execution_error_spends_prepared_driver_without_communication() {
     use circom_mpc_vm::counting_net::CountingNet;
@@ -376,7 +370,6 @@ fn execution_error_spends_prepared_driver_without_communication() {
 /// once (3 preprocessing + `8 + partial_rounds(t)` online), but the proof run's own online round
 /// count for it drops to zero, and the reconstructed witness still matches the ordinary
 /// `TACEO_PRECOMPUTATION_Poseidon2` circuit run under `PlainDriver`.
-#[cfg(feature = "round-counting")]
 #[test]
 fn injecting_poseidon2_removes_its_rounds_from_the_proof_run() {
     use circom_mpc_vm::counting_net::CountingNet;

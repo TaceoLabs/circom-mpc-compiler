@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub mod codegen;
-pub mod fixtures;
 mod frontend;
 pub mod ir;
 pub mod passes;
@@ -76,7 +75,10 @@ impl CoCircomCompiler {
 
     /// `parse`, then lowers the resulting graph into a `circom_mpc_program::Program`, runnable via
     /// `circom_mpc_vm::Machine::run` against the plain or rep3 driver.
-    pub fn compile<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<circom_mpc_program::Program>
+    pub fn compile<Pth>(
+        file: Pth,
+        config: CompilerConfig,
+    ) -> eyre::Result<circom_mpc_program::Program>
     where
         PathBuf: From<Pth>,
         Pth: std::fmt::Debug,

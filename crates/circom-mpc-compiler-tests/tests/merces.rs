@@ -9,20 +9,20 @@
 //! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
 //!
 //! `transfer_client_compressed` still does not compile; see [`client_main_is_still_unsupported`].
-#![cfg(feature = "rep3")]
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ark_bn254::{Bn254, Fr};
-use circom_mpc_compiler::fixtures::{self, merces_config, merces_main_path, rep3::run_witness};
+use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::ir::InputList;
+use circom_mpc_compiler::CoCircomCompiler;
+use circom_mpc_compiler_tests::fixtures::{
+    self, merces_config, merces_main_path, rep3::run_witness,
+};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::split_witness;
-use circom_mpc_compiler::codegen;
 use circom_mpc_vm::{Machine, Program};
-use circom_mpc_compiler::CoCircomCompiler;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::Rep3State;
 use mpc_net::local::LocalNetwork;
@@ -103,10 +103,9 @@ fn transfer_arity4_batch8_all_scenarios_run_end_to_end() {
     }
 }
 
-#[cfg(feature = "round-counting")]
 #[test]
 fn server_mains_separate_preprocessing_from_online_rounds() {
-    use circom_mpc_compiler::fixtures::rep3::run_witness_counted;
+    use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     for (main, scenario) in [
         ("transfer_arity4_batch1", "deposit"),

@@ -627,7 +627,7 @@ impl<'a> GraphCompiler<'a> {
     }
 
     /// A circom construct this compiler deliberately does not support (yet, or ever).
-    /// `tests/frontend.rs` and `tests/merces.rs` pin several of these message prefixes.
+    /// The compiler-tests crate pins several of these message prefixes.
     fn unsupported(&self, msg: impl std::fmt::Display, line: usize) -> eyre::Report {
         eyre::eyre!("{msg} in template `{}` at line {line}", self.code.header)
     }

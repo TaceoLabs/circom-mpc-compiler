@@ -1,5 +1,4 @@
-//! The five precomputation gadgets this compiler knows how to run, plain (used unconditionally) and
-//! batched-MPC (`rep3`, behind the `rep3` feature).
+//! The five precomputation gadgets this compiler knows how to run, both plain and batched rep3 MPC.
 
 pub mod aliascheck;
 pub mod iszero;
@@ -12,7 +11,6 @@ mod poseidon2_constants;
 /// `mpc-core` exposes a selector for one value, but its vector conversion API does not. Keeping the
 /// selection here lets every VM gadget preserve circuit-wide batching without silently forcing the
 /// high-round Direct protocol when the driver requested Yao.
-#[cfg(feature = "rep3")]
 fn a2b_many_selector<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<ark_bn254::Fr>],
     net: &N,
@@ -28,10 +26,10 @@ fn a2b_many_selector<N: mpc_net::Network>(
 
 /// Shared 3-party rep3 test harness for this module's own unit tests - each gadget's `rep3_trace`
 /// is checked against its `plain_trace` twin on the same plaintext input, secret-shared and
-/// reconstructed via real `LocalNetwork` execution. Not a value oracle (that's `tests/proving.rs`'s
-/// job) - just proof the two implementations agree with each other. When `round-counting` is
-/// enabled, [`run3_counted`] also reports the round count each gadget's own tests pin.
-#[cfg(all(test, feature = "rep3"))]
+/// reconstructed via real `LocalNetwork` execution. Not a value oracle (that lives in the
+/// compiler-tests crate) - just proof the two implementations agree. [`run3_counted`] also reports
+/// the round count each gadget's own tests pin.
+#[cfg(test)]
 pub(crate) mod test_support {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
@@ -42,7 +40,6 @@ pub(crate) mod test_support {
     use mpc_net::Network;
     use rand::thread_rng;
 
-    #[cfg(feature = "round-counting")]
     use crate::counting_net::CountingNet;
 
     /// Secret-shares `values` and runs `f` on each of the 3 parties' own network/state/shares,
@@ -117,13 +114,11 @@ pub(crate) mod test_support {
     }
 
     /// Per-party round counts for a three-party local execution.
-    #[cfg(feature = "round-counting")]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) struct RoundCounts {
         pub(crate) by_party: [usize; 3],
     }
 
-    #[cfg(feature = "round-counting")]
     impl RoundCounts {
         pub(crate) fn max(self) -> usize {
             self.by_party.into_iter().max().unwrap_or(0)
@@ -134,7 +129,6 @@ pub(crate) mod test_support {
     /// three parties' measured round counts for `f` alone. The counter is reset right after
     /// `Rep3State::new`'s one-time correlated-randomness setup (2 rounds, spent before `f` ever
     /// runs), so the count reflects the gadget, not the harness.
-    #[cfg(feature = "round-counting")]
     pub(crate) fn run3_counted(
         values: &[Fr],
         f: impl Fn(
@@ -150,7 +144,6 @@ pub(crate) mod test_support {
 
     /// The explicit-conversion-strategy form of [`run3_counted`], retaining all three parties'
     /// counters so asymmetric protocols are judged by their actual critical path.
-    #[cfg(feature = "round-counting")]
     pub(crate) fn run3_counted_with_a2b(
         values: &[Fr],
         a2b_type: A2BType,

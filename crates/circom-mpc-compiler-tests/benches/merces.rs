@@ -13,12 +13,12 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-use circom_mpc_compiler::fixtures::{merces_config, merces_main_path, rep3::share_inputs};
+use circom_mpc_compiler::codegen;
+use circom_mpc_compiler::CoCircomCompiler;
+use circom_mpc_compiler_tests::fixtures::{merces_config, merces_main_path, rep3::share_inputs};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
-use circom_mpc_compiler::codegen;
 use circom_mpc_vm::{Machine, Program};
-use circom_mpc_compiler::CoCircomCompiler;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State};
 use mpc_net::local::LocalNetwork;

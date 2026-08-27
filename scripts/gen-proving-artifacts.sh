@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Generates the checked-in zkeys `tests/proving.rs` proves and verifies against:
+# Generates the checked-in zkeys `crates/circom-mpc-compiler-tests/tests/proving.rs` proves and
+# verifies against:
 #
 #   kats/proving/<name>.zkey            a groth16 proving key, over a local toy powers-of-tau
 #   kats/proving/<name>-r1cs-info.txt   snarkjs r1cs info, for eyeballing variable counts
 #
 # Every zkey here comes from a locally-generated toy powers-of-tau (one contribution, never
-# reused across runs) - fine for exercising plumbing, never for anything real. `tests/proving.rs`
+# reused across runs) - fine for exercising plumbing, never for anything real. The proving test
 # skips a circuit's test with a printed note when its zkey is absent, so `cargo test` stays green
 # on a fresh clone before this script has run.
 #
@@ -26,7 +27,7 @@
 # Usage:
 #   CIRCOM=/path/to/pinned/circom scripts/gen-proving-artifacts.sh [circuit ...]
 #
-# Defaults to every circuit tests/proving.rs wires up.
+# Defaults to every circuit the proving integration test wires up.
 
 set -euo pipefail
 
@@ -92,4 +93,4 @@ for name in "${CIRCUITS[@]}"; do
 done
 
 echo
-echo "done. run: cargo test --test proving"
+echo "done. run: cargo test -p circom-mpc-compiler-tests --test proving"

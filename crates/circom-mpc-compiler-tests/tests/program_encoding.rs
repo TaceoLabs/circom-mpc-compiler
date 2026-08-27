@@ -10,11 +10,7 @@ fn program(circuit: &str) -> Program {
     config
         .link_library
         .push(format!("{root}/../../circuits/libs/").into());
-    CoCircomCompiler::compile(
-        format!("{root}/../../circuits/{circuit}.circom"),
-        config,
-    )
-    .unwrap()
+    CoCircomCompiler::compile(format!("{root}/../../circuits/{circuit}.circom"), config).unwrap()
 }
 
 #[test]

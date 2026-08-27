@@ -10,7 +10,8 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 configs="${MERCES_NET_CONFIGS:-$root/configs}"
 
-cargo build --release -p circom-mpc-compiler --features net --bin merces-net --manifest-path "$root/Cargo.toml"
+cargo build --release -p circom-mpc-compiler-tests --no-default-features --features tls \
+  --bin merces-net --manifest-path "$root/Cargo.toml"
 bin="$root/target/release/merces-net"
 
 for i in 1 2 3; do

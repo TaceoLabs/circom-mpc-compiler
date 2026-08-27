@@ -5,9 +5,9 @@
 
 use ark_bn254::Fr;
 use circom_mpc_compiler::ir::PrecomputeKind;
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::Machine;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 

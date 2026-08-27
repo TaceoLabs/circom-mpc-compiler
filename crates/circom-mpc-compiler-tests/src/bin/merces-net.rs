@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! # on each node (party N gets its own party config, e.g. configs/partyN.toml)
-//! cargo run --release --features net --bin merces-net -- \
+//! cargo run --release -p circom-mpc-compiler-tests --no-default-features --features tls \
+//!     --bin merces-net -- \
 //!     --config configs/party0.toml --opt 1 --runs 5 --batches 1,8,16,32
 //! ```
 //!
@@ -22,13 +23,13 @@ use std::time::{Duration, Instant};
 
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
-use circom_mpc_compiler::fixtures;
+use circom_mpc_compiler::codegen;
+use circom_mpc_compiler::{CoCircomCompiler, OptLevel};
+use circom_mpc_compiler_tests::fixtures;
 use circom_mpc_vm::counting_net::CountingNet;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::program::Bank;
-use circom_mpc_compiler::codegen;
 use circom_mpc_vm::Machine;
-use circom_mpc_compiler::{CoCircomCompiler, OptLevel};
 use clap::Parser;
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};

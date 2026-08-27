@@ -8,7 +8,7 @@
 //! `Sbox`, `ExternalMatMulT`'s `t >= 8` branch emits its `Acc` subtrees before its
 //! `ExternalMatMul4`s, and all 8 `FullRound` blocks precede every `PartialRound` block even though
 //! execution interleaves them - so **layout order is not execution order**. All confirmed against
-//! circom's own R1CS by `tests/proving.rs`'s `precomputation_poseidon2_test`.
+//! circom's own R1CS by the compiler-tests crate's `precomputation_poseidon2_test`.
 //!
 //! Structure: `Ops` is the arithmetic backend (plain and rep3; only `Ops::sbox_layer`
 //! communicates), `walk` the permutation itself (layer-major across every site in lock-step, so a
@@ -16,7 +16,6 @@
 //! that records only requested result slots while the walk still evolves the full state.
 
 use ark_bn254::Fr;
-#[cfg(feature = "rep3")]
 use ark_ff::AdditiveGroup;
 
 use super::poseidon2_constants::{partial_rounds, RoundConstants};
@@ -715,11 +714,7 @@ fn full_offsets(sites: usize, capacity: usize) -> Vec<u32> {
 /// Splits a flat, site-major, full-capacity trace (as produced by a `full_requests`/`full_offsets`
 /// call) into one [`crate::SiteTrace`] per site - slots `0..t` are the permutation's outputs
 /// (`Layout::states == t`), the rest its intermediates.
-fn split_into_site_traces<V>(
-    t: usize,
-    capacity: usize,
-    flat: Vec<V>,
-) -> Vec<crate::SiteTrace<V>>
+fn split_into_site_traces<V>(t: usize, capacity: usize, flat: Vec<V>) -> Vec<crate::SiteTrace<V>>
 where
     V: Clone,
 {
@@ -736,7 +731,6 @@ where
 /// Kept separate from the trace entry points because [`crate::Program`] derives one checked,
 /// program-wide preprocessing budget from the *executable* shared-Poseidon instruction
 /// occurrences before a run starts.
-#[cfg(feature = "rep3")]
 pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
     eyre::ensure!(
         SUPPORTED_WIDTHS.contains(&t),
@@ -759,7 +753,6 @@ pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
 /// and their version-one batch table. Walking instructions (rather than the side table alone)
 /// ignores unreachable entries and counts a deliberately repeated batch reference once per
 /// execution.
-#[cfg(feature = "rep3")]
 pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
     use circom_mpc_program::{BatchKind, Opcode, PrecomputeKind};
 
@@ -800,7 +793,6 @@ pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
 /// The correlated randomness [`Rep3Ops::sbox_layer`] consumes: `r` and its powers `r²..r⁵`, one
 /// entry per s-box element across every shared Poseidon2 service in one program execution. The
 /// pool is prepared once, then disjoint slices are consumed in instruction order.
-#[cfg(feature = "rep3")]
 pub(crate) struct Rep3Poseidon2Preprocessing {
     r: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
     r2: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
@@ -811,7 +803,6 @@ pub(crate) struct Rep3Poseidon2Preprocessing {
     consumed: usize,
 }
 
-#[cfg(feature = "rep3")]
 impl Rep3Poseidon2Preprocessing {
     fn ensure_available(&self, count: usize) -> eyre::Result<()> {
         let end = self
@@ -841,7 +832,6 @@ impl Rep3Poseidon2Preprocessing {
 /// Prepares `r, r², r³, r⁴, r⁵` for a complete program execution in exactly three rounds,
 /// independent of `total_elements`. A zero budget is represented by empty vectors and performs no
 /// network operation.
-#[cfg(feature = "rep3")]
 pub(crate) fn preprocess_rep3<N: mpc_net::Network>(
     total_elements: usize,
     net: &N,
@@ -891,14 +881,12 @@ pub(crate) fn preprocess_rep3<N: mpc_net::Network>(
 
 /// rep3 backend. The s-box uses the masked-opening trick (see [`Rep3Ops::sbox_layer`]) so a whole
 /// layer costs **one** network round instead of the three a naive `x^2, x^4, x^5` chain needs.
-#[cfg(feature = "rep3")]
 struct Rep3Ops<'a, N: mpc_net::Network> {
     net: &'a N,
     state: &'a mut mpc_core::protocols::rep3::Rep3State,
     pool: &'a mut Rep3Poseidon2Preprocessing,
 }
 
-#[cfg(feature = "rep3")]
 impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
     type V = mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>;
 
@@ -991,7 +979,6 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
 /// Sparse-trace path backed by a caller-owned, program-wide preprocessing pool. It spends only the
 /// online `8 + partial_rounds(t)` rounds; preparation is deliberately outside this call. Request
 /// sparsity changes only local trace retention, not the pool slice or round count.
-#[cfg(feature = "rep3")]
 pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
     t: usize,
     states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
@@ -1035,13 +1022,11 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
 /// `Machine::run_with_injection`) expects - see this module's own
 /// `plain_output_matches_mpc_core_poseidon2_output` test. Use this type, not mpc-core's trace
 /// directly, to build an injectable [`crate::SiteTrace`].
-#[cfg(feature = "rep3")]
 pub struct Poseidon2Service {
     t: usize,
     preprocessing: Rep3Poseidon2Preprocessing,
 }
 
-#[cfg(feature = "rep3")]
 impl Poseidon2Service {
     /// Prepares the correlated randomness for `sites` sites' worth of Poseidon2(t) traces, in
     /// exactly 3 rounds.
@@ -1115,7 +1100,6 @@ mod tests {
     }
 
     /// One fresh preprocessing pool + one requested trace, the way the rep3 driver runs it.
-    #[cfg(feature = "rep3")]
     fn rep3_requested<N: mpc_net::Network>(
         t: usize,
         shares: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
@@ -1277,7 +1261,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "rep3")]
     #[test]
     fn rep3_agrees_with_plain_across_widths_and_sites() {
         use crate::gadgets::test_support::run3;
@@ -1294,7 +1277,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "rep3")]
     #[test]
     fn rep3_requested_trace_matches_plain_filter() {
         use crate::gadgets::test_support::run3;
@@ -1318,7 +1300,6 @@ mod tests {
     /// Exercises both internal entry points against their plain twins for every supported width.
     /// The two calls deliberately share one exactly-sized pool: checking the cursor after each call
     /// and exact exhaustion at the end pins the disjoint, consecutive slice contract.
-    #[cfg(feature = "rep3")]
     #[test]
     fn preprocessed_full_and_sparse_traces_share_disjoint_pool_slices_across_widths() {
         use crate::gadgets::test_support::run3;
@@ -1384,7 +1365,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "rep3", feature = "round-counting"))]
     #[test]
     fn preprocessing_costs_three_rounds_and_zero_budget_costs_none() {
         use mpc_core::protocols::rep3::conversion::A2BType;
@@ -1413,7 +1393,6 @@ mod tests {
 
     /// Preparation is reset out of the counter before each internal call. Full and sparse traces
     /// therefore pin the online cost alone: one opening for every full or partial s-box layer.
-    #[cfg(all(feature = "rep3", feature = "round-counting"))]
     #[test]
     fn preprocessed_full_and_sparse_online_costs_eight_plus_partial_rounds() {
         use mpc_core::protocols::rep3::conversion::A2BType;
@@ -1476,7 +1455,6 @@ mod tests {
 
     /// Preprocessing plus online: `3 + 8 + partial_rounds(t)`, the same for every site count and
     /// request sparsity.
-    #[cfg(all(feature = "rep3", feature = "round-counting"))]
     #[test]
     fn rep3_costs_three_plus_eight_plus_partial_rounds_independent_of_sites() {
         use crate::gadgets::test_support::run3_counted;
@@ -1533,7 +1511,6 @@ mod tests {
     /// [`Poseidon2Service`] must agree with the plain driver and consume exactly the masks it
     /// prepared - the standalone entry point a host uses to precompute a `TACEO_INJECTED_Poseidon2`
     /// site's trace outside a `Machine::run`.
-    #[cfg(feature = "rep3")]
     #[test]
     fn poseidon2_service_matches_plain_and_consumes_its_pool() {
         use crate::gadgets::test_support::run3;
@@ -1575,7 +1552,6 @@ mod tests {
     /// circuit's signal layout in `frontend/inline.rs`). A caller building [`crate::SiteTrace`]
     /// from mpc-core's own accelerator therefore cannot use its trace vector as-is; only the
     /// permutation output is a drop-in match.
-    #[cfg(feature = "rep3")]
     #[test]
     fn plain_output_matches_mpc_core_poseidon2_output() {
         use mpc_core::gadgets::poseidon2::{CircomTracePlainHasher, Poseidon2};

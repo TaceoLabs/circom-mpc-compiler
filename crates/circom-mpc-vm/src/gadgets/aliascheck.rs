@@ -101,7 +101,6 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
 ///
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
 /// The strategy-selected A2B conversion and `bit_inject_many` are batched the same way.
-#[cfg(feature = "rep3")]
 pub fn rep3_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
@@ -201,7 +200,7 @@ pub fn rep3_trace<N: mpc_net::Network>(
     Ok(results)
 }
 
-#[cfg(all(test, feature = "rep3"))]
+#[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
@@ -230,7 +229,6 @@ mod tests {
 
     /// Pins the round count: one batched 127-way `mul_vec`, one strategy-selected A2B across the
     /// whole batch, then one `bit_inject_many` - independent of site count.
-    #[cfg(feature = "round-counting")]
     #[test]
     fn rep3_cost_is_independent_of_site_count() {
         use crate::gadgets::test_support::run3_counted_with_a2b;

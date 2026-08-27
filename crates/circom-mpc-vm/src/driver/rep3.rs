@@ -1,7 +1,6 @@
 //! Real three-party rep3 execution over `mpc_net`/`mpc_core`. `Share = Rep3PrimeFieldShare<Fr>`;
 //! `Local = Fr` - the `a` component of a replicated share is already a valid additive-3 sharing on
-//! its own, so there's nothing to wrap. Behind the
-//! `rep3` feature.
+//! its own, so there's nothing to wrap.
 
 use ark_bn254::Fr;
 use mpc_core::protocols::rep3::{self, Rep3PrimeFieldShare, Rep3State};

@@ -14,8 +14,8 @@ use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
 use num_bigint::BigUint;
 
-use crate::ir::InputList;
-use crate::{CompilerConfig, OptLevel};
+use circom_mpc_compiler::ir::InputList;
+use circom_mpc_compiler::{CompilerConfig, OptLevel};
 
 /// The compiler configuration for the vendored merces circuits, mirroring how merces itself
 /// compiles them (`-l circom/node_modules -l circom`): `circuits/libs/` resolves circomlib plus
@@ -46,7 +46,7 @@ pub fn merces_main_path(main: &str) -> String {
 /// The 3-party in-process rep3 harness shared by tests, benches and examples: secret-share the
 /// inputs, run the same `Program` on three threads over `mpc_net::local::LocalNetwork`, and
 /// reconstruct the witness.
-#[cfg(feature = "rep3")]
+#[cfg(feature = "local")]
 pub mod rep3 {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
@@ -116,7 +116,6 @@ pub mod rep3 {
 
     /// [`run_witness`], additionally reporting each party's network rounds, split into
     /// (driver preparation, online execution).
-    #[cfg(feature = "round-counting")]
     pub fn run_witness_counted(
         program: &Program,
         values: &[Fr],

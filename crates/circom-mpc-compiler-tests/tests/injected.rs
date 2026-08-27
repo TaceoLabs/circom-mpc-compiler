@@ -7,11 +7,11 @@
 use ark_bn254::Fr;
 
 use circom_mpc_compiler::ir::PrecomputeKind;
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::gadgets::poseidon2;
 use circom_mpc_vm::program::BatchKind;
 use circom_mpc_vm::{GadgetInjection, Machine, SiteTrace};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 
 mod common;
 

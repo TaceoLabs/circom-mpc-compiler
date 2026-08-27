@@ -3,10 +3,10 @@
 //! parties, check the reconstructed witness matches, and produce a co-groth16 proof that verifies.
 //!
 //! ```text
-//! cargo run --release --example merces                              # transfer_arity4_batch1 deposit
-//! cargo run --release --example merces -- transfer_arity4_batch8 full_batch
-//! cargo run --release --example merces -- circuits/multiplier3.circom kats/proving/multiplier3.zkey
-//! cargo run --release --example merces -- circuits/multiplier3.circom   # no zkey: skips proving
+//! cargo run --release -p circom-mpc-compiler-tests --example merces
+//! cargo run --release -p circom-mpc-compiler-tests --example merces -- transfer_arity4_batch8 full_batch
+//! cargo run --release -p circom-mpc-compiler-tests --example merces -- circuits/multiplier3.circom kats/proving/multiplier3.zkey
+//! cargo run --release -p circom-mpc-compiler-tests --example merces -- circuits/multiplier3.circom
 //! ```
 
 #![allow(clippy::type_complexity)] // the per-party (witness, metrics, proof) tuples
@@ -15,14 +15,14 @@ use std::time::{Duration, Instant};
 
 use ark_bn254::{Bn254, Fr};
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-use circom_mpc_compiler::fixtures;
+use circom_mpc_compiler::codegen;
+use circom_mpc_compiler::CoCircomCompiler;
+use circom_mpc_compiler_tests::fixtures;
 use circom_mpc_vm::counting_net::CountingNet;
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::split_witness;
-use circom_mpc_compiler::codegen;
 use circom_mpc_vm::{Machine, Program};
-use circom_mpc_compiler::CoCircomCompiler;
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;

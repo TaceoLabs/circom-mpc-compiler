@@ -24,7 +24,6 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
 /// back into arithmetic sharing. Masking `in` by `is_zero` before inverting avoids ever inverting
 /// a genuine zero; `helper = inv - is_zero` cancels the mask back out. `out = is_zero`, `inv =
 /// helper`.
-#[cfg(feature = "rep3")]
 pub fn rep3_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
@@ -58,7 +57,6 @@ pub fn rep3_trace<N: mpc_net::Network>(
 /// public zero predicate. A uniformly random mask is itself zero with probability `1/|Fr|`, which
 /// can falsely classify a non-zero input, so the statistical-soundness tradeoff is restricted to
 /// BN254 here as well as in codegen and `Program::validate`.
-#[cfg(feature = "rep3")]
 #[allow(clippy::type_complexity)]
 pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
@@ -101,7 +99,7 @@ pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
         .collect())
 }
 
-#[cfg(all(test, feature = "rep3"))]
+#[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
@@ -140,7 +138,6 @@ mod tests {
         assert_eq!(got, expected);
     }
 
-    #[cfg(feature = "round-counting")]
     #[test]
     fn masked_reveal_two_lane_batch_costs_one_round_for_every_party() {
         use crate::gadgets::test_support::run3_counted_with_a2b;
@@ -158,7 +155,6 @@ mod tests {
 
     /// Pins both conversion strategies' all-party critical path, as well as the circuit-wide
     /// batching guarantee.
-    #[cfg(feature = "round-counting")]
     #[test]
     fn rep3_cost_by_strategy_is_independent_of_site_count() {
         use crate::gadgets::test_support::run3_counted_with_a2b;

@@ -1,6 +1,6 @@
 //! [`CountingNet`]: a thin [`Network`] decorator that counts network rounds and bytes, so the
-//! round claims (the per-gadget round-count tests in `vm::gadgets`, `tests/merces.rs`)
-//! are measured rather than asserted. See `examples/merces.rs` for it wrapping a real 3-party run.
+//! round claims (the per-gadget round-count tests in `vm::gadgets` and the compiler-tests crate)
+//! are measured rather than asserted. The Merces example uses it to wrap a real 3-party run.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

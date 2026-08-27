@@ -3,8 +3,8 @@
 //! alongside the graph. The positive value cases live in `tests/proving.rs`.
 //!
 
-use circom_mpc_vm::program::Bank;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_vm::program::Bank;
 
 mod common;
 

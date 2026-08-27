@@ -1,9 +1,7 @@
 //! `VmDriver`: the pluggable backend `Machine::run` executes a `Program` against - either
-//! `plain::PlainDriver` (single-party, the reference driver) or a real rep3 driver (three-party, behind
-//! the `rep3` feature).
+//! `plain::PlainDriver` (single-party, the reference driver) or a real three-party rep3 driver.
 
 pub mod plain;
-#[cfg(feature = "rep3")]
 pub mod rep3;
 
 use ark_bn254::Fr;

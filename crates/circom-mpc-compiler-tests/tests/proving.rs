@@ -6,15 +6,13 @@
 //! toy powers-of-tau - fine for exercising plumbing, never for anything real. Regenerate all of them
 //! with `scripts/gen-proving-artifacts.sh`; a test whose zkey is missing skips with a printed note
 //! rather than failing, so `cargo test` stays green on a fresh clone before that script has run.
-#![cfg(feature = "rep3")]
-
 use ark_bn254::{Bn254, Fr};
+use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::program::Bank;
 use circom_mpc_vm::split_witness;
 use circom_mpc_vm::{Machine, Program};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;

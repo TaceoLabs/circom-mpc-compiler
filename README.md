@@ -1,15 +1,18 @@
 # circom-mpc-compiler
 
-A Cargo workspace of three crates:
+A Cargo workspace of four crates:
 
 - `circom-mpc-program` — the compiled program representation (`Program`, `PrecomputeKind`) and its
   binary format (`Program::write`/`Program::read`). No dependency on the compiler or the VM.
-- `circom-mpc-vm` — the bytecode VM (`Machine::run`) and drivers (plain, rep3). Depends only on
-  `circom-mpc-program`; a downstream crate that only needs to load and run a compiled program
-  depends on this crate alone.
+- `circom-mpc-vm` — the bytecode VM (`Machine::run`), its plain and rep3 drivers, and
+  `CountingNet`. Rep3 is always available; `mpc-net` backends are selected independently through
+  the `local`, `quic`, `tcp`, `tcp-session`, `tcp-session-blocking`, and `tls` features.
 - `circom-mpc-compiler` — parses circom source into the IR, lowers it through the MPC passes, and
-  compiles it to a `circom-mpc-program::Program` (`CoCircomCompiler::compile`). Depends on both of
-  the above, plus the circom parser/compiler crates.
+  compiles it to a `circom-mpc-program::Program` (`CoCircomCompiler::compile`). It does not depend
+  on the VM or a network backend.
+- `circom-mpc-compiler-tests` — non-published integration tests, fixtures, benchmarks, and runnable
+  Merces tools. Its default `local` feature keeps the complete in-process MPC suite in plain
+  `cargo test`; other network backends remain opt-in.
 
 ## Security boundary and deferred hardening
 
@@ -36,14 +39,16 @@ The runtime operator surface is deliberately narrow — only `Add`/`Sub`/`Mul` a
 other circom operator is a typed `unsupported operator: ...` error. The main target is the set of
 merces circuits vendored under `circuits/merces/`: the two server mains compile, run under real
 3-party rep3, and produce a co-groth16 proof against circom's own R1CS that verifies, against real
-protocol inputs (`inputs/`). `cargo run --release --example merces` runs this end to end, including
+protocol inputs (`inputs/`).
+`cargo run --release -p circom-mpc-compiler-tests --example merces` runs this end to end, including
 the proof.
 
 ## Development
 
 ```
 cargo test                              # prove/verify correctness tests (checked against circom itself)
-cargo run --release --example merces    # full pipeline on a real production circuit, proof included
+cargo run --release -p circom-mpc-compiler-tests --example merces
+                                        # full pipeline on a real production circuit, proof included
 scripts/run-merces-net.sh --runs 5      # rep3 witness extension over a genuine 3-process TLS network
                                          # (needs configs/ + data/ supplied - see the script)
 ```
