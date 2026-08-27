@@ -16,7 +16,7 @@ use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{AcceleratorKind, Op, ValueId};
+use crate::ir::{GadgetKind, Op, ValueId};
 
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
 
@@ -54,11 +54,11 @@ impl TemplateOp {
             TemplateOp::LocalSignal(_) | TemplateOp::SubCmpOutput { .. } => 0,
             TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } => 1,
             // TemplateOp::Real is only ever built from Op::Input/Constant/Add/Sub/Mul here -
-            // accelerator and MPC-lowering ops are materialized later, by inlining and
+            // gadget and MPC-lowering ops are materialized later, by inlining and
             // passes/mpc respectively, never by this per-template build pass.
             TemplateOp::Real(op) => op
                 .fixed_arity()
-                .expect("TemplateOp::Real never wraps an accelerator or MPC-lowering op"),
+                .expect("TemplateOp::Real never wraps a gadget or MPC-lowering op"),
         }
     }
 }
@@ -79,18 +79,18 @@ pub(crate) enum SubGraphInstance {
         signal_offset: usize,
     },
     /// A recognized gadget template: its body is never compiled - `frontend/inline.rs` turns this
-    /// into an `ir::Op::Accelerator` site instead of recursing.
-    Accelerated(AcceleratedInstance),
+    /// into an `ir::Op::Gadget` site instead of recursing.
+    Gadget(GadgetInstance),
 }
 
-/// One recognized gadget instance: everything `frontend/inline.rs` needs to cut it into an
-/// accelerator site. Resolved once in `handle_create_cmp_bucket` rather than re-derived every
+/// One recognized gadget instance: everything `frontend/inline.rs` needs to cut it into a
+/// gadget site. Resolved once in `handle_create_cmp_bucket` rather than re-derived every
 /// time the instance is inlined.
 #[derive(Clone)]
-pub(crate) struct AcceleratedInstance {
-    pub(crate) kind: AcceleratorKind,
+pub(crate) struct GadgetInstance {
+    pub(crate) kind: GadgetKind,
     /// The template's specialized header, e.g. `"Poseidon2_3"` (`TemplateCodeInfo::header`) -
-    /// the key `accelerator_spans` is looked up by.
+    /// the key `gadget_spans` is looked up by.
     pub(crate) header: String,
     /// Relative to the immediate father's signal frame, like every
     /// `CreateCmpBucket::signal_offset`.
@@ -99,7 +99,7 @@ pub(crate) struct AcceleratedInstance {
     pub(crate) num_outputs: usize,
     pub(crate) num_intermediates: usize,
     /// Whether this instance is wrapped in `TACEO_PRECOMPUTATION_Poseidon2` - see
-    /// `AcceleratorSite::precomputed`.
+    /// `GadgetSite::precomputed`.
     pub(crate) precomputed: bool,
 }
 
@@ -124,7 +124,7 @@ pub(crate) struct GraphCompiler<'a> {
     /// instantiated), keyed the same way `templates` is - see
     /// `frontend/mod.rs::compute_signal_spans`. Only consulted for recognized gadget templates, to
     /// size their site's `num_intermediates`.
-    pub(crate) accelerator_spans: &'a FxHashMap<String, usize>,
+    pub(crate) gadget_spans: &'a FxHashMap<String, usize>,
 }
 
 impl<'a> GraphCompiler<'a> {
@@ -133,7 +133,7 @@ impl<'a> GraphCompiler<'a> {
         templates: &'a mut HashMap<String, TemplateCode>,
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph>,
         constant_table: &'a [Fr],
-        accelerator_spans: &'a FxHashMap<String, usize>,
+        gadget_spans: &'a FxHashMap<String, usize>,
     ) -> Self {
         Self {
             sub_graphs: Vec::with_capacity(code.number_of_components),
@@ -142,7 +142,7 @@ impl<'a> GraphCompiler<'a> {
             templates,
             compiled_graphs,
             constant_table,
-            accelerator_spans,
+            gadget_spans,
             var_to_value: FxHashMap::default(),
         }
     }
@@ -330,7 +330,7 @@ impl<'a> GraphCompiler<'a> {
         );
         let symbol = create_cmp_bucket.symbol.clone();
 
-        // Fast path: already compiled. An accelerated gadget's entry is never inserted into
+        // Fast path: already compiled. A gadget's entry is never inserted into
         // `compiled_graphs` (see below), so every repeated instantiation of one keeps going
         // through the peek further down instead. Handling this first, before touching
         // `self.templates` at all, matters: a regular template's entry there is removed the first
@@ -347,14 +347,14 @@ impl<'a> GraphCompiler<'a> {
             return Ok(());
         }
 
-        // A gadget this compiler services out-of-band is always cut into an accelerator site: its
+        // A gadget this compiler services out-of-band is always cut into a gadget site: its
         // body is never compiled, and `vm::gadgets` supplies its trace instead (or, for a
         // `precomputed` site, the host does). Resolved from the *instantiated* template's name, so
         // this fires the same way regardless of which wrapper (if any) encloses it - std-lib
         // gadgets need no wrapper at all; only Poseidon2's host-precomputed form does.
         //
         // Peek, never remove: the wrapped component's body is never compiled at all (see
-        // `SubGraphInstance::Accelerated`), so its entry in `templates` must stay put for every
+        // `SubGraphInstance::Gadget`), so its entry in `templates` must stay put for every
         // repeated instantiation to find it too.
         let template_code = self.templates.get(&symbol).expect("must be here");
         let header = template_code.header.clone();
@@ -371,32 +371,32 @@ impl<'a> GraphCompiler<'a> {
         let kind = match template_code.name.as_str() {
             "Poseidon2" => {
                 eyre::ensure!(num_inputs == num_outputs, "non-canonical Poseidon2 shape");
-                Some(AcceleratorKind::Poseidon2 { t: num_inputs })
+                Some(GadgetKind::Poseidon2 { t: num_inputs })
             }
             "Num2Bits" => {
                 eyre::ensure!(num_inputs == 1, "non-canonical Num2Bits shape");
-                Some(AcceleratorKind::Num2Bits { n: num_outputs })
+                Some(GadgetKind::Num2Bits { n: num_outputs })
             }
             "IsZero" => {
                 eyre::ensure!(
                     num_inputs == 1 && num_outputs == 1,
                     "non-canonical IsZero shape"
                 );
-                Some(AcceleratorKind::IsZero)
+                Some(GadgetKind::IsZero)
             }
             "AliasCheck" => {
                 eyre::ensure!(
                     num_inputs == 254 && num_outputs == 0,
                     "non-canonical AliasCheck shape"
                 );
-                Some(AcceleratorKind::AliasCheck)
+                Some(GadgetKind::AliasCheck)
             }
             "TACEO_REVEAL" => {
                 eyre::ensure!(
                     num_inputs == num_outputs,
                     "TACEO_REVEAL input/output counts differ"
                 );
-                Some(AcceleratorKind::Reveal { n: num_inputs })
+                Some(GadgetKind::Reveal { n: num_inputs })
             }
             _ => None,
         };
@@ -404,20 +404,20 @@ impl<'a> GraphCompiler<'a> {
         if let Some(kind) = kind {
             if precomputed {
                 eyre::ensure!(
-                    matches!(kind, AcceleratorKind::Poseidon2 { .. }),
+                    matches!(kind, GadgetKind::Poseidon2 { .. }),
                     "`{}` wraps `{}`, but only Poseidon2 can be host-precomputed",
                     self.code.name,
                     template_code.name
                 );
             }
 
-            let span = *self.accelerator_spans.get(&header).unwrap_or_else(|| {
-                panic!("no signal-span entry for accelerated template `{header}`")
+            let span = *self.gadget_spans.get(&header).unwrap_or_else(|| {
+                panic!("no signal-span entry for gadget template `{header}`")
             });
             let num_intermediates = span - num_inputs - num_outputs;
 
             self.push_instances(create_cmp_bucket, |signal_offset| {
-                SubGraphInstance::Accelerated(AcceleratedInstance {
+                SubGraphInstance::Gadget(GadgetInstance {
                     kind,
                     header: header.clone(),
                     signal_offset,
@@ -430,7 +430,7 @@ impl<'a> GraphCompiler<'a> {
             return Ok(());
         }
 
-        // First instantiation of a regular (non-accelerated) template: compile it now and cache
+        // First instantiation of a regular (non-gadget) template: compile it now and cache
         // the result for every later instantiation to hit the fast path above.
         let template_code = self.templates.remove(&symbol).expect("must be here");
         tracing::debug!("start compilation of {}", symbol);
@@ -439,7 +439,7 @@ impl<'a> GraphCompiler<'a> {
             self.templates,
             self.compiled_graphs,
             self.constant_table,
-            self.accelerator_spans,
+            self.gadget_spans,
         );
         let sub_cmp = sub_cmp_compiler.parse()?;
         self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
@@ -485,11 +485,11 @@ impl<'a> GraphCompiler<'a> {
                 self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Input(_))
-            // Accelerator/AcceleratorResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
+            // Gadget/GadgetResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
             // only ops (see TemplateOp::arity above) and never appear here, but are included so
             // this match stays exhaustive as Op grows.
-            | TemplateOp::Real(Op::Accelerator(_))
-            | TemplateOp::Real(Op::AcceleratorResult(_))
+            | TemplateOp::Real(Op::Gadget(_))
+            | TemplateOp::Real(Op::GadgetResult(_))
             | TemplateOp::Real(Op::MulLocal)
             | TemplateOp::Real(Op::Round(_))
             | TemplateOp::Real(Op::RoundResult(_))

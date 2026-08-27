@@ -2,7 +2,7 @@ pragma circom 2.2.2;
 
 include "comparators.circom";
 
-template PublicAccelerated() {
+template PublicGadget() {
     signal input a;
     signal input b;
     signal output out;
@@ -14,4 +14,4 @@ template PublicAccelerated() {
     out <== za.out * zb.out;
 }
 
-component main {public [a, b]} = PublicAccelerated();
+component main {public [a, b]} = PublicGadget();

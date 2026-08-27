@@ -2,7 +2,7 @@ pragma circom 2.2.2;
 
 include "taceo/babyjubjub.circom";
 include "taceo/binary_merkle_root.circom";
-include "taceo/accelerators.circom";
+include "taceo/poseidon2.circom";
 
 // Derives the public key for `sk` and commits to the value by hashing it down to a single field element together with `domainSep`.
 //
@@ -17,7 +17,7 @@ template Query() {
     component pkCalc = BabyJubJubScalarGeneratorBits();
     pkCalc.e <== skRangeCheck.out_bits;
 
-    signal hashPk[3] <== TACEO_ACCELERATOR_Poseidon2(3)([pkCalc.out.x, pkCalc.out.y, domainSep]);
+    signal hashPk[3] <== Poseidon2(3)([pkCalc.out.x, pkCalc.out.y, domainSep]);
     query <== hashPk[0];
 }
 

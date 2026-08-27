@@ -2,7 +2,7 @@
 //! i.e. `< p` (BN254's scalar field modulus) - `circuits/libs/aliascheck.circom` wraps
 //! `CompConstant(-1)` (`circuits/libs/compconstant.circom`), which itself wraps `Num2Bits(135)`.
 //!
-//! See `ir::AcceleratorKind::AliasCheck` for why the 519-slot result layout below is derived
+//! See `ir::GadgetKind::AliasCheck` for why the 519-slot result layout below is derived
 //! directly from the real circuit's own signal numbering, and how it differs by one from merces'
 //! own `DEFAULT_ALIAS_TRACE` (~/repos/merces/crates/merces-core/src/circom_proof/cosnark.rs) -
 //! that trace omits `Num2Bits`' own single input signal (`num2bits.in`), which this compiler's
@@ -91,7 +91,7 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     trace
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Accelerator`).
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`).
 /// Ported from `~/repos/merces`'s `alias_check_trace_helper_rep3`
 /// (`crates/merces-core/src/circom_proof/cosnark.rs`), generalized from one site to a batch and
 /// from merces' own (518-slot, zero-padded) trace convention to the real 519-slot layout above -

@@ -3,7 +3,7 @@
 //! Commutative ops (`Add`, `Mul`) have their inputs sorted first, so `a+b` and `b+a` hash-cons to
 //! the same entry.
 //!
-//! Skips every impure op (`Op::Accelerator`/`Op::AcceleratorResult`/`Op::MulLocal`/`Op::Round`/
+//! Skips every impure op (`Op::Gadget`/`Op::GadgetResult`/`Op::MulLocal`/`Op::Round`/
 //! `Op::RoundResult`) - merging two of those would change how many traces/rounds the runtime must
 //! supply, not just fold away redundant computation.
 

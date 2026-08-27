@@ -1,4 +1,4 @@
-//! Placement analysis for accelerator batches, shared by codegen and `Graph::mpc_summary`.
+//! Placement analysis for gadget batches, shared by codegen and `Graph::mpc_summary`.
 //! Sites normally coalesce by `(kind, network stage, domain, precomputed)`. A valid but
 //! non-level-sorted graph may place an early result consumer before a later independent site; in
 //! that case the active batch is closed and a new one is started instead of rejecting the
@@ -7,14 +7,14 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::ir::{AcceleratorKind, Graph, Op};
+use crate::ir::{GadgetKind, Graph, Op};
 
 use super::domain::Domain;
 use super::level;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BatchPlan {
-    pub(crate) kind: AcceleratorKind,
+    pub(crate) kind: GadgetKind,
     pub(crate) domain: Domain,
     pub(crate) sites: Vec<(usize, usize)>,
     pub(crate) anchor: usize,
@@ -23,9 +23,9 @@ pub(crate) struct BatchPlan {
     deadline: usize,
 }
 
-pub(crate) fn plan_accelerator_batches(graph: &Graph, domains: &[Domain]) -> Vec<BatchPlan> {
+pub(crate) fn plan_gadget_batches(graph: &Graph, domains: &[Domain]) -> Vec<BatchPlan> {
     let nodes = graph.nodes();
-    let sites = graph.accelerator_sites();
+    let sites = graph.gadget_sites();
     if sites.is_empty() {
         return Vec::new();
     }
@@ -33,7 +33,7 @@ pub(crate) fn plan_accelerator_batches(graph: &Graph, domains: &[Domain]) -> Vec
     let stages = level::site_stages(graph, domains);
     let mut site_node = vec![usize::MAX; sites.len()];
     for (i, node) in nodes.iter().enumerate() {
-        if let Op::Accelerator(site_id) = &node.op {
+        if let Op::Gadget(site_id) = &node.op {
             site_node[site_id.index()] = i;
         }
     }
@@ -42,18 +42,18 @@ pub(crate) fn plan_accelerator_batches(graph: &Graph, domains: &[Domain]) -> Vec
     let mut first_reader = vec![nodes.len(); sites.len()];
     for (i, node) in nodes.iter().enumerate() {
         for input in &node.inputs {
-            if !matches!(nodes[input.index()].op, Op::AcceleratorResult(_)) {
+            if !matches!(nodes[input.index()].op, Op::GadgetResult(_)) {
                 continue;
             }
             let producer = &nodes[nodes[input.index()].inputs[0].index()];
-            if let Op::Accelerator(site_id) = &producer.op {
+            if let Op::Gadget(site_id) = &producer.op {
                 first_reader[site_id.index()] = first_reader[site_id.index()].min(i);
             }
         }
     }
 
     let mut plans = Vec::<BatchPlan>::new();
-    let mut active = FxHashMap::<(AcceleratorKind, usize, Domain, bool), usize>::default();
+    let mut active = FxHashMap::<(GadgetKind, usize, Domain, bool), usize>::default();
     for (site_id, site) in sites.iter().enumerate() {
         let node = site_node[site_id];
         let stage = stages[site_id];

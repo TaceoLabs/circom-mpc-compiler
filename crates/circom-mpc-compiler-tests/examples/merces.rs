@@ -145,8 +145,8 @@ fn main() -> eyre::Result<()> {
     // The batching claim, on a real circuit: hundreds of sites, a couple of dozen services.
     println!(
         "  precompute: {} sites -> {} batch services ({} local muls, {} free public muls)",
-        summary.accelerator_sites,
-        summary.accelerator_batches,
+        summary.gadget_sites,
+        summary.gadget_batches,
         summary.local_muls,
         summary.public_muls,
     );

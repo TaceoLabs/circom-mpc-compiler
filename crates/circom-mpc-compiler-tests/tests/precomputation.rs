@@ -1,12 +1,12 @@
 //! `TACEO_PRECOMPUTATION_Poseidon2` sites: the host precomputes Poseidon2's trace and hands it to
 //! `Machine::run_with_precomputation` instead of the driver computing it. Poseidon2 is the only
 //! gadget that can be host-precomputed. Covers batching (a host-precomputed site never shares a
-//! batch with an accelerated one), plain-driver equivalence against the unwrapped `Poseidon2`
+//! batch with a driver-serviced one), plain-driver equivalence against the unwrapped `Poseidon2`
 //! twin, and the error paths around a malformed or missing precomputation.
 
 use ark_bn254::Fr;
 
-use circom_mpc_compiler::ir::AcceleratorKind;
+use circom_mpc_compiler::ir::GadgetKind;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::gadgets::poseidon2;
@@ -27,46 +27,46 @@ fn config() -> CompilerConfig {
 fn precomputed_poseidon2_site_is_its_own_batch() {
     let program =
         CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
-    assert_eq!(program.statistics().accelerator_batches, 1);
+    assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().precomputed_batches, 1);
     let batches = program.precomputed_batches().unwrap();
     assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].kind, AcceleratorKind::Poseidon2 { t: 3 });
+    assert_eq!(batches[0].kind, GadgetKind::Poseidon2 { t: 3 });
     assert_eq!(batches[0].sites, 1);
 }
 
-/// A host-precomputed and an accelerated Poseidon2 site, at the same network stage, must land in
-/// two different batches - a host-precomputed site's trace comes from the host, so it can never
-/// share a driver call with one the driver still has to service.
+/// A host-precomputed and a driver-serviced Poseidon2 site, at the same network stage, must land
+/// in two different batches - a host-precomputed site's trace comes from the host, so it can
+/// never share a driver call with one the driver still has to service.
 #[test]
-fn mixed_precomputed_and_accelerated_sites_never_share_a_batch() {
+fn mixed_precomputed_and_gadget_sites_never_share_a_batch() {
     let program = CoCircomCompiler::compile(
         circuit_path("precomputation_mixed_poseidon2_test"),
         config(),
     )
     .unwrap();
     let stats = program.statistics();
-    assert_eq!(stats.accelerator_batches, 2, "{stats:?}");
+    assert_eq!(stats.gadget_batches, 2, "{stats:?}");
     assert_eq!(stats.precomputed_batches, 1, "{stats:?}");
     let precomputed = program.precomputed_batches().unwrap();
     assert_eq!(precomputed.len(), 1);
-    assert_eq!(precomputed[0].kind, AcceleratorKind::Poseidon2 { t: 3 });
+    assert_eq!(precomputed[0].kind, GadgetKind::Poseidon2 { t: 3 });
 }
 
-/// The same circuit, computed once through an unwrapped, accelerated `Poseidon2` and once through
-/// `TACEO_PRECOMPUTATION_Poseidon2` fed the host-precomputed trace, must produce byte-identical
-/// witnesses.
+/// The same circuit, computed once through an unwrapped, driver-serviced `Poseidon2` and once
+/// through `TACEO_PRECOMPUTATION_Poseidon2` fed the host-precomputed trace, must produce
+/// byte-identical witnesses.
 #[test]
-fn precomputed_poseidon2_matches_the_accelerated_twin() {
-    let accelerated_program =
-        CoCircomCompiler::compile(circuit_path("accelerator_poseidon2_test"), config()).unwrap();
+fn precomputed_poseidon2_matches_the_gadget_twin() {
+    let gadget_program =
+        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config()).unwrap();
     let precomputed_program =
         CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
 
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
-        let inputs = accelerated_program.classify_inputs(&values, |v| v);
-        Machine::run(&accelerated_program, &mut PlainDriver, &inputs).unwrap()
+        let inputs = gadget_program.classify_inputs(&values, |v| v);
+        Machine::run(&gadget_program, &mut PlainDriver, &inputs).unwrap()
     };
 
     let inputs = precomputed_program.classify_inputs(&values, |v| v);
@@ -159,12 +159,12 @@ fn a_wrapper_kind_mismatch_is_rejected_at_compile_time() {
 }
 
 #[test]
-fn batch_kind_precomputed_poseidon2_is_never_used_for_an_accelerated_site() {
+fn batch_kind_precomputed_poseidon2_is_never_used_for_a_gadget_site() {
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_poseidon2_test"), config()).unwrap();
+        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config()).unwrap();
     assert_eq!(program.statistics().precomputed_batches, 0);
     // `precomputed_batches()` walks `BatchKind::PrecomputedPoseidon2` specifically - confirm the
-    // ordinary accelerated path never produces one.
+    // ordinary driver-serviced path never produces one.
     assert!(program.precomputed_batches().unwrap().is_empty());
-    let _ = BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t: 3 }); // kept in scope for the import
+    let _ = BatchKind::Gadget(GadgetKind::Poseidon2 { t: 3 }); // kept in scope for the import
 }

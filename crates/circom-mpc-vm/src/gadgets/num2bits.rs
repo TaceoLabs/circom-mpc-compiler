@@ -1,6 +1,6 @@
 //! `Num2Bits(n)`: bit-decomposes one field element into `n` bits, least-significant first -
 //! `out[i] = (in >> i) & 1` (`circuits/libs/bitify.circom`). No intermediates: `n` outputs, and
-//! nothing else - see `ir::AcceleratorKind::Num2Bits`.
+//! nothing else - see `ir::GadgetKind::Num2Bits`.
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, One, PrimeField, Zero};
@@ -19,7 +19,7 @@ pub fn plain_trace(x: Fr, n: usize) -> Vec<Fr> {
         .collect()
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Accelerator`):
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`):
 /// one strategy-selected A2B conversion across every site's input, then one `bit_inject_many`
 /// across every site's bits.
 pub fn rep3_trace<N: mpc_net::Network>(

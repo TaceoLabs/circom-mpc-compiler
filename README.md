@@ -2,7 +2,7 @@
 
 A Cargo workspace of four crates:
 
-- `circom-mpc-program` — the compiled program representation (`Program`, `AcceleratorKind`) and its
+- `circom-mpc-program` — the compiled program representation (`Program`, `GadgetKind`) and its
   binary format (`Program::write`/`Program::read`). No dependency on the compiler or the VM.
 - `circom-mpc-vm` — the bytecode VM (`Machine::run`), its plain and rep3 drivers, and
   `CountingNet`. Rep3 is always available; `mpc-net` backends are selected independently through

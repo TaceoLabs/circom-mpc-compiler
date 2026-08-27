@@ -94,7 +94,7 @@ pub(crate) const fn total_signals(t: usize) -> usize {
 
 /// How many result slots one site occupies - every signal except the site's own `t` inputs, which the
 /// caller supplies rather than the gadget producing. Must equal
-/// `ir::AcceleratorKind::Poseidon2 { t }.expected_results()`.
+/// `ir::GadgetKind::Poseidon2 { t }.expected_results()`.
 pub(crate) const fn result_slots(t: usize) -> usize {
     total_signals(t) - t
 }
@@ -682,7 +682,7 @@ pub fn plain_trace_requested(
 }
 
 /// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
-/// `t` output elements) and `intermediate` (its round trace) - exactly `AcceleratorSite`'s own
+/// `t` output elements) and `intermediate` (its round trace) - exactly `GadgetSite`'s own
 /// outputs/intermediates, and exactly the shape `Machine::run_with_precomputation` expects. A thin,
 /// full-CSR-request wrapper over [`plain_trace_requested`] for a host that wants to precompute a
 /// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`.
@@ -754,23 +754,23 @@ pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
 /// ignores unreachable entries and counts a deliberately repeated batch reference once per
 /// execution.
 pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
-    use circom_mpc_program::{AcceleratorKind, BatchKind, Opcode};
+    use circom_mpc_program::{GadgetKind, BatchKind, Opcode};
 
-    let accelerator_batches = program.accelerator_batches();
+    let gadget_batches = program.gadget_batches();
     let mut total = 0usize;
     for (instruction_index, instruction) in program.instructions().iter().enumerate() {
-        if instruction.op != Opcode::Accelerator {
+        if instruction.op != Opcode::Gadget {
             continue;
         }
-        let batch = accelerator_batches
+        let batch = gadget_batches
             .get(instruction.a as usize)
             .ok_or_else(|| {
                 eyre::eyre!(
-                    "instruction {instruction_index} references missing accelerator batch {}",
+                    "instruction {instruction_index} references missing gadget batch {}",
                     instruction.a
                 )
             })?;
-        let BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t }) = batch.kind else {
+        let BatchKind::Gadget(GadgetKind::Poseidon2 { t }) = batch.kind else {
             continue;
         };
         if !batch
@@ -1123,7 +1123,7 @@ mod tests {
         Ok(out)
     }
 
-    /// The emitted length must match what `ir::AcceleratorKind` promises, for every width - otherwise
+    /// The emitted length must match what `ir::GadgetKind` promises, for every width - otherwise
     /// `frontend/inline.rs`'s cross-check against the circuit's real signal span would be comparing
     /// against a number this module doesn't honor.
     #[test]
@@ -1133,9 +1133,7 @@ mod tests {
             let got = plain_full(t, &states);
             assert_eq!(
                 got.len(),
-                circom_mpc_program::AcceleratorKind::Poseidon2 { t }
-                    .expected_results()
-                    .expect("Poseidon2 has a closed-form result count"),
+                circom_mpc_program::GadgetKind::Poseidon2 { t }.expected_results(),
                 "t={t}"
             );
         }
@@ -1548,9 +1546,9 @@ mod tests {
     /// `mpc_core::gadgets::poseidon2::Poseidon2` and this module compute the same permutation, so
     /// their final states must agree - but their *intermediate trace* vectors are not the same
     /// shape (e.g. 2019 values at t=3 there vs this module's 2032, which is
-    /// `AcceleratorKind::Poseidon2 { t: 3 }.expected_results() - 3`, cross-checked against the real
+    /// `GadgetKind::Poseidon2 { t: 3 }.expected_results() - 3`, cross-checked against the real
     /// circuit's signal layout in `frontend/inline.rs`). A caller building [`crate::SiteTrace`]
-    /// from mpc-core's own accelerator therefore cannot use its trace vector as-is; only the
+    /// from mpc-core's own gadget therefore cannot use its trace vector as-is; only the
     /// permutation output is a drop-in match.
     #[test]
     fn plain_output_matches_mpc_core_poseidon2_output() {

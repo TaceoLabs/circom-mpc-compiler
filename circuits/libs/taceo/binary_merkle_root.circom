@@ -2,7 +2,7 @@ pragma circom 2.2.2;
 
 // This file is copied from https://github.com/zk-kit/zk-kit.circom/blob/main/packages/binary-merkle-root/src/binary-merkle-root.circom and adapted to use Poseidon2 instead of Poseidon and use it in compression mode and not in sponge mode.
 
-include "accelerators.circom";
+include "poseidon2.circom";
 include "comparators.circom";
 
 // This circuit is designed to calculate the root of a binary Merkle
@@ -64,7 +64,7 @@ template BinaryMerkleRoot(MAX_DEPTH) {
         hash_right[i] <== path_hash - mul[i];
 
        // Compression mode
-        var poseidon_result[2] = TACEO_ACCELERATOR_Poseidon2(2)([hash_left[i], hash_right[i]]);
+        var poseidon_result[2] = Poseidon2(2)([hash_left[i], hash_right[i]]);
         nodes[i + 1] <== poseidon_result[0] + hash_left[i];
     }
 

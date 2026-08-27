@@ -2,7 +2,7 @@ pragma circom 2.2.2;
 
 // This file is copied from https://github.com/zk-kit/zk-kit.circom/blob/main/packages/binary-merkle-root/src/binary-merkle-root.circom and adapted to use Poseidon2 instead of Poseidon and use it in compression mode and not in sponge mode.
 
-include "taceo/accelerators.circom";
+include "taceo/poseidon2.circom";
 include "comparators.circom";
 
 // This circuit is designed to calculate the root of a arity-4 Merkle
@@ -51,7 +51,7 @@ template MerkleRootArity4(MAX_DEPTH) {
         hashInputs[i] <== CMuxMerkle()(nodes[i], pathHashes, pathBits);
 
         // Compression mode
-        var poseidonResult[4] = TACEO_ACCELERATOR_Poseidon2(4)([hashInputs[i][0], hashInputs[i][1], hashInputs[i][2], hashInputs[i][3]]);
+        var poseidonResult[4] = Poseidon2(4)([hashInputs[i][0], hashInputs[i][1], hashInputs[i][2], hashInputs[i][3]]);
         nodes[i + 1] <== poseidonResult[0] + hashInputs[i][0];
     }
 
@@ -79,16 +79,6 @@ template MerkleRootArity4(MAX_DEPTH) {
 }
 
 template CMuxMerkle() {
-    signal input value;
-    signal input witness[3];
-    signal input selector[2]; // [LSB, MSB]
-    signal output hashInput[4];
-
-    hashInput <== TACEO_ACCELERATOR_Arity4CMux()(value, witness, selector);
-}
-
-
-template TACEO_ACCELERATOR_Arity4CMux() {
     signal input value;
     signal input witness[3];
     signal input selector[2]; // [LSB, MSB]

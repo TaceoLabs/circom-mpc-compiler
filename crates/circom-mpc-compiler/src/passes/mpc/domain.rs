@@ -4,7 +4,7 @@
 //! lets `mul_split` tell a genuine secret product (needs a round) apart from a free public one.
 //! Shared by `mul_split`, `round_schedule`, batch planning, codegen, and diagnostics.
 
-use crate::ir::{AcceleratorKind, Graph, Op, SignalIdx};
+use crate::ir::{GadgetKind, Graph, Op, SignalIdx};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Domain {
@@ -30,25 +30,25 @@ pub(crate) fn compute_domains(graph: &Graph) -> Vec<Domain> {
             Op::RoundResult(_) => Domain::Shared,
             // A deterministic gadget is public exactly when all of its inputs are public. Keeping
             // this domain on the otherwise-unread service node lets each result inherit it.
-            Op::Accelerator(_) => node
+            Op::Gadget(_) => node
                 .inputs
                 .iter()
                 .fold(Domain::Public, |d, input| d.join(domains[input.index()])),
             // A `Reveal` site's result is unconditionally `Public` - that is its entire purpose,
-            // regardless of whether its own input was `Shared` (see `AcceleratorKind::Reveal`).
+            // regardless of whether its own input was `Shared` (see `GadgetKind::Reveal`).
             // Every other kind stays exactly what its site's domain already is.
-            Op::AcceleratorResult(_) => {
-                let accelerator_idx = node.inputs[0].index();
-                match &nodes[accelerator_idx].op {
-                    Op::Accelerator(site_id)
+            Op::GadgetResult(_) => {
+                let gadget_idx = node.inputs[0].index();
+                match &nodes[gadget_idx].op {
+                    Op::Gadget(site_id)
                         if matches!(
-                            graph.accelerator_sites()[site_id.index()].kind,
-                            AcceleratorKind::Reveal { .. }
+                            graph.gadget_sites()[site_id.index()].kind,
+                            GadgetKind::Reveal { .. }
                         ) =>
                     {
                         Domain::Public
                     }
-                    _ => domains[accelerator_idx],
+                    _ => domains[gadget_idx],
                 }
             }
         };

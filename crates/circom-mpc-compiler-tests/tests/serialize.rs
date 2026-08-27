@@ -3,7 +3,7 @@
 
 use ark_bn254::Fr;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
-use circom_mpc_program::{AcceleratorKind, Bank, BatchKind, Opcode, Program, WitnessSource};
+use circom_mpc_program::{GadgetKind, Bank, BatchKind, Opcode, Program, WitnessSource};
 use circom_mpc_vm::Machine;
 use circom_mpc_vm::driver::plain::PlainDriver;
 
@@ -52,7 +52,7 @@ fn round_trips_a_program_with_a_round_byte_identically() {
 
 #[test]
 fn round_trips_a_program_with_a_precompute_site_byte_identically() {
-    let original = program("accelerator_iszero_test");
+    let original = program("gadget_iszero_test");
     let mut bytes = Vec::new();
     original.write(&mut bytes).unwrap();
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
@@ -78,54 +78,54 @@ fn round_trips_an_unbound_zero_witness_source() {
 
 #[test]
 fn round_trips_a_fused_iszero_reveal_batch() {
-    let original = program("accelerator_iszero_reveal_test");
-    assert_eq!(original.accelerator_batches().len(), 1);
+    let original = program("gadget_iszero_reveal_test");
+    assert_eq!(original.gadget_batches().len(), 1);
     assert_eq!(
-        original.accelerator_batches()[0].kind,
+        original.gadget_batches()[0].kind,
         BatchKind::IsZeroReveal
     );
-    assert_eq!(original.accelerator_batches()[0].sites, 2);
+    assert_eq!(original.gadget_batches()[0].sites, 2);
     let mut bytes = Vec::new();
     original.write(&mut bytes).unwrap();
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
 
     assert_eq!(
-        read_back.accelerator_batches()[0].kind,
+        read_back.gadget_batches()[0].kind,
         BatchKind::IsZeroReveal
     );
-    assert_eq!(read_back.accelerator_batches()[0].sites, 2);
+    assert_eq!(read_back.gadget_batches()[0].sites, 2);
     let inputs = [Fr::from(0u64), Fr::from(7u64)];
     assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
 }
 
 #[test]
 fn round_trips_a_fused_isequal_reveal_batch() {
-    let original = program("accelerator_isequal_reveal_test");
-    assert_eq!(original.accelerator_batches().len(), 1);
+    let original = program("gadget_isequal_reveal_test");
+    assert_eq!(original.gadget_batches().len(), 1);
     assert_eq!(
-        original.accelerator_batches()[0].kind,
+        original.gadget_batches()[0].kind,
         BatchKind::IsZeroReveal
     );
-    assert_eq!(original.accelerator_batches()[0].sites, 3);
+    assert_eq!(original.gadget_batches()[0].sites, 3);
     let mut bytes = Vec::new();
     original.write(&mut bytes).unwrap();
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
 
     assert_eq!(
-        read_back.accelerator_batches()[0].kind,
+        read_back.gadget_batches()[0].kind,
         BatchKind::IsZeroReveal
     );
-    assert_eq!(read_back.accelerator_batches()[0].sites, 3);
+    assert_eq!(read_back.gadget_batches()[0].sites, 3);
     let inputs = [Fr::from(10u64), Fr::from(4u64), Fr::from(7u64)];
     assert_eq!(witness(&original, &inputs), witness(&read_back, &inputs));
 }
 
 #[test]
 fn round_trips_a_public_precompute_batch() {
-    let original = program("accelerator_public_test");
+    let original = program("gadget_public_test");
     assert!(
         original
-            .accelerator_batches()
+            .gadget_batches()
             .iter()
             .flat_map(|batch| &batch.result_targets)
             .all(|target| target.bank == Bank::Public)
@@ -135,7 +135,7 @@ fn round_trips_a_public_precompute_batch() {
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
     assert!(
         read_back
-            .accelerator_batches()
+            .gadget_batches()
             .iter()
             .flat_map(|batch| &batch.result_targets)
             .all(|target| target.bank == Bank::Public)
@@ -145,14 +145,14 @@ fn round_trips_a_public_precompute_batch() {
 }
 
 /// The two single-site programs above both have exactly one batch, so they can't catch a bug in
-/// how *multiple* batches or their `Opcode::Accelerator` instructions round-trip. This one is
+/// how *multiple* batches or their `Opcode::Gadget` instructions round-trip. This one is
 /// genuinely staged: two same-kind sites at different stages, hence two batches interleaved into
-/// the stream (see `circuits/accelerator_staged_test.circom`).
+/// the stream (see `circuits/gadget_staged_test.circom`).
 #[test]
 fn round_trips_a_staged_multi_batch_program() {
-    let original = program("accelerator_staged_test");
+    let original = program("gadget_staged_test");
     assert_eq!(
-        original.accelerator_batches().len(),
+        original.gadget_batches().len(),
         2,
         "fixture must be staged for this test to cover anything"
     );
@@ -160,12 +160,12 @@ fn round_trips_a_staged_multi_batch_program() {
     original.write(&mut bytes).unwrap();
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
 
-    assert_eq!(read_back.accelerator_batches().len(), 2);
+    assert_eq!(read_back.gadget_batches().len(), 2);
     assert_eq!(
         read_back
             .instructions()
             .iter()
-            .filter(|i| i.op == Opcode::Accelerator)
+            .filter(|i| i.op == Opcode::Gadget)
             .count(),
         2
     );
@@ -184,12 +184,12 @@ fn validation_rejects_out_of_range_witness_and_batch_targets() {
     assert!(invalid_witness.validate_encoding().is_err());
     assert!(invalid_witness.write(&mut Vec::new()).is_err());
 
-    let mut invalid_batch = program("accelerator_iszero_test").into_parts();
-    invalid_batch.accelerator_batches[0].result_targets[0].slot = invalid_batch.slots.shared;
+    let mut invalid_batch = program("gadget_iszero_test").into_parts();
+    invalid_batch.gadget_batches[0].result_targets[0].slot = invalid_batch.slots.shared;
     assert!(Program::new(invalid_batch).validate_encoding().is_err());
 
-    let mut invalid_poseidon = program("accelerator_poseidon2_test").into_parts();
-    invalid_poseidon.accelerator_batches[0].kind =
-        BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t: 5 });
+    let mut invalid_poseidon = program("gadget_poseidon2_test").into_parts();
+    invalid_poseidon.gadget_batches[0].kind =
+        BatchKind::Gadget(GadgetKind::Poseidon2 { t: 5 });
     assert!(Program::new(invalid_poseidon).validate_encoding().is_err());
 }

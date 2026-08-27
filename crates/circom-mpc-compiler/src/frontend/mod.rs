@@ -32,7 +32,7 @@ use crate::ir::InputList;
 
 /// A template header's total flat signal count: its own declared signals plus every signal of
 /// every subcomponent it transitively instantiates - the contiguous span circom's runtime layout
-/// reserves for one instance. Sizes a accelerator site's result-slot range. Recomputed from
+/// reserves for one instance. Sizes a gadget site's result-slot range. Recomputed from
 /// `VCP::templates` because circom computes it only on its internal `DAG`, which
 /// `build_circuit`'s public API does not expose.
 fn compute_signal_spans(vcp: &VCP) -> FxHashMap<String, usize> {
@@ -194,11 +194,11 @@ pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Gr
 
     let mut nodes = Vec::with_capacity(main_template_graph.nodes.len());
     let mut outputs = Vec::new();
-    let mut accelerator_sites = Vec::new();
+    let mut gadget_sites = Vec::new();
     inline::inline_template(
         &mut nodes,
         &mut outputs,
-        &mut accelerator_sites,
+        &mut gadget_sites,
         main_template_graph,
         0,
         true,
@@ -208,7 +208,7 @@ pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Gr
     let mut graph = ir::Graph::from_parts(
         nodes,
         outputs,
-        accelerator_sites,
+        gadget_sites,
         circuit.c_producer.witness_to_signal_list,
         input_list,
         public_inputs,

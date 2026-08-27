@@ -1,10 +1,11 @@
 pragma circom 2.2.2;
 
 include "bitify.circom";
+include "aliascheck.circom";
+include "comparators.circom";
 include "oblivious_vector/hash.circom";
 include "dependencies/merkle_root_4.circom";
 include "taceo/compression.circom";
-include "taceo/accelerators.circom";
 include "taceo/precomputations.circom";
 
 template RangeCheckWithOutputFlag(BITSIZE) {
@@ -14,10 +15,10 @@ template RangeCheckWithOutputFlag(BITSIZE) {
     signal output valid;
 
     // Num2Bits_strict, accelerated
-    component n2b = TACEO_ACCELERATOR_Num2Bits(254);
+    component n2b = Num2Bits(254);
     in ==> n2b.in;
 
-    TACEO_ACCELERATOR_AliasCheck()(n2b.out);
+    AliasCheck()(n2b.out);
 
     // Sum up all bits above BITSIZE
     // Works since bits are enforced to be 0 or 1 already.
@@ -31,7 +32,7 @@ template RangeCheckWithOutputFlag(BITSIZE) {
     // end of `TransferBatchedCompressedArity4` (see `compression.circom`), so it is revealed there
     // regardless - doing it here lets it feed the rest of that compression as public, deterministic
     // work instead of round-tripping through MPC.
-    signal isZeroOut <== TACEO_ACCELERATOR_IsZero()(sum);
+    signal isZeroOut <== IsZero()(sum);
     signal revealed[1] <== TACEO_REVEAL(1)([isZeroOut]);
     valid <== revealed[0];
 }

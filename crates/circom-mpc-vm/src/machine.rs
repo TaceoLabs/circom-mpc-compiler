@@ -6,14 +6,14 @@ use ark_bn254::Fr;
 use ark_ff::{One, Zero};
 
 use circom_mpc_program::{
-    AcceleratorBatch, AcceleratorKind, Bank, BatchKind, InputValue, InputValues, Opcode, Program,
+    GadgetBatch, GadgetKind, Bank, BatchKind, InputValue, InputValues, Opcode, Program,
     WitnessSource,
 };
 
 use crate::driver::VmDriver;
 
-/// One site's precomputed trace, shaped like co-snarks' `ComponentAcceleratorOutput` -
-/// `output`/`intermediate` are exactly `AcceleratorSite`'s own outputs and intermediates, so a
+/// One site's precomputed trace, shaped like co-snarks' `ComponentGadgetOutput` -
+/// `output`/`intermediate` are exactly `GadgetSite`'s own outputs and intermediates, so a
 /// producer never has to reason about the VM's physical slot layout.
 #[derive(Debug, Clone)]
 pub struct SiteTrace<S> {
@@ -49,7 +49,7 @@ impl<S> GadgetPrecomputation<S> {
     }
 
     /// Queues one batch's traces, one [`SiteTrace`] per site, in the same site order as the
-    /// batch's `AcceleratorBatch`.
+    /// batch's `GadgetBatch`.
     pub fn push_batch(&mut self, sites: Vec<SiteTrace<S>>) {
         self.batches.push_back(sites);
     }
@@ -190,7 +190,7 @@ impl Machine {
         let rounds = program.rounds();
         let round_operands = program.round_operands();
         let round_results = program.round_results();
-        let accelerator_batches = program.accelerator_batches();
+        let gadget_batches = program.gadget_batches();
 
         let mut pending_mul_lhs: Vec<D::Share> = Vec::new();
         let mut pending_mul_rhs: Vec<D::Share> = Vec::new();
@@ -260,8 +260,8 @@ impl Machine {
                         shared[round_results[rstart + k] as usize] = r;
                     }
                 }
-                Opcode::Accelerator => Self::run_batch(
-                    &accelerator_batches[instr.a as usize],
+                Opcode::Gadget => Self::run_batch(
+                    &gadget_batches[instr.a as usize],
                     driver,
                     &mut public,
                     &mut shared,
@@ -303,7 +303,7 @@ impl Machine {
         Ok(witness)
     }
 
-    /// Services one batched accelerator site group at its point in the instruction stream. A
+    /// Services one batched gadget site group at its point in the instruction stream. A
     /// public batch uses the plain gadget path; a shared batch is one driver call. Interleaving is
     /// required because a site's inputs may be produced by earlier instructions.
     ///
@@ -317,7 +317,7 @@ impl Machine {
     /// template, hence the same real length), so this is never a flat prefix of the whole batch,
     /// which would spill one site's results into the next site's region.
     fn run_batch<D: VmDriver>(
-        batch: &AcceleratorBatch,
+        batch: &GadgetBatch,
         driver: &mut D,
         public: &mut [Fr],
         shared: &mut [D::Share],
@@ -329,14 +329,14 @@ impl Machine {
         if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
             return Self::run_precomputed_batch(t, batch, precomputation, shared);
         }
-        let BatchKind::Accelerator(kind) = batch.kind else {
+        let BatchKind::Gadget(kind) = batch.kind else {
             unreachable!("fused and host-precomputed batches handled above")
         };
         // Whether this batch needs a genuine MPC call, rather than inferring it from result targets:
         // for every kind but `Reveal` the two coincide (a site's inputs are all-`Public` exactly
         // when its result stays `Public`), but `Reveal`'s result target is unconditionally `Public`
         // even when its own inputs are `Shared` - that is its entire purpose (see
-        // `AcceleratorKind::Reveal`), and precisely that case still needs a real `driver.open` call.
+        // `GadgetKind::Reveal`), and precisely that case still needs a real `driver.open` call.
         let needs_mpc = batch
             .input_slots
             .iter()
@@ -349,12 +349,12 @@ impl Machine {
                 .map(|input| {
                     eyre::ensure!(
                         input.bank == Bank::Public,
-                        "public accelerator batch has a non-public input"
+                        "public gadget batch has a non-public input"
                     );
                     Ok(public[input.slot as usize])
                 })
                 .collect::<eyre::Result<_>>()?;
-            if let AcceleratorKind::Poseidon2 { t } = kind {
+            if let GadgetKind::Poseidon2 { t } = kind {
                 let selected = crate::gadgets::poseidon2::plain_trace_requested(
                     t,
                     &inputs,
@@ -384,12 +384,12 @@ impl Machine {
 
         // `Reveal` is the one kind whose MPC path writes into the `Public` bank (a genuine open,
         // rather than a share-producing gadget) - every other kind writes into `Shared`.
-        if let AcceleratorKind::Reveal { .. } = kind {
+        if let GadgetKind::Reveal { .. } = kind {
             let opened = driver.open(&inputs)?;
             let selected = Self::select_requests(&opened, batch)?;
             return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
-        if let AcceleratorKind::Poseidon2 { t } = kind {
+        if let GadgetKind::Poseidon2 { t } = kind {
             let selected = driver.poseidon2_requested_traces(
                 t,
                 &inputs,
@@ -399,18 +399,18 @@ impl Machine {
             return Self::store_batch_results(batch, selected, Bank::Shared, shared);
         }
         let results = match kind {
-            AcceleratorKind::Poseidon2 { .. } => unreachable!("handled above"),
-            AcceleratorKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
-            AcceleratorKind::IsZero => driver.is_zero_traces(&inputs)?,
-            AcceleratorKind::AliasCheck => driver.alias_check_traces(&inputs)?,
-            AcceleratorKind::Reveal { .. } => unreachable!("handled above"),
+            GadgetKind::Poseidon2 { .. } => unreachable!("handled above"),
+            GadgetKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
+            GadgetKind::IsZero => driver.is_zero_traces(&inputs)?,
+            GadgetKind::AliasCheck => driver.alias_check_traces(&inputs)?,
+            GadgetKind::Reveal { .. } => unreachable!("handled above"),
         };
         let selected = Self::select_requests(&results, batch)?;
         Self::store_batch_results(batch, selected, Bank::Shared, shared)
     }
 
     fn run_is_zero_reveal_batch<D: VmDriver>(
-        batch: &AcceleratorBatch,
+        batch: &GadgetBatch,
         driver: &mut D,
         public: &mut [Fr],
         shared: &mut [D::Share],
@@ -485,7 +485,7 @@ impl Machine {
     /// `Bank::Shared`, so this never touches `public`.
     fn run_precomputed_batch<S: Clone>(
         t: usize,
-        batch: &AcceleratorBatch,
+        batch: &GadgetBatch,
         precomputation: &mut GadgetPrecomputation<S>,
         shared: &mut [S],
     ) -> eyre::Result<()> {
@@ -548,22 +548,22 @@ impl Machine {
         Ok(())
     }
 
-    fn run_plain_batch(kind: AcceleratorKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+    fn run_plain_batch(kind: GadgetKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
         use crate::gadgets::{aliascheck, iszero, num2bits};
 
         Ok(match kind {
-            AcceleratorKind::Poseidon2 { .. } => {
+            GadgetKind::Poseidon2 { .. } => {
                 unreachable!("public Poseidon2 takes the requested-trace path in run_batch")
             }
-            AcceleratorKind::Num2Bits { n } => inputs
+            GadgetKind::Num2Bits { n } => inputs
                 .iter()
                 .flat_map(|&x| num2bits::plain_trace(x, n))
                 .collect(),
-            AcceleratorKind::IsZero => inputs
+            GadgetKind::IsZero => inputs
                 .iter()
                 .flat_map(|&x| iszero::plain_trace(x))
                 .collect(),
-            AcceleratorKind::AliasCheck => {
+            GadgetKind::AliasCheck => {
                 eyre::ensure!(
                     inputs.len().is_multiple_of(254),
                     "alias_check_traces: {} inputs is not a multiple of 254",
@@ -576,7 +576,7 @@ impl Machine {
             }
             // An all-public reveal is the identity: every party already holds every input in the
             // clear, so "opening" it changes nothing.
-            AcceleratorKind::Reveal { .. } => inputs.to_vec(),
+            GadgetKind::Reveal { .. } => inputs.to_vec(),
         })
     }
 
@@ -584,13 +584,13 @@ impl Machine {
     /// output, flattening site-major. A temporary bridge (,
     /// "Precomputation"): gadgets other than Poseidon2 still compute and return their *full*
     /// per-site trace (`num_outputs + num_intermediates` values), and this filters the
-    /// `AcceleratorBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
+    /// `GadgetBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
     /// directly and bypasses this bridge.
-    fn select_requests<T: Clone>(full: &[T], batch: &AcceleratorBatch) -> eyre::Result<Vec<T>> {
-        eyre::ensure!(batch.sites > 0, "accelerator batch has no sites");
+    fn select_requests<T: Clone>(full: &[T], batch: &GadgetBatch) -> eyre::Result<Vec<T>> {
+        eyre::ensure!(batch.sites > 0, "gadget batch has no sites");
         eyre::ensure!(
             full.len().is_multiple_of(batch.sites),
-            "accelerator batch ({:?}, {} sites) returned {} results, not an even multiple of \
+            "gadget batch ({:?}, {} sites) returned {} results, not an even multiple of \
              the site count",
             batch.kind,
             batch.sites,
@@ -606,7 +606,7 @@ impl Machine {
                 let logical = logical as usize;
                 eyre::ensure!(
                     logical < capacity,
-                    "accelerator batch ({:?}) requested slot {logical}, exceeding the {capacity} \
+                    "gadget batch ({:?}) requested slot {logical}, exceeding the {capacity} \
                      the circuit's own signal layout reserves",
                     batch.kind
                 );
@@ -617,14 +617,14 @@ impl Machine {
     }
 
     fn store_batch_results<T>(
-        batch: &AcceleratorBatch,
+        batch: &GadgetBatch,
         results: Vec<T>,
         expected_bank: Bank,
         destination: &mut [T],
     ) -> eyre::Result<()> {
         eyre::ensure!(
             results.len() == batch.result_targets.len(),
-            "accelerator batch ({:?}) produced {} results, expected exactly {} (one per requested \
+            "gadget batch ({:?}) produced {} results, expected exactly {} (one per requested \
              slot)",
             batch.kind,
             results.len(),
@@ -633,7 +633,7 @@ impl Machine {
         for (target, value) in batch.result_targets.iter().zip(results) {
             eyre::ensure!(
                 target.bank == expected_bank,
-                "accelerator batch ({:?}) result targets mixed banks unexpectedly",
+                "gadget batch ({:?}) result targets mixed banks unexpectedly",
                 batch.kind
             );
             destination[target.slot as usize] = value;
@@ -764,7 +764,7 @@ mod tests {
             rounds: Vec::new(),
             round_operands: Vec::new(),
             round_results: Vec::new(),
-            accelerator_batches: Vec::new(),
+            gadget_batches: Vec::new(),
             witness_sources: vec![WitnessSource::One],
             num_inputs: 0,
             slots: SlotCounts::default(),

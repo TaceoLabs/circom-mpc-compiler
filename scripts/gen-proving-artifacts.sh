@@ -40,8 +40,8 @@ else
     CIRCUITS=(
         multiplier3 multiplier16 loop_unrolling dead_code
         multiplier2_public constants_test babycheck_test control_flow
-        accelerator_poseidon2_test accelerator_num2bits_test
-        accelerator_iszero_test accelerator_aliascheck_test
+        gadget_poseidon2_test gadget_num2bits_test
+        gadget_iszero_test gadget_aliascheck_test
     )
 fi
 

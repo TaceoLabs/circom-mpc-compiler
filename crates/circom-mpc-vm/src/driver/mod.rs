@@ -58,7 +58,7 @@ pub trait VmDriver {
     /// Poseidon2 traces for a batch of sites. `states` is `sites * t` shares (one length-`t` state
     /// per site, concatenated). `result_offsets` is a CSR row pointer with one row per site; each
     /// row names the site's strictly ascending logical result slots (indices into
-    /// `ir::AcceleratorKind::Poseidon2`'s result layout). Results are returned in that same
+    /// `ir::GadgetKind::Poseidon2`'s result layout). Results are returned in that same
     /// site-major CSR order, so witness-dead trace values are never materialized.
     fn poseidon2_requested_traces(
         &mut self,
@@ -85,6 +85,6 @@ pub trait VmDriver {
         inputs: &[Self::Share],
     ) -> eyre::Result<Vec<(Self::Share, Self::Share, Fr)>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
-    /// `ir::AcceleratorKind::AliasCheck`'s doc for the exact layout.
+    /// `ir::GadgetKind::AliasCheck`'s doc for the exact layout.
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
 }

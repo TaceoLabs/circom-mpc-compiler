@@ -6,7 +6,7 @@
 
 use ark_bn254::Fr;
 
-pub use circom_mpc_program::AcceleratorKind;
+pub use circom_mpc_program::GadgetKind;
 
 /// Identifies a node in a [`Graph`] and, equivalently, the single value it produces.
 ///
@@ -40,13 +40,13 @@ impl SignalIdx {
     }
 }
 
-/// Identifies one entry in [`Graph::accelerator_sites`].
+/// Identifies one entry in [`Graph::gadget_sites`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AcceleratorId(u32);
+pub struct GadgetId(u32);
 
-impl AcceleratorId {
+impl GadgetId {
     pub(crate) fn new(index: usize) -> Self {
-        Self(u32::try_from(index).expect("more accelerator sites than fit into u32"))
+        Self(u32::try_from(index).expect("more gadget sites than fit into u32"))
     }
 
     pub(crate) fn index(self) -> usize {
@@ -74,7 +74,7 @@ impl RoundId {
 pub(crate) struct RoundDesc {
     pub(crate) len: usize,
     /// This round's position in the circuit's **network-event** order - reshare rounds and
-    /// accelerator batch services interleaved on one axis (see `passes::mpc::level`). Not the
+    /// gadget batch services interleaved on one axis (see `passes::mpc::level`). Not the
     /// same as multiplicative depth. Diagnostic only, not consulted structurally.
     #[allow(dead_code)]
     pub(crate) level: usize,
@@ -90,26 +90,26 @@ pub struct MpcSummary {
     pub max_slots_per_round: Option<usize>,
     pub local_muls: usize,
     pub public_muls: usize,
-    pub accelerator_sites: usize,
+    pub gadget_sites: usize,
     /// How many batch services those sites actually cost - normally one per
     /// `(kind, stage, domain)` group, with an additional split when an early consumer closes a
     /// batch's placement window. Public services run locally; shared services call the MPC driver.
-    /// `accelerator_batches < accelerator_sites` makes the batching claim falsifiable rather than
+    /// `gadget_batches < gadget_sites` makes the batching claim falsifiable rather than
     /// asserted.
-    pub accelerator_batches: usize,
+    pub gadget_batches: usize,
     /// Batch services that require an MPC driver call rather than local public evaluation.
-    pub shared_accelerator_batches: usize,
+    pub shared_gadget_batches: usize,
     /// Batch services whose trace comes from the host (`TACEO_PRECOMPUTATION_Poseidon2`) rather
-    /// than `vm::gadgets` - a subset of `shared_accelerator_batches` (a host-precomputed site is
+    /// than `vm::gadgets` - a subset of `shared_gadget_batches` (a host-precomputed site is
     /// always `Shared`-domain).
     pub precomputed_batches: usize,
 }
 
 /// One recognized-gadget component instance: the shape the runtime must supply a trace for.
 #[derive(Debug, Clone)]
-pub struct AcceleratorSite {
+pub struct GadgetSite {
     /// Which gadget this site runs, and (for the parameterized ones) its width.
-    pub kind: AcceleratorKind,
+    pub kind: GadgetKind,
     /// The gadget template's concrete header (parameterized name), e.g. `"Poseidon2_3"` -
     /// diagnostics only.
     pub header: String,
@@ -117,7 +117,7 @@ pub struct AcceleratorSite {
     pub num_outputs: usize,
     pub num_intermediates: usize,
     /// Whether this site is wrapped in `TACEO_PRECOMPUTATION_Poseidon2`: its trace comes from the
-    /// host, not from `vm::gadgets`. Only ever true for a [`AcceleratorKind::Poseidon2`] kind -
+    /// host, not from `vm::gadgets`. Only ever true for a [`GadgetKind::Poseidon2`] kind -
     /// `Graph::verify` rejects any other combination.
     pub precomputed: bool,
 }
@@ -137,16 +137,16 @@ pub enum Op {
     Add,
     Sub,
     Mul,
-    /// Invokes an accelerator site (see [`AcceleratorSite`]) - a std-lib gadget (`Num2Bits`,
+    /// Invokes a gadget site (see [`GadgetSite`]) - a std-lib gadget (`Num2Bits`,
     /// `IsZero`, `AliasCheck`, or an unwrapped `Poseidon2`) serviced by `vm::gadgets` rather than
     /// compiled. Arity equals the referenced site's `num_inputs`, which is validated when the
     /// graph invariants are checked. This node's own value is never read directly, only through
-    /// [`Op::AcceleratorResult`] nodes that reference it.
-    Accelerator(AcceleratorId),
-    /// Reads one result slot of the [`Op::Accelerator`] node that is this node's sole input. Slot
+    /// [`Op::GadgetResult`] nodes that reference it.
+    Gadget(GadgetId),
+    /// Reads one result slot of the [`Op::Gadget`] node that is this node's sole input. Slot
     /// `0..num_outputs` are the wrapped component's outputs; `num_outputs..` are its subtree's
     /// intermediate signals, in flat circuit order.
-    AcceleratorResult(u32),
+    GadgetResult(u32),
     /// The free, local half of a secret x secret multiplication: `a*b + mask`, computed without a
     /// message (rep3's `local_mul_vec`). Not a valid share on its own - only a rep3 additive-3
     /// sharing (still sound to add and scale) until reshared via the [`Op::Round`] it feeds.
@@ -163,19 +163,19 @@ pub enum Op {
 
 impl Op {
     /// The number of operands this op reads, where that is context-free. `None` for
-    /// [`Op::Accelerator`] (arity is its site's `num_inputs`) and [`Op::Round`] (its round's `len`);
+    /// [`Op::Gadget`] (arity is its site's `num_inputs`) and [`Op::Round`] (its round's `len`);
     /// only [`Graph::verify`] can check those, since it alone has the tables.
     pub(crate) fn fixed_arity(&self) -> Option<usize> {
         match self {
             Op::Input(_) | Op::Constant(_) => Some(0),
             Op::Add | Op::Sub | Op::Mul | Op::MulLocal => Some(2),
-            Op::AcceleratorResult(_) | Op::RoundResult(_) => Some(1),
-            Op::Accelerator(_) | Op::Round(_) => None,
+            Op::GadgetResult(_) | Op::RoundResult(_) => Some(1),
+            Op::Gadget(_) | Op::Round(_) => None,
         }
     }
 
     /// Whether this op is free of side effects a rewrite pass must preserve exactly once each -
-    /// `false` for the accelerator ops, since merging or duplicating a site would change how
+    /// `false` for the gadget ops, since merging or duplicating a site would change how
     /// many traces the runtime has to supply, and
     /// `false` for the MPC round ops for the same reason: `Op::MulLocal` consumes a fresh mask per
     /// evaluation, so merging two occurrences would desync a round's slot count from what the
@@ -184,8 +184,8 @@ impl Op {
     pub(crate) fn is_pure(&self) -> bool {
         !matches!(
             self,
-            Op::Accelerator(_)
-                | Op::AcceleratorResult(_)
+            Op::Gadget(_)
+                | Op::GadgetResult(_)
                 | Op::MulLocal
                 | Op::Round(_)
                 | Op::RoundResult(_)
@@ -248,10 +248,10 @@ pub struct Graph {
     /// input and output signal is also recorded here (not just main's declared outputs), because
     /// circom's witness vector addresses every signal in the circuit, not only main's I/O.
     outputs: Vec<(SignalIdx, ValueId)>,
-    /// Every accelerator site encountered while inlining - a std-lib gadget matched by name, an
+    /// Every gadget site encountered while inlining - a std-lib gadget matched by name, an
     /// unwrapped `Poseidon2` if enabled, or a `TACEO_PRECOMPUTATION_Poseidon2` site - in the order
     /// encountered, which *is* the trace order the runtime must supply results in.
-    accelerator_sites: Vec<AcceleratorSite>,
+    gadget_sites: Vec<GadgetSite>,
     /// Every batched MPC network round, indexed by [`RoundId`]. Empty until `passes::mpc` lowers
     /// the graph.
     rounds: Vec<RoundDesc>,
@@ -278,7 +278,7 @@ impl Graph {
     pub(crate) fn from_parts(
         nodes: Vec<Node>,
         outputs: Vec<(SignalIdx, ValueId)>,
-        accelerator_sites: Vec<AcceleratorSite>,
+        gadget_sites: Vec<GadgetSite>,
         signal_to_witness: Vec<usize>,
         input_list: InputList,
         public_inputs: Vec<String>,
@@ -289,7 +289,7 @@ impl Graph {
         Self {
             nodes,
             outputs,
-            accelerator_sites,
+            gadget_sites,
             rounds: Vec::new(),
             lowered: false,
             signal_to_witness,
@@ -317,10 +317,10 @@ impl Graph {
         &self.nodes
     }
 
-    /// Every accelerator site in this graph, in inlining order - the order the runtime must
+    /// Every gadget site in this graph, in inlining order - the order the runtime must
     /// supply traces in.
-    pub fn accelerator_sites(&self) -> &[AcceleratorSite] {
-        &self.accelerator_sites
+    pub fn gadget_sites(&self) -> &[GadgetSite] {
+        &self.gadget_sites
     }
 
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {
@@ -374,7 +374,7 @@ impl Graph {
 
     /// Reports the effect of MPC lowering: rounds, total reshare elements (one field element per
     /// round slot), min/mean/max slots per round, free local multiplications, free public
-    /// multiplications, and accelerator sites. Not a rewrite - this is what makes the round
+    /// multiplications, and gadget sites. Not a rewrite - this is what makes the round
     /// batching claims falsifiable instead of asserted; see `tests/mpc_lowering.rs`.
     pub fn mpc_summary(&self) -> MpcSummary {
         let slot_counts: Vec<usize> = self.rounds.iter().map(|r| r.len).collect();
@@ -391,9 +391,9 @@ impl Graph {
             .count();
         let domains = crate::passes::mpc::domain::compute_domains(self);
         let batches =
-            crate::passes::mpc::accelerator_schedule::plan_accelerator_batches(self, &domains);
-        let accelerator_batches = batches.len();
-        let shared_accelerator_batches = batches
+            crate::passes::mpc::gadget_schedule::plan_gadget_batches(self, &domains);
+        let gadget_batches = batches.len();
+        let shared_gadget_batches = batches
             .iter()
             .filter(|batch| batch.domain == crate::passes::mpc::domain::Domain::Shared)
             .count();
@@ -405,9 +405,9 @@ impl Graph {
             max_slots_per_round: slot_counts.iter().copied().max(),
             local_muls,
             public_muls,
-            accelerator_sites: self.accelerator_sites.len(),
-            accelerator_batches,
-            shared_accelerator_batches,
+            gadget_sites: self.gadget_sites.len(),
+            gadget_batches,
+            shared_gadget_batches,
             precomputed_batches,
         }
     }
@@ -419,14 +419,14 @@ impl Graph {
         for &(_, root) in &self.outputs {
             keep[root.index()] = true;
         }
-        // Every accelerator site must survive gc even if none of its results end up read (a
+        // Every gadget site must survive gc even if none of its results end up read (a
         // site whose results are all witness-dead has zero references at this point). Codegen
-        // resolves each site's destination slots from the fixed, in-order `accelerator_sites`
+        // resolves each site's destination slots from the fixed, in-order `gadget_sites`
         // table, so silently dropping a "dead" site would desynchronize every later same-kind
-        // site's slot range - and `Graph::verify` requires exactly one `Op::Accelerator` node per
+        // site's slot range - and `Graph::verify` requires exactly one `Op::Gadget` node per
         // site regardless.
         for (i, node) in self.nodes.iter().enumerate() {
-            if matches!(node.op, Op::Accelerator(_)) {
+            if matches!(node.op, Op::Gadget(_)) {
                 keep[i] = true;
             }
         }
@@ -470,9 +470,9 @@ impl Graph {
     /// Checks the graph's structural invariants:
     /// - every node's inputs reference strictly earlier nodes (topological order),
     /// - every node has exactly as many inputs as its op's arity,
-    /// - every `AcceleratorResult`/`RoundResult` references a real slot of a real producer,
-    /// - every accelerator site has exactly one [`Op::Accelerator`] node,
-    /// - no [`Op::Accelerator`] reads an un-reshared [`Op::MulLocal`] value,
+    /// - every `GadgetResult`/`RoundResult` references a real slot of a real producer,
+    /// - every gadget site has exactly one [`Op::Gadget`] node,
+    /// - no [`Op::Gadget`] reads an un-reshared [`Op::MulLocal`] value,
     /// - MPC-lowering ops appear only once the graph is lowered,
     /// - every output references a node that exists.
     ///
@@ -480,16 +480,16 @@ impl Graph {
     pub(crate) fn verify(&self) -> eyre::Result<()> {
         for (i, node) in self.nodes.iter().enumerate() {
             match &node.op {
-                Op::Accelerator(site_id) => {
-                    let site = self.accelerator_sites.get(site_id.index()).ok_or_else(|| {
+                Op::Gadget(site_id) => {
+                    let site = self.gadget_sites.get(site_id.index()).ok_or_else(|| {
                         eyre::eyre!(
-                            "node {i} references accelerator site {} which does not exist",
+                            "node {i} references gadget site {} which does not exist",
                             site_id.index()
                         )
                     })?;
                     if node.inputs.len() != site.num_inputs {
                         eyre::bail!(
-                            "node {i} (Accelerator({})) has {} inputs, expected {} (site num_inputs)",
+                            "node {i} (Gadget({})) has {} inputs, expected {} (site num_inputs)",
                             site_id.index(),
                             node.inputs.len(),
                             site.num_inputs
@@ -528,32 +528,32 @@ impl Graph {
                     }
                 }
             }
-            if let Op::AcceleratorResult(slot) = &node.op {
+            if let Op::GadgetResult(slot) = &node.op {
                 let referenced = &self.nodes[node.inputs[0].index()];
-                let Op::Accelerator(site_id) = &referenced.op else {
+                let Op::Gadget(site_id) = &referenced.op else {
                     eyre::bail!(
-                        "node {i} (AcceleratorResult) does not reference an Accelerator node"
+                        "node {i} (GadgetResult) does not reference an Gadget node"
                     );
                 };
-                let site = &self.accelerator_sites[site_id.index()];
+                let site = &self.gadget_sites[site_id.index()];
                 let total_results = site.num_outputs + site.num_intermediates;
                 if *slot as usize >= total_results {
                     eyre::bail!(
-                        "node {i} (AcceleratorResult({slot})) references out-of-range slot \
+                        "node {i} (GadgetResult({slot})) references out-of-range slot \
                          (site has {total_results} results)"
                     );
                 }
             }
-            // An accelerator gadget needs a genuine share. `Op::MulLocal` is the only producer of
+            // A gadget gadget needs a genuine share. `Op::MulLocal` is the only producer of
             // a `Local` (un-reshared additive-3) value, so this is a purely syntactic check - no
             // domain analysis needed - and it is the structural counterpart of the same rejection
             // `vm::codegen` makes when resolving a site's operand banks.
-            if let Op::Accelerator(site_id) = &node.op {
+            if let Op::Gadget(site_id) = &node.op {
                 for input in &node.inputs {
                     if matches!(self.nodes[input.index()].op, Op::MulLocal) {
                         eyre::bail!(
-                            "node {i} (Accelerator({})) reads value {} which is an un-reshared \
-                             MulLocal - an accelerator gadget needs a genuine share",
+                            "node {i} (Gadget({})) reads value {} which is an un-reshared \
+                             MulLocal - a gadget gadget needs a genuine share",
                             site_id.index(),
                             input.index()
                         );
@@ -591,21 +591,21 @@ impl Graph {
                 }
             }
         }
-        // Exactly one `Op::Accelerator` node per site. Several things already assume this without
+        // Exactly one `Op::Gadget` node per site. Several things already assume this without
         // checking it: `vm::codegen` groups sites into batches and reserves one contiguous result
-        // range per site, and `gc` roots every `Accelerator` node so a "dead" site can't shift a
+        // range per site, and `gc` roots every `Gadget` node so a "dead" site can't shift a
         // later same-kind site's slot range. Two nodes for one site would silently service it twice
         // and desynchronize both.
-        let mut nodes_per_site = vec![0usize; self.accelerator_sites.len()];
+        let mut nodes_per_site = vec![0usize; self.gadget_sites.len()];
         for node in &self.nodes {
-            if let Op::Accelerator(site_id) = &node.op {
+            if let Op::Gadget(site_id) = &node.op {
                 nodes_per_site[site_id.index()] += 1;
             }
         }
         for (site, count) in nodes_per_site.iter().enumerate() {
             if *count != 1 {
                 eyre::bail!(
-                    "accelerator site {site} is referenced by {count} Op::Accelerator nodes, \
+                    "gadget site {site} is referenced by {count} Op::Gadget nodes, \
                      expected exactly 1"
                 );
             }
@@ -619,10 +619,10 @@ impl Graph {
                 );
             }
         }
-        for (i, site) in self.accelerator_sites.iter().enumerate() {
-            if site.precomputed && !matches!(site.kind, AcceleratorKind::Poseidon2 { .. }) {
+        for (i, site) in self.gadget_sites.iter().enumerate() {
+            if site.precomputed && !matches!(site.kind, GadgetKind::Poseidon2 { .. }) {
                 eyre::bail!(
-                    "accelerator site {i} ({:?}) is marked precomputed but only Poseidon2 can be \
+                    "gadget site {i} ({:?}) is marked precomputed but only Poseidon2 can be \
                      host-precomputed",
                     site.kind
                 );
@@ -736,9 +736,9 @@ mod tests {
         assert!(sample_graph().verify().is_ok());
     }
 
-    fn iszero_site() -> AcceleratorSite {
-        AcceleratorSite {
-            kind: AcceleratorKind::IsZero,
+    fn iszero_site() -> GadgetSite {
+        GadgetSite {
+            kind: GadgetKind::IsZero,
             header: "IsZero_0".to_owned(),
             num_inputs: 1,
             num_outputs: 1,
@@ -747,21 +747,21 @@ mod tests {
         }
     }
 
-    /// Two `Op::Accelerator` nodes for one site would service it twice and desynchronize every later
+    /// Two `Op::Gadget` nodes for one site would service it twice and desynchronize every later
     /// same-kind site's reserved result range in `vm::codegen`.
     #[test]
     fn verify_rejects_duplicate_precompute_nodes_for_one_site() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]),
             Node::new(
-                Op::Accelerator(AcceleratorId::new(0)),
+                Op::Gadget(GadgetId::new(0)),
                 vec![ValueId::new(0)],
             ),
             Node::new(
-                Op::Accelerator(AcceleratorId::new(0)),
+                Op::Gadget(GadgetId::new(0)),
                 vec![ValueId::new(0)],
             ),
-            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(1)]),
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(3))];
         let graph = Graph::from_parts(
@@ -777,13 +777,13 @@ mod tests {
         );
         let err = graph.verify().unwrap_err().to_string();
         assert!(
-            err.contains("referenced by 2 Op::Accelerator nodes"),
+            err.contains("referenced by 2 Op::Gadget nodes"),
             "unexpected error: {err}"
         );
     }
 
-    /// A site with no `Op::Accelerator` node at all is equally broken - `level::site_stages` and
-    /// codegen's grouping both index by `AcceleratorId` and would have nothing to place.
+    /// A site with no `Op::Gadget` node at all is equally broken - `level::site_stages` and
+    /// codegen's grouping both index by `GadgetId` and would have nothing to place.
     #[test]
     fn verify_rejects_a_site_with_no_precompute_node() {
         let nodes = vec![Node::new(Op::Input(SignalIdx::new(1)), vec![])];
@@ -801,7 +801,7 @@ mod tests {
         );
         let err = graph.verify().unwrap_err().to_string();
         assert!(
-            err.contains("referenced by 0 Op::Accelerator nodes"),
+            err.contains("referenced by 0 Op::Gadget nodes"),
             "unexpected error: {err}"
         );
     }
@@ -814,10 +814,10 @@ mod tests {
             Node::new(Op::Input(SignalIdx::new(2)), vec![]),
             Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
             Node::new(
-                Op::Accelerator(AcceleratorId::new(0)),
+                Op::Gadget(GadgetId::new(0)),
                 vec![ValueId::new(2)],
             ),
-            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(3)]),
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(4))];
         let mut graph = Graph::from_parts(

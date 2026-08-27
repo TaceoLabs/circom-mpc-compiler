@@ -7,12 +7,12 @@ include "poseidon2.circom";
 // invalidates nothing (no new zkey needed). The wrapper name is the only thing that differs, and it
 // changes what the compiler does with the site: instead of `vm::gadgets` servicing it at run time,
 // the host supplies its trace up front and `Machine::run_with_precomputation` inlines it. See
-// `AcceleratorSite::precomputed`. Poseidon2 is the only gadget this compiler allows to be
-// host-precomputed - see `AcceleratorKind::Poseidon2`'s eligibility in `handle_create_cmp_bucket`.
+// `GadgetSite::precomputed`. Poseidon2 is the only gadget this compiler allows to be
+// host-precomputed - see `GadgetKind::Poseidon2`'s eligibility in `handle_create_cmp_bucket`.
 //
 // Standard-library gadgets (`Num2Bits`, `IsZero`, `AliasCheck`) need no wrapper at all: the compiler
-// recognizes them by their own circom name and always cuts them into an accelerator site. An
-// unwrapped `Poseidon2` is recognized and accelerated the same way.
+// recognizes them by their own circom name and always cuts them into a gadget site. An
+// unwrapped `Poseidon2` is recognized and serviced the same way.
 
 template TACEO_PRECOMPUTATION_Poseidon2(T) {
     signal input in[T];

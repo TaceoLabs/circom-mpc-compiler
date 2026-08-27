@@ -178,10 +178,10 @@ prove_and_verify_test!(constants_test);
 prove_and_verify_test!(babycheck_test);
 prove_and_verify_test!(control_flow);
 
-prove_and_verify_test!(accelerator_poseidon2_test);
-prove_and_verify_test!(accelerator_num2bits_test);
-prove_and_verify_test!(accelerator_iszero_test);
-prove_and_verify_test!(accelerator_aliascheck_test);
+prove_and_verify_test!(gadget_poseidon2_test);
+prove_and_verify_test!(gadget_num2bits_test);
+prove_and_verify_test!(gadget_iszero_test);
+prove_and_verify_test!(gadget_aliascheck_test);
 
 /// The split itself, against the plain driver - isolates a bad `n_pub` from a networking or proving
 /// problem if a prove+verify test above ever fails.

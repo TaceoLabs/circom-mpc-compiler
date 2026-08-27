@@ -19,10 +19,10 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         return Ok(false);
     }
 
-    // Network level per (old-space) value. Crossing a shared accelerator site advances the
+    // Network level per (old-space) value. Crossing a shared gadget site advances the
     // axis; a public result remains at its producer's level and relies on preserved source order
     // within that bucket. Feeding the existing domain table into both computations keeps round
-    // scheduling and accelerator batch planning on the same cost model.
+    // scheduling and gadget batch planning on the same cost model.
     let domains = compute_domains(graph);
     let depth = super::level::network_levels(graph, &domains);
 
@@ -106,7 +106,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
 #[cfg(test)]
 mod tests {
     use crate::ir::{
-        AcceleratorId, AcceleratorKind, AcceleratorSite, Node, Op, SignalIdx, ValueId,
+        GadgetId, GadgetKind, GadgetSite, Node, Op, SignalIdx, ValueId,
     };
 
     use super::*;
@@ -115,7 +115,7 @@ mod tests {
         graph_with_sites(nodes, output, vec![])
     }
 
-    fn graph_with_sites(nodes: Vec<Node>, output: ValueId, sites: Vec<AcceleratorSite>) -> Graph {
+    fn graph_with_sites(nodes: Vec<Node>, output: ValueId, sites: Vec<GadgetSite>) -> Graph {
         Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(graph.rounds()[0].len, 2);
     }
 
-    /// A accelerator site whose inputs are *computed* rather than bare `Op::Input`s must be
+    /// A gadget site whose inputs are *computed* rather than bare `Op::Input`s must be
     /// placed strictly after the level that produces those inputs, or the rebuild below would visit
     /// the site before the values it reads (a real panic: `round_schedule: input not yet placed`).
     /// This is the shape `circuits/merces/merces/dependencies/merkle_root_4.circom` has -
@@ -181,18 +181,18 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]), // 2: a*b (round 0)
             // The site consumes a value that only exists after round 0.
             Node::new(
-                Op::Accelerator(AcceleratorId::new(0)),
+                Op::Gadget(GadgetId::new(0)),
                 vec![ValueId::new(2)],
             ), // 3
-            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
             // ... and its result feeds a further product, which therefore needs its own round.
             Node::new(Op::Mul, vec![ValueId::new(4), ValueId::new(0)]), // 5
         ];
         let mut graph = graph_with_sites(
             nodes,
             ValueId::new(5),
-            vec![AcceleratorSite {
-                kind: AcceleratorKind::IsZero,
+            vec![GadgetSite {
+                kind: GadgetKind::IsZero,
                 header: "IsZero_0".to_owned(),
                 num_inputs: 1,
                 num_outputs: 1,
@@ -221,21 +221,21 @@ mod tests {
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
             Node::new(
-                Op::Accelerator(AcceleratorId::new(0)),
+                Op::Gadget(GadgetId::new(0)),
                 vec![ValueId::new(0)],
             ), // 2: A
-            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(2)]), // 3: A.result
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3: A.result
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: early consumer
             Node::new(
-                Op::Accelerator(AcceleratorId::new(1)),
+                Op::Gadget(GadgetId::new(1)),
                 vec![ValueId::new(1)],
             ), // 5: B
-            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(5)]), // 6: B.result
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6: B.result
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(6)]), // 7: output
         ];
         let sites = (0..2)
-            .map(|site| AcceleratorSite {
-                kind: AcceleratorKind::IsZero,
+            .map(|site| GadgetSite {
+                kind: GadgetKind::IsZero,
                 header: format!("IsZero_{site}"),
                 num_inputs: 1,
                 num_outputs: 1,
@@ -252,7 +252,7 @@ mod tests {
         let later_site = graph
             .nodes()
             .iter()
-            .position(|node| matches!(&node.op, Op::Accelerator(site) if site.index() == 1))
+            .position(|node| matches!(&node.op, Op::Gadget(site) if site.index() == 1))
             .unwrap();
         let first_consumer = graph
             .nodes()
@@ -267,7 +267,7 @@ mod tests {
         // This used to fail the batch anchor/deadline check in codegen.
         graph.mark_lowered();
         let program = crate::codegen::compile(&graph).unwrap();
-        assert_eq!(program.accelerator_batches().len(), 1);
+        assert_eq!(program.gadget_batches().len(), 1);
     }
 
     /// A deep chain exercises one distinct network level per round. Reconstruction must visit each

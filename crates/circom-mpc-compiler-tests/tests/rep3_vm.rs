@@ -27,13 +27,13 @@ fn config() -> CompilerConfig {
 /// `PlainDriver` cannot detect a mis-ordered batch (its `reshare` is the identity and slots start
 /// zeroed); against three real parties the same bug deadlocks or diverges.
 #[test]
-fn staged_acceleration_matches_the_plain_driver_under_rep3() {
+fn staged_gadget_matches_the_plain_driver_under_rep3() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_staged_test"), config()).unwrap();
+        CoCircomCompiler::compile(circuit_path("gadget_staged_test"), config()).unwrap();
     assert_eq!(
-        program.statistics().accelerator_batches,
+        program.statistics().gadget_batches,
         2,
         "the fixture must actually be staged for this test to mean anything"
     );
@@ -57,11 +57,11 @@ fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_iszero_reveal_test"), config())
+        CoCircomCompiler::compile(circuit_path("gadget_iszero_reveal_test"), config())
             .unwrap();
-    assert_eq!(program.statistics().accelerator_batches, 1);
+    assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
-    assert_eq!(program.statistics().accelerator_sites, 2);
+    assert_eq!(program.statistics().gadget_sites, 2);
 
     let values = [Fr::from(0u64), Fr::from(7u64)];
     let plain = {
@@ -76,11 +76,11 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_isequal_reveal_test"), config())
+        CoCircomCompiler::compile(circuit_path("gadget_isequal_reveal_test"), config())
             .unwrap();
-    assert_eq!(program.statistics().accelerator_batches, 1);
+    assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
-    assert_eq!(program.statistics().accelerator_sites, 3);
+    assert_eq!(program.statistics().gadget_sites, 3);
 
     for (values, expected) in [
         (
@@ -115,7 +115,7 @@ fn fused_iszero_reveal_costs_one_online_round() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_iszero_reveal_test"), config())
+        CoCircomCompiler::compile(circuit_path("gadget_iszero_reveal_test"), config())
             .unwrap();
     let (_, _, online) = run_witness_counted(&program, &[Fr::from(0u64), Fr::from(7u64)]);
     assert_eq!(online, [1, 1, 1]);
@@ -126,7 +126,7 @@ fn three_fused_isequal_reveal_sites_cost_one_online_round() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("accelerator_isequal_reveal_test"), config())
+        CoCircomCompiler::compile(circuit_path("gadget_isequal_reveal_test"), config())
             .unwrap();
     let values = [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)];
     let (_, _, online) = run_witness_counted(&program, &values);
@@ -149,13 +149,13 @@ fn wide_round_vector_products_match_the_plain_driver() {
 }
 
 #[test]
-fn all_public_acceleration_uses_the_plain_path_under_rep3() {
+fn all_public_gadget_uses_the_plain_path_under_rep3() {
     use circom_mpc_compiler::OptLevel;
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::compile(circuit_path("accelerator_public_test"), cfg).unwrap();
+    let program = CoCircomCompiler::compile(circuit_path("gadget_public_test"), cfg).unwrap();
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
@@ -183,7 +183,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
     // One ordinary shared multiplication round and no Poseidon2 service: preparing either driver
     // must be communication-free, while a successful execution costs exactly one round.
     let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
-    assert_eq!(program.statistics().accelerator_batches, 0);
+    assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
     let networks: Vec<_> = LocalNetwork::new(3)
@@ -280,7 +280,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
     }
 
     let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
-    assert_eq!(program.statistics().accelerator_batches, 0);
+    assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
     let networks: Vec<_> = LocalNetwork::new(3)
@@ -368,7 +368,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
 /// entirely, which is the whole point of `TACEO_PRECOMPUTATION_Poseidon2`. The precompute phase
 /// still pays for the permutation once (3 preprocessing + `8 + partial_rounds(t)` online), but the
 /// proof run's own online round count for it drops to zero, and the reconstructed witness still
-/// matches the ordinary accelerated `Poseidon2` circuit run under `PlainDriver`.
+/// matches the ordinary driver-serviced `Poseidon2` circuit run under `PlainDriver`.
 #[test]
 fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
     use circom_mpc_vm::GadgetPrecomputation;
@@ -381,7 +381,7 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let baseline =
-            CoCircomCompiler::compile(circuit_path("accelerator_poseidon2_test"), config())
+            CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config())
                 .unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
         Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()

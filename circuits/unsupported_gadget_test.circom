@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-// A gadget this compiler has no accelerator implementation for (only Poseidon2, Num2Bits, IsZero,
+// A gadget this compiler has no native implementation for (only Poseidon2, Num2Bits, IsZero,
 // AliasCheck and TACEO_REVEAL are recognized, matched by their own circom name - see
 // `handle_create_cmp_bucket` in `frontend/build.rs`). An unrecognized name just compiles its body
 // like any ordinary template - `Doubler`'s body is deliberately pure Add/Sub/Mul so that succeeds

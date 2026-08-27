@@ -1,12 +1,12 @@
-//! Which accelerator gadget a compiler-side `AcceleratorSite` runs, and how many result slots
+//! Which gadget a compiler-side `GadgetSite` runs, and how many result slots
 //! it produces. Lives in this crate (rather than `circom-mpc-compiler::ir`) because `Program`'s
 //! own instruction/batch types and its on-disk format both need it, and this crate has no
 //! dependency on the compiler.
 
-/// Which accelerator gadget a `AcceleratorSite` runs. Resolved from the instantiated template's
+/// Which gadget a `GadgetSite` runs. Resolved from the instantiated template's
 /// name in the compiler's `frontend::build::handle_create_cmp_bucket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AcceleratorKind {
+pub enum GadgetKind {
     /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 8, 12, 16}`).
     Poseidon2 { t: usize },
     /// Bit decomposition of one field element into `n` bits.
@@ -17,19 +17,19 @@ pub enum AcceleratorKind {
     AliasCheck,
     /// Declassifies `n` values: opens them to every MPC party in the clear if they were `Shared`,
     /// or is the identity if they were already `Public`. A genuine MPC event, not deterministic
-    /// local work - see the compiler's `passes::mpc::level`'s re-keyed `AcceleratorResult` rule for
+    /// local work - see the compiler's `passes::mpc::level`'s re-keyed `GadgetResult` rule for
     /// how a `Reveal` site still charges a network level exactly when its own input was `Shared`,
     /// even though its result's *domain* is unconditionally `Public`.
     Reveal { n: usize },
 }
 
-impl AcceleratorKind {
+impl GadgetKind {
     /// How many result slots (`num_outputs + num_intermediates`) this gadget produces. Every kind
     /// has a closed form independent of its own implementation - the compiler's `Graph::verify`
     /// and `frontend/inline.rs` cross-check it against the circom-derived count from
     /// `frontend/mod.rs::compute_signal_spans`, so a trace-layout mistake is a compile-time error
     /// instead of a silently wrong witness.
-    pub fn expected_results(self) -> Option<usize> {
+    pub fn expected_results(self) -> usize {
         match self {
             // Mirrors the template structure of `circuits/libs/taceo/poseidon2.circom`:
             //   Poseidon2(t) = [out[t]][in[t]][state[(9+pr)][t]]
@@ -38,7 +38,7 @@ impl AcceleratorKind {
             // than in `circom-mpc-vm::gadgets` so both crates that need it (this one, for the wire
             // format; the vm crate's gadgets, unit-tested against this for every supported width)
             // depend on it instead of on each other.
-            AcceleratorKind::Poseidon2 { t } => {
+            GadgetKind::Poseidon2 { t } => {
                 // `amount_partial_rounds` in poseidon2_constants.circom.
                 let pr = if t <= 4 { 56 } else { 57 };
                 // Acc(n) = [out][in[n]][sums[n]]
@@ -72,20 +72,20 @@ impl AcceleratorKind {
                 //                + Sbox_e(4) + InternalMatMulT.
                 let partial = (2 * t + 3) + 4 + immt(t);
                 let total = 2 * t + (9 + pr) * t + emmt(t) + 8 * full + pr * partial;
-                Some(total - t)
+                total - t
             }
             // n output bits, no intermediates.
-            AcceleratorKind::Num2Bits { n } => Some(n),
+            GadgetKind::Num2Bits { n } => n,
             // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
-            AcceleratorKind::IsZero => Some(2),
+            GadgetKind::IsZero => 2,
             // No outputs. AliasCheck's subtree is its CompConstant subcomponent: 254 input-signal
             // copies + 1 output = 255, + 127 `parts` + 1 `sout`, + CompConstant's child
             // Num2Bits(135) (1 input + 135 bits = 136). Cross-checked directly against
             // `circuits/libs/{aliascheck,compconstant}.circom`.
-            AcceleratorKind::AliasCheck => Some(255 + 127 + 1 + 136),
+            GadgetKind::AliasCheck => 255 + 127 + 1 + 136,
             // n outputs, no intermediates - a `TACEO_REVEAL(n)` site's own signal layout is exactly
             // `[in[n]][out[n]]`, and result slots skip the site's own inputs.
-            AcceleratorKind::Reveal { n } => Some(n),
+            GadgetKind::Reveal { n } => n,
         }
     }
 }

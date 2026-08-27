@@ -130,8 +130,8 @@ fn main() -> eyre::Result<()> {
         stats.multiplication_rounds, stats.multiplication_elements
     );
     eprintln!(
-        "  accelerator: {} sites -> {} batches ({} host-precomputed)",
-        stats.accelerator_sites, stats.accelerator_batches, stats.precomputed_batches
+        "  gadget: {} sites -> {} batches ({} host-precomputed)",
+        stats.gadget_sites, stats.gadget_batches, stats.precomputed_batches
     );
 
     program.write(&mut BufWriter::new(

@@ -1,6 +1,6 @@
 //! `IsZero`: `out = 1` iff `in == 0`, plus `inv` (the helper `circuits/libs/comparators.circom`
 //! needs to constrain it: `inv <-- in!=0 ? 1/in : 0`, `out <== -in*inv + 1`). See
-//! `ir::AcceleratorKind::IsZero`.
+//! `ir::GadgetKind::IsZero`.
 
 use ark_bn254::Fr;
 use ark_ff::{Field, One, Zero};
@@ -17,8 +17,8 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
     }
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Accelerator`)
-/// (the same technique the co-snarks accelerator uses, `circom-mpc-vm/src/accelerator.rs`'s
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`)
+/// (the same technique the co-snarks gadget uses, `circom-mpc-vm/src/gadget.rs`'s
 /// `register_iszero`, generalized from one value to a batch): convert every input to binary with
 /// the strategy selected on `Rep3State`, test the binary shares for zero, and inject the result
 /// back into arithmetic sharing. Masking `in` by `is_zero` before inverting avoids ever inverting

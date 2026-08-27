@@ -4,7 +4,7 @@
 //! Every scenario (real protocol inputs, see `fixtures`) compiles under both server mains, runs
 //! under `PlainDriver` and under real 3-party `Rep3Driver`, and the two witnesses must agree -
 //! the strongest check available without external artifacts, since `PlainDriver` cannot detect a
-//! mis-ordered accelerator batch (its `reshare` is the identity) while three real parties
+//! mis-ordered gadget batch (its `reshare` is the identity) while three real parties
 //! either deadlock or diverge. With `inputs/zkey/<main>.arks.zkey` present (gitignored, too large
 //! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
 //!
@@ -137,8 +137,8 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
 fn batching_collapses_many_sites_into_few_driver_calls() {
     for main in ["transfer_arity4_batch1", "transfer_arity4_batch8"] {
         let (program, _) = compiled(main);
-        let sites = program.statistics().accelerator_sites;
-        let shared_batches = program.statistics().shared_accelerator_batches;
+        let sites = program.statistics().gadget_sites;
+        let shared_batches = program.statistics().shared_gadget_batches;
         assert!(
             sites > 50,
             "{main}: expected a site-heavy circuit, got {sites}"

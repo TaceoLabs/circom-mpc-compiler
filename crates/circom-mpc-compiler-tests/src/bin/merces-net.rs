@@ -224,8 +224,8 @@ fn bench_batch(
         graph.num_inputs,
         graph.num_outputs,
         summary.rounds,
-        summary.accelerator_sites,
-        summary.accelerator_batches,
+        summary.gadget_sites,
+        summary.gadget_batches,
     );
 
     let t = Instant::now();

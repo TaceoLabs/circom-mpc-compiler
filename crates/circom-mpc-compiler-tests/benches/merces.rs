@@ -47,8 +47,8 @@ fn prepare(n: usize) -> (Program, Vec<Fr>) {
         summary.rounds,
         summary.reshare_elements,
         summary.max_slots_per_round.unwrap_or(0),
-        summary.accelerator_sites,
-        summary.accelerator_batches,
+        summary.gadget_sites,
+        summary.gadget_batches,
         program.statistics().instructions,
     );
     (program, values)
