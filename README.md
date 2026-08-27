@@ -1,5 +1,16 @@
 # circom-mpc-compiler
 
+A Cargo workspace of three crates:
+
+- `circom-mpc-program` — the compiled program representation (`Program`, `PrecomputeKind`) and its
+  binary format (`Program::write`/`Program::read`). No dependency on the compiler or the VM.
+- `circom-mpc-vm` — the bytecode VM (`Machine::run`) and drivers (plain, rep3). Depends only on
+  `circom-mpc-program`; a downstream crate that only needs to load and run a compiled program
+  depends on this crate alone.
+- `circom-mpc-compiler` — parses circom source into the IR, lowers it through the MPC passes, and
+  compiles it to a `circom-mpc-program::Program` (`CoCircomCompiler::compile`). Depends on both of
+  the above, plus the circom parser/compiler crates.
+
 ## Security boundary and deferred hardening
 
 The current deployment is focused on Merces and treats the circuit source, compiled VM program,

@@ -1,81 +1,31 @@
-[package]
-name = "circom-mpc-compiler"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
 
-[dependencies]
+[workspace.dependencies]
 ark-bn254 = "0.5"
 ark-ff = "0.5"
 ark-serialize = { version = "0.5", features = ["derive", "std"] }
-circom-type_analysis = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "type_analysis", rev = "1cc17fb" }
-circom-constraint_generation = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "constraint_generation", rev = "1cc17fb" }
-circom-parser = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "parser", rev = "1cc17fb" }
-circom-compiler = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "compiler", rev = "1cc17fb" }
-circom-program_structure = { version = "2.1.9", git = "https://github.com/TaceoLabs/circom", package = "program_structure", rev = "1cc17fb" }
+circom-compiler = { package = "compiler", git = "https://github.com/TaceoLabs/circom", rev = "1cc17fb", version = "2.1.9" }
+circom-constraint_generation = { package = "constraint_generation", git = "https://github.com/TaceoLabs/circom", rev = "1cc17fb", version = "2.1.9" }
+circom-parser = { package = "parser", git = "https://github.com/TaceoLabs/circom", rev = "1cc17fb", version = "2.1.9" }
+circom-program_structure = { package = "program_structure", git = "https://github.com/TaceoLabs/circom", rev = "1cc17fb", version = "2.1.9" }
+circom-type_analysis = { package = "type_analysis", git = "https://github.com/TaceoLabs/circom", rev = "1cc17fb", version = "2.1.9" }
+circom-types = { package = "taceo-circom-types", version = "0.2" }
+clap = { version = "4.5", features = ["derive"] }
+co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.6.0" }
+co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0" }
+criterion = "0.5"
 eyre = "0.6.12"
+mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0" }
+mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.5.0" }
 num-bigint = { version = "0.4.6" }
 num-traits = { version = "0.2.18", default-features = false }
-rayon = "1.8.1"
+rand = { version = "0.8.5" }
+rustc-hash = "2"
+rustls = { version = "0.23" }
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
+toml = { version = "0.8" }
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-rustc-hash = "2"
-mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0", optional = true }
-mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.5.0", features = ["local"], optional = true }
-clap = { version = "4.5", features = ["derive"], optional = true }
-rand = { version = "0.8.5", optional = true }
-toml = { version = "0.8", optional = true }
-rustls = { version = "0.23", optional = true }
-
-[features]
-default = ["rep3", "round-counting"]
-rep3 = ["dep:mpc-core", "dep:mpc-net", "dep:rand"]
-# Instruments the rep3 network (`vm::counting_net::CountingNet`) to count rounds and bytes.
-# Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
-# wrapper is a thin delegating decorator, two relaxed atomics per send/recv.
-round-counting = ["rep3"]
-# The `merces-net` binary: real rep3 witness extension across three processes over a genuine TLS
-# network, as opposed to every other rep3 test/example/bench, which uses the in-process
-# `mpc_net::local::LocalNetwork`. Non-default: pulls in mpc-net's `tls` backend plus
-# clap/rand/toml/rustls, none of which the library itself needs.
-net = ["round-counting", "mpc-net/tls", "dep:clap", "dep:rand", "dep:toml", "dep:rustls"]
-
-[[bin]]
-name = "merces-net"
-required-features = ["net"]
-
-[dev-dependencies]
-rand = "0.8.5"
-# `groth16::Zkey`/`groth16::ArkZkey` (proving-key parsing, used by tests/proving.rs and the merces
-# end-to-end test). Aliased the same way co-snarks itself aliases it, so the type paths match its docs.
-circom-types = { package = "taceo-circom-types", version = "0.2" }
-# Converting this VM's native witness into co-snarks' `SharedWitness`, so a co-groth16 proof can be
-# produced from it. Dev-only: proving is exercised by tests and examples, not the library itself.
-co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.6.0" }
-# The proving side of tests/proving.rs, tests/merces.rs, and examples/merces.rs. `verifier` is
-# non-default there, and verifying is the whole point of these.
-co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "cb6d363", version = "0.10.0", features = ["verifier"] }
-criterion = "0.5"
-
-# Benches need the merces link libraries and the `fixtures` input builder; both come from the crate
-# itself, so no extra features beyond the default `rep3` (which `Rep3Driver` needs).
-[[bench]]
-name = "witness_extension"
-harness = false
-required-features = ["rep3"]
-
-[[bench]]
-name = "compile"
-harness = false
-
-# Batch-size scaling sweep for the merces server mains; see benches/merces.rs.
-[[bench]]
-name = "merces"
-harness = false
-required-features = ["rep3"]
-
-# Runs the circuits across three real rep3 parties.
-[[example]]
-name = "merces"
-required-features = ["round-counting"]

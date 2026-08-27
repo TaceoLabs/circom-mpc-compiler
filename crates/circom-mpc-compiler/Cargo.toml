@@ -1,0 +1,82 @@
+[package]
+name = "circom-mpc-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "merces-net"
+path = "src/bin/merces-net.rs"
+required-features = ["net"]
+
+# Runs the circuits across three real rep3 parties.
+[[example]]
+name = "merces"
+required-features = ["round-counting"]
+
+# Benches need the merces link libraries and the `fixtures` input builder; both come from the crate
+# itself, so no extra features beyond the default `rep3` (which `Rep3Driver` needs).
+[[bench]]
+harness = false
+name = "witness_extension"
+required-features = ["rep3"]
+
+[[bench]]
+harness = false
+name = "compile"
+
+# Batch-size scaling sweep for the merces server mains; see benches/merces.rs.
+[[bench]]
+harness = false
+name = "merces"
+required-features = ["rep3"]
+
+[dependencies]
+ark-bn254.workspace = true
+ark-ff.workspace = true
+circom-compiler.workspace = true
+circom-constraint_generation.workspace = true
+circom-mpc-program = { path = "../circom-mpc-program" }
+circom-mpc-vm = { path = "../circom-mpc-vm", default-features = false }
+circom-parser.workspace = true
+circom-program_structure.workspace = true
+circom-type_analysis.workspace = true
+clap = { workspace = true, optional = true }
+eyre.workspace = true
+mpc-core = { workspace = true, optional = true }
+mpc-net = { workspace = true, features = ["local"], optional = true }
+num-bigint.workspace = true
+num-traits.workspace = true
+rand = { workspace = true, optional = true }
+rustc-hash.workspace = true
+rustls = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json.workspace = true
+toml = { workspace = true, optional = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+ark-serialize.workspace = true
+circom-mpc-vm = { path = "../circom-mpc-vm" }
+# `groth16::Zkey`/`groth16::ArkZkey` (proving-key parsing, used by tests/proving.rs and the merces
+# end-to-end test). Aliased the same way co-snarks itself aliases it, so the type paths match its docs.
+circom-types.workspace = true
+# Converting this VM's native witness into co-snarks' `SharedWitness`, so a co-groth16 proof can be
+# produced from it. Dev-only: proving is exercised by tests and examples, not the library itself.
+co-circom-types.workspace = true
+co-groth16 = { workspace = true, features = ["verifier"] }
+criterion.workspace = true
+rand.workspace = true
+
+[features]
+default = ["rep3", "round-counting"]
+# The `merces-net` binary: real rep3 witness extension across three processes over a genuine TLS
+# network, as opposed to every other rep3 test/example/bench, which uses the in-process
+# `mpc_net::local::LocalNetwork`. Non-default: pulls in mpc-net's `tls` backend plus
+# clap/rand/toml/rustls, none of which the library itself needs.
+net = ["dep:clap", "dep:rand", "dep:rustls", "dep:toml", "mpc-net/tls", "round-counting"]
+rep3 = ["circom-mpc-vm/rep3", "dep:mpc-core", "dep:mpc-net", "dep:rand"]
+# Instruments the rep3 network (`circom_mpc_vm::counting_net::CountingNet`) to count rounds and
+# bytes. Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable -
+# the wrapper is a thin delegating decorator, two relaxed atomics per send/recv.
+round-counting = ["circom-mpc-vm/round-counting", "rep3"]

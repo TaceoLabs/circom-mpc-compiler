@@ -1,0 +1,26 @@
+[package]
+name = "circom-mpc-vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-bn254.workspace = true
+ark-ff.workspace = true
+circom-mpc-program = { path = "../circom-mpc-program/" }
+eyre.workspace = true
+mpc-core = { workspace = true, optional = true }
+mpc-net = { workspace = true, features = ["local"], optional = true }
+num-bigint.workspace = true
+num-traits.workspace = true
+rand = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand.workspace = true
+
+[features]
+default = ["rep3", "round-counting"]
+rep3 = ["dep:mpc-core", "dep:mpc-net", "dep:rand"]
+# Instruments the rep3 network (`counting_net::CountingNet`) to count rounds and bytes.
+# Default-on because it is what makes the round claims in docs/ARCHITECTURE.md falsifiable - the
+# wrapper is a thin delegating decorator, two relaxed atomics per send/recv.
+round-counting = ["rep3"]

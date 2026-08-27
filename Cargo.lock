@@ -822,6 +822,8 @@ dependencies = [
  "ark-bn254",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
+ "circom-mpc-program",
+ "circom-mpc-vm",
  "clap",
  "co-circom-types",
  "co-groth16",
@@ -836,7 +838,6 @@ dependencies = [
  "parser",
  "program_structure",
  "rand 0.8.5",
- "rayon",
  "rustc-hash",
  "rustls",
  "serde",
@@ -846,6 +847,31 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.18",
  "type_analysis",
+]
+
+[[package]]
+name = "circom-mpc-program"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "ark-serialize 0.5.0",
+ "eyre",
+]
+
+[[package]]
+name = "circom-mpc-vm"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "circom-mpc-program",
+ "eyre",
+ "mpc-core",
+ "mpc-net",
+ "num-bigint 0.4.6",
+ "num-traits",
+ "rand 0.8.5",
 ]
 
 [[package]]
