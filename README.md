@@ -52,3 +52,18 @@ cargo run --release -p circom-mpc-compiler-tests --example merces
 scripts/run-merces-net.sh --runs 5      # rep3 witness extension over a genuine 3-process TLS network
                                          # (needs configs/ + data/ supplied - see the script)
 ```
+
+## CLI
+
+`circom-mpc-compiler` builds a `circom-mpc-compile` binary (feature `cli`) that compiles a circom
+file to a `circom-mpc-program::Program` file:
+
+```
+cargo run --release -p circom-mpc-compiler --features cli -- \
+    circuits/merces/main/transfer_arity4_batch1.circom \
+    -l circuits/libs/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
+```
+
+`cargo install --path crates/circom-mpc-compiler --features cli` installs it. `--config <toml>`
+loads a `CompilerConfig` (see `crates/circom-mpc-compiler/src/lib.rs`); CLI flags apply on top of
+it. Run with `--help` for the full flag list.

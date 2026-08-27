@@ -839,6 +839,7 @@ dependencies = [
  "ark-bn254",
  "ark-ff 0.5.0",
  "circom-mpc-program",
+ "clap",
  "compiler",
  "constraint_generation",
  "eyre",
@@ -848,7 +849,9 @@ dependencies = [
  "program_structure",
  "rustc-hash",
  "serde",
+ "toml",
  "tracing",
+ "tracing-subscriber 0.3.18",
  "type_analysis",
 ]
 

@@ -12,9 +12,20 @@ circom-mpc-program = { path = "../circom-mpc-program" }
 circom-parser.workspace = true
 circom-program_structure.workspace = true
 circom-type_analysis.workspace = true
+clap = { workspace = true, optional = true }
 eyre.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true }
+toml = { workspace = true, optional = true }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+cli = ["dep:clap", "dep:toml", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "circom-mpc-compile"
+path = "src/main.rs"
+required-features = ["cli"]
