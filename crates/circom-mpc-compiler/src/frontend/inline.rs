@@ -14,8 +14,8 @@
 
 use rustc_hash::FxHashMap;
 
-use super::build::{PrecomputedInstance, SubGraphInstance, TemplateGraph, TemplateOp};
-use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
+use super::build::{AcceleratedInstance, SubGraphInstance, TemplateGraph, TemplateOp};
+use crate::ir::{self, AcceleratorId, AcceleratorSite, Op, SignalIdx, ValueId};
 
 /// Recursively inlines `template` (at the given `signal_offset` in the enclosing circuit's flat
 /// signal space) into `nodes`/`outputs`. `is_root` identifies main independently of that numeric
@@ -23,7 +23,7 @@ use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
 /// too). `input_mapping` carries the values the *caller* stored into this template's own input
 /// ports (empty for main, which has no caller).
 ///
-/// `precompute_sites` accumulates one entry per recognized gadget instance encountered anywhere in
+/// `accelerator_sites` accumulates one entry per recognized gadget instance encountered anywhere in
 /// the recursion, in encounter order - that order is the contract the runtime's supplied traces
 /// must follow.
 ///
@@ -32,7 +32,7 @@ use crate::ir::{self, Op, PrecomputeId, PrecomputeSite, SignalIdx, ValueId};
 pub(super) fn inline_template(
     nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
-    precompute_sites: &mut Vec<PrecomputeSite>,
+    accelerator_sites: &mut Vec<AcceleratorSite>,
     template: TemplateGraph,
     signal_offset: usize,
     is_root: bool,
@@ -108,7 +108,7 @@ pub(super) fn inline_template(
                     inline_sub_graph_instance(
                         nodes,
                         outputs,
-                        precompute_sites,
+                        accelerator_sites,
                         instance,
                         signal_offset,
                         &sub_cmp_inputs[sub_cmp],
@@ -135,7 +135,7 @@ pub(super) fn inline_template(
             inline_sub_graph_instance(
                 nodes,
                 outputs,
-                precompute_sites,
+                accelerator_sites,
                 instance,
                 signal_offset,
                 &inputs,
@@ -147,8 +147,8 @@ pub(super) fn inline_template(
 }
 
 /// Dispatches one subcomponent instance to whichever inlining strategy applies: recurse into a
-/// compiled body, or (for a recognized gadget) turn it into a precomputation site instead of
-/// compiling anything - see [`inline_precomputed`].
+/// compiled body, or (for a recognized gadget) turn it into a accelerator site instead of
+/// compiling anything - see [`inline_accelerated`].
 ///
 /// `parent_offset` is the *enclosing* template's own absolute signal offset (the `signal_offset`
 /// `inline_template` was itself called with). Circom's `CreateCmpBucket::signal_offset` - the value
@@ -163,7 +163,7 @@ pub(super) fn inline_template(
 fn inline_sub_graph_instance(
     nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
-    precompute_sites: &mut Vec<PrecomputeSite>,
+    accelerator_sites: &mut Vec<AcceleratorSite>,
     instance: SubGraphInstance,
     parent_offset: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
@@ -175,16 +175,16 @@ fn inline_sub_graph_instance(
         } => inline_template(
             nodes,
             outputs,
-            precompute_sites,
+            accelerator_sites,
             template,
             parent_offset + signal_offset,
             false,
             sub_cmp_inputs,
         ),
-        SubGraphInstance::Precomputed(site) => inline_precomputed(
+        SubGraphInstance::Accelerated(site) => inline_accelerated(
             nodes,
             outputs,
-            precompute_sites,
+            accelerator_sites,
             site,
             parent_offset,
             sub_cmp_inputs,
@@ -192,51 +192,51 @@ fn inline_sub_graph_instance(
     }
 }
 
-/// Turns one recognized gadget instance into an `Op::Precompute` node plus one
-/// `Op::PrecomputeResult` per result slot, instead of recursing into a compiled body. Result
+/// Turns one recognized gadget instance into an `Op::Accelerator` node plus one
+/// `Op::AcceleratorResult` per result slot, instead of recursing into a compiled body. Result
 /// slots `0..num_outputs` are the gadget's own outputs (signals `signal_offset ..`), slots
 /// `num_outputs..` are its subtree's intermediate signals in flat order (signals
 /// `signal_offset + num_outputs + num_inputs ..`).
-fn inline_precomputed(
+fn inline_accelerated(
     nodes: &mut Vec<ir::Node>,
     outputs: &mut Vec<(SignalIdx, ValueId)>,
-    precompute_sites: &mut Vec<PrecomputeSite>,
-    site: PrecomputedInstance,
+    accelerator_sites: &mut Vec<AcceleratorSite>,
+    site: AcceleratedInstance,
     parent_offset: usize,
     sub_cmp_inputs: &FxHashMap<usize, ValueId>,
 ) -> FxHashMap<usize, ValueId> {
-    let PrecomputedInstance {
+    let AcceleratedInstance {
         kind,
         header,
         signal_offset,
         num_inputs,
         num_outputs,
         num_intermediates,
-        injected,
+        precomputed,
     } = site;
     let signal_offset = parent_offset + signal_offset;
     // Cross-checks the circuit's actual signal layout against what the gadget's VM
     // implementation is prepared to produce, for every kind whose result count has a closed form
-    // (Poseidon2's doesn't - see `PrecomputeKind::expected_results`, checked instead at
+    // (Poseidon2's doesn't - see `AcceleratorKind::expected_results`, checked instead at
     // gadget-call time). A mismatch (a widened AliasCheck, a Num2Bits site with intermediates) is
     // a compile-time panic naming the discrepancy, not a silently truncated or garbage witness.
     let actual_results = num_outputs + num_intermediates;
     if let Some(expected) = kind.expected_results() {
         assert_eq!(
             actual_results, expected,
-            "precomputed component `{header}` has {actual_results} result slots (signal layout), \
+            "accelerated component `{header}` has {actual_results} result slots (signal layout), \
              but {kind:?} expects {expected}",
         );
     }
 
-    let site_id = PrecomputeId::new(precompute_sites.len());
-    precompute_sites.push(PrecomputeSite {
+    let site_id = AcceleratorId::new(accelerator_sites.len());
+    accelerator_sites.push(AcceleratorSite {
         kind,
         header,
         num_inputs,
         num_outputs,
         num_intermediates,
-        injected,
+        precomputed,
     });
 
     // The site's inputs, in port order. `TemplateOp::SubCmpInput`'s `port` (and `sub_cmp_inputs`'
@@ -251,7 +251,7 @@ fn inline_precomputed(
             let local_signal = num_outputs + k;
             let value = *sub_cmp_inputs.get(&local_signal).unwrap_or_else(|| {
                 panic!(
-                    "precomputed component input signal {local_signal} read before it was provided"
+                    "accelerated component input signal {local_signal} read before it was provided"
                 )
             });
             outputs.push((SignalIdx::new(signal_offset + local_signal), value));
@@ -259,16 +259,16 @@ fn inline_precomputed(
         })
         .collect();
 
-    let precompute_id = ValueId::new(nodes.len());
-    nodes.push(ir::Node::new(Op::Precompute(site_id), inputs));
+    let accelerator_id = ValueId::new(nodes.len());
+    nodes.push(ir::Node::new(Op::Accelerator(site_id), inputs));
 
     let mut port_outputs = FxHashMap::default();
     for slot in 0..(num_outputs + num_intermediates) {
         let result_id = ValueId::new(nodes.len());
-        let slot_u32 = u32::try_from(slot).expect("precompute site has more than u32::MAX slots");
+        let slot_u32 = u32::try_from(slot).expect("accelerator site has more than u32::MAX slots");
         nodes.push(ir::Node::new(
-            Op::PrecomputeResult(slot_u32),
-            vec![precompute_id],
+            Op::AcceleratorResult(slot_u32),
+            vec![accelerator_id],
         ));
         let signal = if slot < num_outputs {
             port_outputs.insert(slot, result_id);

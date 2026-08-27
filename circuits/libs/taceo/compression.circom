@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "precomputations.circom";
+include "accelerators.circom";
 
 // Public input compression via "hybrid compression" (https://eprint.iacr.org/2025/1500,
 // "Data Matching in Unequal Worlds and Applications to Smart Contracts").
@@ -103,7 +103,7 @@ template Poseidon2SpongeWithDs(N, T) {
             states[p][i] = states[p][i] + in[absorbed + i];
         }
         absorbed += remaining;
-        states[p + 1] = TACEO_PRECOMPUTATION_Poseidon2(T)(states[p]);
+        states[p + 1] = TACEO_ACCELERATOR_Poseidon2(T)(states[p]);
     }
     out <== states[permutations][0];
 }

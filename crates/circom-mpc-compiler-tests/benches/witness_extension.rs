@@ -7,7 +7,7 @@
 //! execution.
 
 use ark_bn254::Fr;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
@@ -98,8 +98,8 @@ fn prepare(case: &Case) -> (Program, Vec<Fr>) {
         summary.rounds,
         summary.reshare_elements,
         summary.max_slots_per_round.unwrap_or(0),
-        summary.precompute_sites,
-        summary.precompute_batches,
+        summary.accelerator_sites,
+        summary.accelerator_batches,
         program.statistics().instructions,
     );
     (program, values)

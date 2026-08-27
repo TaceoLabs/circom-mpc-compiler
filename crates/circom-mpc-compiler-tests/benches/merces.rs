@@ -9,12 +9,12 @@
 
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::rngs::StdRng;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
-use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::CoCircomCompiler;
+use circom_mpc_compiler::codegen;
 use circom_mpc_compiler_tests::fixtures::{merces_config, merces_main_path, rep3::share_inputs};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
@@ -47,8 +47,8 @@ fn prepare(n: usize) -> (Program, Vec<Fr>) {
         summary.rounds,
         summary.reshare_elements,
         summary.max_slots_per_round.unwrap_or(0),
-        summary.precompute_sites,
-        summary.precompute_batches,
+        summary.accelerator_sites,
+        summary.accelerator_batches,
         program.statistics().instructions,
     );
     (program, values)

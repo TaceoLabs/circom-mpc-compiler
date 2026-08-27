@@ -45,11 +45,18 @@ struct Cli {
     /// Shows logs during compilation.
     #[arg(long)]
     verbose: bool,
+    /// Compiles an unwrapped `Poseidon2` template as an ordinary subcomponent instead of cutting
+    /// it into an accelerator site. `TACEO_PRECOMPUTATION_Poseidon2` is unaffected - it is always
+    /// host-precomputed. See `CompilerConfig::accelerate_poseidon2` for a caveat: this only
+    /// compiles if `Poseidon2`'s body avoids circom bucket code this compiler's non-gadget
+    /// frontend doesn't support, which the vendored `poseidon2.circom` does not.
+    #[arg(long)]
+    no_poseidon2_accelerator: bool,
 }
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
@@ -93,6 +100,9 @@ fn build_config(cli: &Cli) -> eyre::Result<CompilerConfig> {
     if cli.verbose {
         config.verbose = true;
     }
+    if cli.no_poseidon2_accelerator {
+        config.accelerate_poseidon2 = false;
+    }
 
     Ok(config)
 }
@@ -131,8 +141,8 @@ fn main() -> eyre::Result<()> {
         stats.multiplication_rounds, stats.multiplication_elements
     );
     eprintln!(
-        "  precompute: {} sites -> {} batches ({} injected)",
-        stats.precompute_sites, stats.precompute_batches, stats.injected_batches
+        "  accelerator: {} sites -> {} batches ({} host-precomputed)",
+        stats.accelerator_sites, stats.accelerator_batches, stats.precomputed_batches
     );
 
     program.write(&mut BufWriter::new(

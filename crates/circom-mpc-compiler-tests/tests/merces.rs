@@ -4,7 +4,7 @@
 //! Every scenario (real protocol inputs, see `fixtures`) compiles under both server mains, runs
 //! under `PlainDriver` and under real 3-party `Rep3Driver`, and the two witnesses must agree -
 //! the strongest check available without external artifacts, since `PlainDriver` cannot detect a
-//! mis-ordered precomputation batch (its `reshare` is the identity) while three real parties
+//! mis-ordered accelerator batch (its `reshare` is the identity) while three real parties
 //! either deadlock or diverge. With `inputs/zkey/<main>.arks.zkey` present (gitignored, too large
 //! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
 //!
@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ark_bn254::{Bn254, Fr};
+use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::ir::InputList;
-use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler_tests::fixtures::{
     self, merces_config, merces_main_path, rep3::run_witness,
 };
@@ -23,8 +23,8 @@ use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::split_witness;
 use circom_mpc_vm::{Machine, Program};
-use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::Rep3State;
+use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_net::local::LocalNetwork;
 
 fn manifest_dir() -> &'static str {
@@ -137,8 +137,8 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
 fn batching_collapses_many_sites_into_few_driver_calls() {
     for main in ["transfer_arity4_batch1", "transfer_arity4_batch8"] {
         let (program, _) = compiled(main);
-        let sites = program.statistics().precompute_sites;
-        let shared_batches = program.statistics().shared_precompute_batches;
+        let sites = program.statistics().accelerator_sites;
+        let shared_batches = program.statistics().shared_accelerator_batches;
         assert!(
             sites > 50,
             "{main}: expected a site-heavy circuit, got {sites}"

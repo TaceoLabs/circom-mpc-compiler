@@ -1,6 +1,6 @@
 //! `Num2Bits(n)`: bit-decomposes one field element into `n` bits, least-significant first -
 //! `out[i] = (in >> i) & 1` (`circuits/libs/bitify.circom`). No intermediates: `n` outputs, and
-//! nothing else - see `ir::PrecomputeKind::Num2Bits`.
+//! nothing else - see `ir::AcceleratorKind::Num2Bits`.
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, One, PrimeField, Zero};

@@ -6,14 +6,14 @@ use ark_bn254::Fr;
 use ark_ff::{One, Zero};
 
 use circom_mpc_program::{
-    Bank, BatchKind, InputValue, InputValues, Opcode, PrecomputeBatch, PrecomputeKind, Program,
+    AcceleratorBatch, AcceleratorKind, Bank, BatchKind, InputValue, InputValues, Opcode, Program,
     WitnessSource,
 };
 
 use crate::driver::VmDriver;
 
-/// One site's injected trace, shaped like co-snarks' `ComponentAcceleratorOutput` -
-/// `output`/`intermediate` are exactly `PrecomputeSite`'s own outputs and intermediates, so a
+/// One site's precomputed trace, shaped like co-snarks' `ComponentAcceleratorOutput` -
+/// `output`/`intermediate` are exactly `AcceleratorSite`'s own outputs and intermediates, so a
 /// producer never has to reason about the VM's physical slot layout.
 #[derive(Debug, Clone)]
 pub struct SiteTrace<S> {
@@ -30,18 +30,18 @@ impl<S> SiteTrace<S> {
     }
 }
 
-/// A FIFO queue of `BatchKind::Injected` batch traces, one entry per batch in
-/// [`Program::injected_batches`] order. `Machine::run_with_injection` consumes one entry each
-/// time it reaches an injected batch in the instruction stream, and errors if anything is left
+/// A FIFO queue of `BatchKind::PrecomputedPoseidon2` batch traces, one entry per batch in
+/// [`Program::precomputed_batches`] order. `Machine::run_with_precomputation` consumes one entry each
+/// time it reaches an precomputed batch in the instruction stream, and errors if anything is left
 /// over once the run finishes - the same "supplied exactly what was consumed" contract
 /// `Rep3Poseidon2Preprocessing::ensure_consumed` enforces for the driver-serviced Poseidon2 mask
 /// pool.
 #[derive(Debug, Clone)]
-pub struct GadgetInjection<S> {
+pub struct GadgetPrecomputation<S> {
     batches: std::collections::VecDeque<Vec<SiteTrace<S>>>,
 }
 
-impl<S> GadgetInjection<S> {
+impl<S> GadgetPrecomputation<S> {
     pub fn new() -> Self {
         Self {
             batches: std::collections::VecDeque::new(),
@@ -49,7 +49,7 @@ impl<S> GadgetInjection<S> {
     }
 
     /// Queues one batch's traces, one [`SiteTrace`] per site, in the same site order as the
-    /// batch's `PrecomputeBatch`.
+    /// batch's `AcceleratorBatch`.
     pub fn push_batch(&mut self, sites: Vec<SiteTrace<S>>) {
         self.batches.push_back(sites);
     }
@@ -67,7 +67,7 @@ impl<S> GadgetInjection<S> {
     }
 }
 
-impl<S> Default for GadgetInjection<S> {
+impl<S> Default for GadgetPrecomputation<S> {
     fn default() -> Self {
         Self::new()
     }
@@ -112,32 +112,32 @@ impl<D: VmDriver> Drop for RunGuard<'_, D> {
 }
 
 impl Machine {
-    /// Same as [`Machine::run_with_injection`] with an empty injection - errors if the program has
-    /// any `BatchKind::Injected` batch rather than silently producing a zero witness value for it.
+    /// Same as [`Machine::run_with_precomputation`] with an empty precomputation - errors if the program has
+    /// any `BatchKind::PrecomputedPoseidon2` batch rather than silently producing a zero witness value for it.
     pub fn run<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
         program: &Program,
         driver: &mut D,
         inputs: &I,
     ) -> eyre::Result<Vec<D::Share>> {
-        Self::run_with_injection(program, driver, inputs, GadgetInjection::new())
+        Self::run_with_precomputation(program, driver, inputs, GadgetPrecomputation::new())
     }
 
-    /// Like [`Machine::run`], but `injection` supplies the trace for every `TACEO_INJECTED_*`
+    /// Like [`Machine::run`], but `precomputation` supplies the trace for every `TACEO_PRECOMPUTATION_Poseidon2`
     /// site instead of the driver computing it: one [`SiteTrace`] per site, queued batch-by-batch
-    /// in [`Program::injected_batches`] order. Errors if `injection` is short, mismatched, or has
+    /// in [`Program::precomputed_batches`] order. Errors if `precomputation` is short, mismatched, or has
     /// anything left over once the run finishes.
-    pub fn run_with_injection<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
+    pub fn run_with_precomputation<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
         program: &Program,
         driver: &mut D,
         inputs: &I,
-        mut injection: GadgetInjection<D::Share>,
+        mut precomputation: GadgetPrecomputation<D::Share>,
     ) -> eyre::Result<Vec<D::Share>> {
         let inputs = inputs.as_inputs()?;
         // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
         // network error, or panic all spend a one-shot prepared driver.
         driver.begin_run()?;
         let mut guard = RunGuard::<D>::new(driver);
-        let run = Self::run_inner(program, guard.driver(), inputs, &mut injection);
+        let run = Self::run_inner(program, guard.driver(), inputs, &mut precomputation);
         let finish = guard.finish();
         let witness = match (run, finish) {
             (Ok(witness), Ok(())) => Ok(witness),
@@ -148,9 +148,9 @@ impl Machine {
             )),
         }?;
         eyre::ensure!(
-            injection.is_empty(),
-            "GadgetInjection has {} unconsumed batch(es) after the run",
-            injection.len()
+            precomputation.is_empty(),
+            "GadgetPrecomputation has {} unconsumed batch(es) after the run",
+            precomputation.len()
         );
         Ok(witness)
     }
@@ -159,7 +159,7 @@ impl Machine {
         program: &Program,
         driver: &mut D,
         inputs: &[InputValue<D::Share>],
-        injection: &mut GadgetInjection<D::Share>,
+        precomputation: &mut GadgetPrecomputation<D::Share>,
     ) -> eyre::Result<Vec<D::Share>> {
         eyre::ensure!(
             inputs.len() == program.num_inputs(),
@@ -190,7 +190,7 @@ impl Machine {
         let rounds = program.rounds();
         let round_operands = program.round_operands();
         let round_results = program.round_results();
-        let precompute_batches = program.precompute_batches();
+        let accelerator_batches = program.accelerator_batches();
 
         let mut pending_mul_lhs: Vec<D::Share> = Vec::new();
         let mut pending_mul_rhs: Vec<D::Share> = Vec::new();
@@ -260,12 +260,12 @@ impl Machine {
                         shared[round_results[rstart + k] as usize] = r;
                     }
                 }
-                Opcode::Precompute => Self::run_batch(
-                    &precompute_batches[instr.a as usize],
+                Opcode::Accelerator => Self::run_batch(
+                    &accelerator_batches[instr.a as usize],
                     driver,
                     &mut public,
                     &mut shared,
-                    injection,
+                    precomputation,
                 )?,
             }
         }
@@ -303,7 +303,7 @@ impl Machine {
         Ok(witness)
     }
 
-    /// Services one batched precomputation site group at its point in the instruction stream. A
+    /// Services one batched accelerator site group at its point in the instruction stream. A
     /// public batch uses the plain gadget path; a shared batch is one driver call. Interleaving is
     /// required because a site's inputs may be produced by earlier instructions.
     ///
@@ -317,26 +317,26 @@ impl Machine {
     /// template, hence the same real length), so this is never a flat prefix of the whole batch,
     /// which would spill one site's results into the next site's region.
     fn run_batch<D: VmDriver>(
-        batch: &PrecomputeBatch,
+        batch: &AcceleratorBatch,
         driver: &mut D,
         public: &mut [Fr],
         shared: &mut [D::Share],
-        injection: &mut GadgetInjection<D::Share>,
+        precomputation: &mut GadgetPrecomputation<D::Share>,
     ) -> eyre::Result<()> {
         if batch.kind == BatchKind::IsZeroReveal {
             return Self::run_is_zero_reveal_batch(batch, driver, public, shared);
         }
-        if let BatchKind::InjectedPoseidon2 { t } = batch.kind {
-            return Self::run_injected_batch(t, batch, injection, shared);
+        if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
+            return Self::run_precomputed_batch(t, batch, precomputation, shared);
         }
-        let BatchKind::Precompute(kind) = batch.kind else {
-            unreachable!("fused and injected batches handled above")
+        let BatchKind::Accelerator(kind) = batch.kind else {
+            unreachable!("fused and host-precomputed batches handled above")
         };
         // Whether this batch needs a genuine MPC call, rather than inferring it from result targets:
         // for every kind but `Reveal` the two coincide (a site's inputs are all-`Public` exactly
         // when its result stays `Public`), but `Reveal`'s result target is unconditionally `Public`
         // even when its own inputs are `Shared` - that is its entire purpose (see
-        // `PrecomputeKind::Reveal`), and precisely that case still needs a real `driver.open` call.
+        // `AcceleratorKind::Reveal`), and precisely that case still needs a real `driver.open` call.
         let needs_mpc = batch
             .input_slots
             .iter()
@@ -349,12 +349,12 @@ impl Machine {
                 .map(|input| {
                     eyre::ensure!(
                         input.bank == Bank::Public,
-                        "public precompute batch has a non-public input"
+                        "public accelerator batch has a non-public input"
                     );
                     Ok(public[input.slot as usize])
                 })
                 .collect::<eyre::Result<_>>()?;
-            if let PrecomputeKind::Poseidon2 { t } = kind {
+            if let AcceleratorKind::Poseidon2 { t } = kind {
                 let selected = crate::gadgets::poseidon2::plain_trace_requested(
                     t,
                     &inputs,
@@ -384,12 +384,12 @@ impl Machine {
 
         // `Reveal` is the one kind whose MPC path writes into the `Public` bank (a genuine open,
         // rather than a share-producing gadget) - every other kind writes into `Shared`.
-        if let PrecomputeKind::Reveal { .. } = kind {
+        if let AcceleratorKind::Reveal { .. } = kind {
             let opened = driver.open(&inputs)?;
             let selected = Self::select_requests(&opened, batch)?;
             return Self::store_batch_results(batch, selected, Bank::Public, public);
         }
-        if let PrecomputeKind::Poseidon2 { t } = kind {
+        if let AcceleratorKind::Poseidon2 { t } = kind {
             let selected = driver.poseidon2_requested_traces(
                 t,
                 &inputs,
@@ -399,18 +399,18 @@ impl Machine {
             return Self::store_batch_results(batch, selected, Bank::Shared, shared);
         }
         let results = match kind {
-            PrecomputeKind::Poseidon2 { .. } => unreachable!("handled above"),
-            PrecomputeKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
-            PrecomputeKind::IsZero => driver.is_zero_traces(&inputs)?,
-            PrecomputeKind::AliasCheck => driver.alias_check_traces(&inputs)?,
-            PrecomputeKind::Reveal { .. } => unreachable!("handled above"),
+            AcceleratorKind::Poseidon2 { .. } => unreachable!("handled above"),
+            AcceleratorKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
+            AcceleratorKind::IsZero => driver.is_zero_traces(&inputs)?,
+            AcceleratorKind::AliasCheck => driver.alias_check_traces(&inputs)?,
+            AcceleratorKind::Reveal { .. } => unreachable!("handled above"),
         };
         let selected = Self::select_requests(&results, batch)?;
         Self::store_batch_results(batch, selected, Bank::Shared, shared)
     }
 
     fn run_is_zero_reveal_batch<D: VmDriver>(
-        batch: &PrecomputeBatch,
+        batch: &AcceleratorBatch,
         driver: &mut D,
         public: &mut [Fr],
         shared: &mut [D::Share],
@@ -478,40 +478,40 @@ impl Machine {
         Ok(())
     }
 
-    /// Services a `BatchKind::InjectedPoseidon2` batch: instead of calling the driver, pops the
-    /// next queued [`SiteTrace`] group off `injection` and writes it straight into the `Shared`
+    /// Services a `BatchKind::PrecomputedPoseidon2` batch: instead of calling the driver, pops the
+    /// next queued [`SiteTrace`] group off `precomputation` and writes it straight into the `Shared`
     /// bank through the batch's own CSR result table - the same request/target machinery every
     /// other batch kind uses. `Program::validate` already guarantees every result target here is
     /// `Bank::Shared`, so this never touches `public`.
-    fn run_injected_batch<S: Clone>(
+    fn run_precomputed_batch<S: Clone>(
         t: usize,
-        batch: &PrecomputeBatch,
-        injection: &mut GadgetInjection<S>,
+        batch: &AcceleratorBatch,
+        precomputation: &mut GadgetPrecomputation<S>,
         shared: &mut [S],
     ) -> eyre::Result<()> {
         let num_outputs = t;
-        let sites = injection.pop().ok_or_else(|| {
+        let sites = precomputation.pop().ok_or_else(|| {
             eyre::eyre!(
-                "missing injected trace for a Poseidon2{{t={t}}} batch ({} sites) - \
-                 GadgetInjection was exhausted before the run reached it",
+                "missing precomputed trace for a Poseidon2{{t={t}}} batch ({} sites) - \
+                 GadgetPrecomputation was exhausted before the run reached it",
                 batch.sites
             )
         })?;
         eyre::ensure!(
             sites.len() == batch.sites,
-            "injected Poseidon2{{t={t}}} batch was supplied {} site trace(s), expected {}",
+            "precomputed Poseidon2{{t={t}}} batch was supplied {} site trace(s), expected {}",
             sites.len(),
             batch.sites
         );
         eyre::ensure!(
             batch.result_offsets.len() == batch.sites + 1
                 && batch.result_requests.len() == batch.result_targets.len(),
-            "malformed injected batch CSR result table"
+            "malformed precomputed batch CSR result table"
         );
         for (site, trace) in sites.iter().enumerate() {
             eyre::ensure!(
                 trace.output.len() == num_outputs,
-                "injected Poseidon2{{t={t}}} site {site} supplied {} outputs, expected \
+                "precomputed Poseidon2{{t={t}}} site {site} supplied {} outputs, expected \
                  {num_outputs}",
                 trace.output.len()
             );
@@ -519,7 +519,7 @@ impl Machine {
             let hi = batch.result_offsets[site + 1] as usize;
             eyre::ensure!(
                 lo <= hi && hi <= batch.result_requests.len(),
-                "invalid injected batch CSR row"
+                "invalid precomputed batch CSR row"
             );
             for (&logical, target) in batch.result_requests[lo..hi]
                 .iter()
@@ -527,7 +527,7 @@ impl Machine {
             {
                 eyre::ensure!(
                     target.bank == Bank::Shared,
-                    "injected Poseidon2{{t={t}}} result must target Shared"
+                    "precomputed Poseidon2{{t={t}}} result must target Shared"
                 );
                 let logical = logical as usize;
                 let value = if logical < num_outputs {
@@ -536,7 +536,7 @@ impl Machine {
                     let idx = logical - num_outputs;
                     trace.intermediate.get(idx).cloned().ok_or_else(|| {
                         eyre::eyre!(
-                            "injected Poseidon2{{t={t}}} site {site} requested intermediate slot \
+                            "precomputed Poseidon2{{t={t}}} site {site} requested intermediate slot \
                              {idx}, but only {} were supplied",
                             trace.intermediate.len()
                         )
@@ -548,22 +548,22 @@ impl Machine {
         Ok(())
     }
 
-    fn run_plain_batch(kind: PrecomputeKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
+    fn run_plain_batch(kind: AcceleratorKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
         use crate::gadgets::{aliascheck, iszero, num2bits};
 
         Ok(match kind {
-            PrecomputeKind::Poseidon2 { .. } => {
+            AcceleratorKind::Poseidon2 { .. } => {
                 unreachable!("public Poseidon2 takes the requested-trace path in run_batch")
             }
-            PrecomputeKind::Num2Bits { n } => inputs
+            AcceleratorKind::Num2Bits { n } => inputs
                 .iter()
                 .flat_map(|&x| num2bits::plain_trace(x, n))
                 .collect(),
-            PrecomputeKind::IsZero => inputs
+            AcceleratorKind::IsZero => inputs
                 .iter()
                 .flat_map(|&x| iszero::plain_trace(x))
                 .collect(),
-            PrecomputeKind::AliasCheck => {
+            AcceleratorKind::AliasCheck => {
                 eyre::ensure!(
                     inputs.len().is_multiple_of(254),
                     "alias_check_traces: {} inputs is not a multiple of 254",
@@ -576,7 +576,7 @@ impl Machine {
             }
             // An all-public reveal is the identity: every party already holds every input in the
             // clear, so "opening" it changes nothing.
-            PrecomputeKind::Reveal { .. } => inputs.to_vec(),
+            AcceleratorKind::Reveal { .. } => inputs.to_vec(),
         })
     }
 
@@ -584,13 +584,13 @@ impl Machine {
     /// output, flattening site-major. A temporary bridge (,
     /// "Precomputation"): gadgets other than Poseidon2 still compute and return their *full*
     /// per-site trace (`num_outputs + num_intermediates` values), and this filters the
-    /// `PrecomputeBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
+    /// `AcceleratorBatch::result_requests` subset before storing. Poseidon2 consumes this CSR table
     /// directly and bypasses this bridge.
-    fn select_requests<T: Clone>(full: &[T], batch: &PrecomputeBatch) -> eyre::Result<Vec<T>> {
-        eyre::ensure!(batch.sites > 0, "precompute batch has no sites");
+    fn select_requests<T: Clone>(full: &[T], batch: &AcceleratorBatch) -> eyre::Result<Vec<T>> {
+        eyre::ensure!(batch.sites > 0, "accelerator batch has no sites");
         eyre::ensure!(
             full.len().is_multiple_of(batch.sites),
-            "precompute batch ({:?}, {} sites) returned {} results, not an even multiple of \
+            "accelerator batch ({:?}, {} sites) returned {} results, not an even multiple of \
              the site count",
             batch.kind,
             batch.sites,
@@ -606,7 +606,7 @@ impl Machine {
                 let logical = logical as usize;
                 eyre::ensure!(
                     logical < capacity,
-                    "precompute batch ({:?}) requested slot {logical}, exceeding the {capacity} \
+                    "accelerator batch ({:?}) requested slot {logical}, exceeding the {capacity} \
                      the circuit's own signal layout reserves",
                     batch.kind
                 );
@@ -617,14 +617,14 @@ impl Machine {
     }
 
     fn store_batch_results<T>(
-        batch: &PrecomputeBatch,
+        batch: &AcceleratorBatch,
         results: Vec<T>,
         expected_bank: Bank,
         destination: &mut [T],
     ) -> eyre::Result<()> {
         eyre::ensure!(
             results.len() == batch.result_targets.len(),
-            "precompute batch ({:?}) produced {} results, expected exactly {} (one per requested \
+            "accelerator batch ({:?}) produced {} results, expected exactly {} (one per requested \
              slot)",
             batch.kind,
             results.len(),
@@ -633,7 +633,7 @@ impl Machine {
         for (target, value) in batch.result_targets.iter().zip(results) {
             eyre::ensure!(
                 target.bank == expected_bank,
-                "precompute batch ({:?}) result targets mixed banks unexpectedly",
+                "accelerator batch ({:?}) result targets mixed banks unexpectedly",
                 batch.kind
             );
             destination[target.slot as usize] = value;
@@ -764,7 +764,7 @@ mod tests {
             rounds: Vec::new(),
             round_operands: Vec::new(),
             round_results: Vec::new(),
-            precompute_batches: Vec::new(),
+            accelerator_batches: Vec::new(),
             witness_sources: vec![WitnessSource::One],
             num_inputs: 0,
             slots: SlotCounts::default(),

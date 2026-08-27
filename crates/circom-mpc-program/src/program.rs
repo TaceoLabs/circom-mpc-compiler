@@ -1,12 +1,12 @@
 //! The compiled bytecode program: a slot machine over three domain-typed banks (`Public`/
 //! `Shared`/`Local` - the same lattice `passes::mpc::domain` classifies values into), plus the
 //! side tables that carry everything that is program *structure* rather than a per-value
-//! operation - constants, inputs, batched MPC rounds, precomputation sites, and the final signal
+//! operation - constants, inputs, batched MPC rounds, accelerator sites, and the final signal
 //! witness sources.
 
 use ark_bn254::Fr;
 
-use crate::PrecomputeKind;
+use crate::AcceleratorKind;
 
 /// Poseidon2 widths every gadget and the VM's batch-shape validation support (`t` in the
 /// permutation's state size).
@@ -49,14 +49,14 @@ pub enum Opcode {
     /// One batched network round: `a` is an index into [`Program::rounds`]; `dst`/`b` are unused
     /// - a round's operands and results are its own slot lists, not encoded per-instruction.
     Reshare,
-    /// One batched precomputation service: `a` is an index into [`Program::precompute_batches`];
+    /// One batched accelerator service: `a` is an index into [`Program::accelerator_batches`];
     /// `dst`/`b` are unused - a batch's operands and results are its own slot lists, exactly as for
     /// [`Opcode::Reshare`].
     ///
     /// Being a real instruction rather than an out-of-band phase is what lets a site's inputs depend
     /// on earlier instructions - which the merces circuits require, since their Poseidon2 sites chain
     /// through secret multiplications.
-    Precompute,
+    Accelerator,
 }
 
 /// One instruction: a fixed-width `(opcode, dst, a, b)` record. `a`/`b`/`dst` are slot indices
@@ -80,9 +80,9 @@ pub struct RoundEntry {
     pub result_start: u32,
 }
 
-/// One input value of one precomputation site. Carries its bank because a site input is *not*
+/// One input value of one accelerator site. Carries its bank because a site input is *not*
 /// always a share: a circuit may pass a literal, as `circuits/merces/oblivious_vector/hash.circom`
-/// does (`TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()])` - two of those four fold to
+/// does (`TACEO_ACCELERATOR_Poseidon2(4)([value, 0, r, commitDs()])` - two of those four fold to
 /// `Op::Constant`, i.e. `Bank::Public`). `Machine::run` promotes a `Public` slot into a share before
 /// handing the batch to the driver. `Bank::Local` never appears - both `Graph::verify` and codegen
 /// reject an un-reshared `MulLocal` reaching a site.
@@ -95,19 +95,20 @@ pub struct SiteInput {
     pub slot: u32,
 }
 
-/// The service executed by a [`PrecomputeBatch`]. Most batches are a direct runtime realization
-/// of one circuit [`PrecomputeKind`]. `IsZeroReveal` is deliberately VM-only: codegen may fuse the
+/// The service executed by a [`AcceleratorBatch`]. Most batches are a direct runtime realization
+/// of one circuit [`AcceleratorKind`]. `IsZeroReveal` is deliberately VM-only: codegen may fuse the
 /// conservative circuit shape `shared IsZero.out -> Reveal(1)` without changing the graph, R1CS,
 /// witness layout, or proving artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchKind {
-    Precompute(PrecomputeKind),
+    Accelerator(AcceleratorKind),
     /// Computes a zero test's `[out, inv]` shares and the explicitly revealed `out` together.
     IsZeroReveal,
-    /// A `TACEO_INJECTED_Poseidon2` site: the host supplies this batch's trace instead of
-    /// `circom_mpc_vm::gadgets` servicing it. Poseidon2 is the only injectable gadget, and its
-    /// result bank is always `Shared` - see `Machine::run_with_injection`.
-    InjectedPoseidon2 {
+    /// A `TACEO_PRECOMPUTATION_Poseidon2` site: the host supplies this batch's trace instead of
+    /// `circom_mpc_vm::gadgets` servicing it. Poseidon2 is the only gadget that can be
+    /// host-precomputed, and its result bank is always `Shared` - see
+    /// `Machine::run_with_precomputation`.
+    PrecomputedPoseidon2 {
         t: usize,
     },
 }
@@ -121,14 +122,14 @@ pub struct ResultTarget {
     pub slot: u32,
 }
 
-/// Compatible `TACEO_PRECOMPUTATION_*` sites of one [`PrecomputeKind`], domain, and stage, batched
+/// Compatible accelerator sites of one [`AcceleratorKind`], domain, and stage, batched
 /// into a single service. Codegen first keys sites by `(kind, stage, domain)`, then splits a group
 /// when an early consumer closes its anchor/deadline placement window.
 ///
 /// Independent compatible sites normally collapse into one entry. A site may remain alone when its
 /// kind, stage, or domain differs, or when combining it would cross an earlier result deadline.
 #[derive(Debug, Clone)]
-pub struct PrecomputeBatch {
+pub struct AcceleratorBatch {
     pub kind: BatchKind,
     pub sites: usize,
     /// `sites * (this kind's per-site input count)` entries, one site's inputs contiguous, in site
@@ -202,10 +203,10 @@ pub struct Program {
     pub(crate) rounds: Vec<RoundEntry>,
     pub(crate) round_operands: Vec<u32>,
     pub(crate) round_results: Vec<u32>,
-    /// Indexed by [`Opcode::Precompute`]'s `a`. These are **not** run up front: each is serviced at
+    /// Indexed by [`Opcode::Accelerator`]'s `a`. These are **not** run up front: each is serviced at
     /// its own point in the instruction stream, because a site's inputs may depend on earlier
     /// instructions.
-    pub(crate) precompute_batches: Vec<PrecomputeBatch>,
+    pub(crate) accelerator_batches: Vec<AcceleratorBatch>,
     /// One source per final witness entry, already in circom witness order.
     pub(crate) witness_sources: Vec<WitnessSource>,
     pub(crate) num_inputs: usize,
@@ -223,16 +224,16 @@ pub struct ProgramParts {
     pub rounds: Vec<RoundEntry>,
     pub round_operands: Vec<u32>,
     pub round_results: Vec<u32>,
-    pub precompute_batches: Vec<PrecomputeBatch>,
+    pub accelerator_batches: Vec<AcceleratorBatch>,
     pub witness_sources: Vec<WitnessSource>,
     pub num_inputs: usize,
     pub slots: SlotCounts,
 }
 
-/// One `BatchKind::Injected` batch's shape, as reported by [`Program::injected_batches`].
+/// One `BatchKind::PrecomputedPoseidon2` batch's shape, as reported by [`Program::precomputed_batches`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InjectedBatch {
-    pub kind: PrecomputeKind,
+pub struct PrecomputedBatch {
+    pub kind: AcceleratorKind,
     pub sites: usize,
 }
 
@@ -246,14 +247,14 @@ pub struct ProgramStatistics {
     pub local_slots: u32,
     pub multiplication_rounds: usize,
     pub multiplication_elements: usize,
-    pub precompute_batches: usize,
-    pub precompute_sites: usize,
-    pub shared_precompute_batches: usize,
+    pub accelerator_batches: usize,
+    pub accelerator_sites: usize,
+    pub shared_accelerator_batches: usize,
     pub fused_is_zero_reveal_batches: usize,
-    pub public_precompute_results: usize,
-    /// Batches whose trace the host supplies at run time (`BatchKind::Injected`) rather than
+    pub public_accelerator_results: usize,
+    /// Batches whose trace the host supplies at run time (`BatchKind::PrecomputedPoseidon2`) rather than
     /// `vm::gadgets`.
-    pub injected_batches: usize,
+    pub precomputed_batches: usize,
 }
 
 impl Program {
@@ -268,7 +269,7 @@ impl Program {
             rounds: parts.rounds,
             round_operands: parts.round_operands,
             round_results: parts.round_results,
-            precompute_batches: parts.precompute_batches,
+            accelerator_batches: parts.accelerator_batches,
             witness_sources: parts.witness_sources,
             num_inputs: parts.num_inputs,
             slots: parts.slots,
@@ -286,7 +287,7 @@ impl Program {
             rounds: self.rounds,
             round_operands: self.round_operands,
             round_results: self.round_results,
-            precompute_batches: self.precompute_batches,
+            accelerator_batches: self.accelerator_batches,
             witness_sources: self.witness_sources,
             num_inputs: self.num_inputs,
             slots: self.slots,
@@ -321,8 +322,8 @@ impl Program {
         &self.round_results
     }
 
-    pub fn precompute_batches(&self) -> &[PrecomputeBatch] {
-        &self.precompute_batches
+    pub fn accelerator_batches(&self) -> &[AcceleratorBatch] {
+        &self.accelerator_batches
     }
 
     pub fn witness_sources(&self) -> &[WitnessSource] {
@@ -347,14 +348,14 @@ impl Program {
             local_slots: self.slots.local,
             multiplication_rounds: self.rounds.len(),
             multiplication_elements: self.rounds.iter().map(|round| round.len as usize).sum(),
-            precompute_batches: self.precompute_batches.len(),
-            precompute_sites: self
-                .precompute_batches
+            accelerator_batches: self.accelerator_batches.len(),
+            accelerator_sites: self
+                .accelerator_batches
                 .iter()
                 .map(|batch| batch.sites)
                 .sum(),
-            shared_precompute_batches: self
-                .precompute_batches
+            shared_accelerator_batches: self
+                .accelerator_batches
                 .iter()
                 .filter(|batch| {
                     batch
@@ -364,43 +365,43 @@ impl Program {
                 })
                 .count(),
             fused_is_zero_reveal_batches: self
-                .precompute_batches
+                .accelerator_batches
                 .iter()
                 .filter(|batch| batch.kind == BatchKind::IsZeroReveal)
                 .count(),
-            public_precompute_results: self
-                .precompute_batches
+            public_accelerator_results: self
+                .accelerator_batches
                 .iter()
                 .flat_map(|batch| &batch.result_targets)
                 .filter(|target| target.bank == Bank::Public)
                 .count(),
-            injected_batches: self
-                .precompute_batches
+            precomputed_batches: self
+                .accelerator_batches
                 .iter()
-                .filter(|batch| matches!(batch.kind, BatchKind::InjectedPoseidon2 { .. }))
+                .filter(|batch| matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. }))
                 .count(),
         }
     }
-    /// One `BatchKind::Injected` batch's shape, in the order `Machine::run_with_injection`
-    /// consumes it (`Program::injected_batches`).
-    pub fn injected_batches(&self) -> eyre::Result<Vec<InjectedBatch>> {
+    /// One `BatchKind::PrecomputedPoseidon2` batch's shape, in the order `Machine::run_with_precomputation`
+    /// consumes it (`Program::precomputed_batches`).
+    pub fn precomputed_batches(&self) -> eyre::Result<Vec<PrecomputedBatch>> {
         let mut batches = Vec::new();
         for (instruction_index, instruction) in self.instructions.iter().enumerate() {
-            if instruction.op != Opcode::Precompute {
+            if instruction.op != Opcode::Accelerator {
                 continue;
             }
             let batch = self
-                .precompute_batches
+                .accelerator_batches
                 .get(instruction.a as usize)
                 .ok_or_else(|| {
                     eyre::eyre!(
-                        "instruction {instruction_index} references missing precompute batch {}",
+                        "instruction {instruction_index} references missing accelerator batch {}",
                         instruction.a
                     )
                 })?;
-            if let BatchKind::InjectedPoseidon2 { t } = batch.kind {
-                batches.push(InjectedBatch {
-                    kind: PrecomputeKind::Poseidon2 { t },
+            if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
+                batches.push(PrecomputedBatch {
+                    kind: AcceleratorKind::Poseidon2 { t },
                     sites: batch.sites,
                 });
             }
@@ -490,9 +491,9 @@ impl Program {
                     "instruction {index} references missing round {}",
                     instruction.a
                 ),
-                Opcode::Precompute => eyre::ensure!(
-                    (instruction.a as usize) < self.precompute_batches.len(),
-                    "instruction {index} references missing precompute batch {}",
+                Opcode::Accelerator => eyre::ensure!(
+                    (instruction.a as usize) < self.accelerator_batches.len(),
+                    "instruction {index} references missing accelerator batch {}",
                     instruction.a
                 ),
             }
@@ -525,25 +526,25 @@ impl Program {
             }
         }
 
-        for (index, batch) in self.precompute_batches.iter().enumerate() {
-            eyre::ensure!(batch.sites > 0, "precompute batch {index} has no sites");
+        for (index, batch) in self.accelerator_batches.iter().enumerate() {
+            eyre::ensure!(batch.sites > 0, "accelerator batch {index} has no sites");
             let inputs_per_site = match batch.kind {
-                BatchKind::Precompute(PrecomputeKind::Poseidon2 { t }) => {
+                BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t }) => {
                     eyre::ensure!(
                         POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
-                        "precompute batch {index} has unsupported Poseidon2 width {t}"
+                        "accelerator batch {index} has unsupported Poseidon2 width {t}"
                     );
                     t
                 }
-                BatchKind::Precompute(PrecomputeKind::Num2Bits { .. })
-                | BatchKind::Precompute(PrecomputeKind::IsZero) => 1,
-                BatchKind::Precompute(PrecomputeKind::AliasCheck) => 254,
-                BatchKind::Precompute(PrecomputeKind::Reveal { n }) => n,
+                BatchKind::Accelerator(AcceleratorKind::Num2Bits { .. })
+                | BatchKind::Accelerator(AcceleratorKind::IsZero) => 1,
+                BatchKind::Accelerator(AcceleratorKind::AliasCheck) => 254,
+                BatchKind::Accelerator(AcceleratorKind::Reveal { n }) => n,
                 BatchKind::IsZeroReveal => 1,
-                BatchKind::InjectedPoseidon2 { t } => {
+                BatchKind::PrecomputedPoseidon2 { t } => {
                     eyre::ensure!(
                         POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
-                        "precompute batch {index} has unsupported injected Poseidon2 width {t}"
+                        "accelerator batch {index} has unsupported precomputed Poseidon2 width {t}"
                     );
                     t
                 }
@@ -551,41 +552,41 @@ impl Program {
             let expected_inputs = batch
                 .sites
                 .checked_mul(inputs_per_site)
-                .ok_or_else(|| eyre::eyre!("precompute batch {index} input count overflows"))?;
+                .ok_or_else(|| eyre::eyre!("accelerator batch {index} input count overflows"))?;
             eyre::ensure!(
                 batch.input_slots.len() == expected_inputs,
-                "precompute batch {index} has {} inputs, expected {expected_inputs}",
+                "accelerator batch {index} has {} inputs, expected {expected_inputs}",
                 batch.input_slots.len()
             );
             for input in &batch.input_slots {
                 eyre::ensure!(
                     input.bank != Bank::Local,
-                    "precompute batch {index} has a Local input"
+                    "accelerator batch {index} has a Local input"
                 );
-                check_slot(input.bank, input.slot, "precompute input")?;
+                check_slot(input.bank, input.slot, "accelerator input")?;
             }
             if batch.kind == BatchKind::IsZeroReveal
-                || matches!(batch.kind, BatchKind::InjectedPoseidon2 { .. })
+                || matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. })
             {
                 eyre::ensure!(
                     batch
                         .input_slots
                         .iter()
                         .all(|input| input.bank == Bank::Shared),
-                    "fused IsZeroReveal / injected batch {index} must have only Shared inputs"
+                    "fused IsZeroReveal / precomputed batch {index} must have only Shared inputs"
                 );
             }
 
             let expected_offsets = batch
                 .sites
                 .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("precompute batch {index} site count overflows"))?;
+                .ok_or_else(|| eyre::eyre!("accelerator batch {index} site count overflows"))?;
             eyre::ensure!(
                 batch.result_offsets.len() == expected_offsets,
-                "precompute batch {index} result offsets have wrong length"
+                "accelerator batch {index} result offsets have wrong length"
             );
             let request_count = u32::try_from(batch.result_requests.len()).map_err(|_| {
-                eyre::eyre!("precompute batch {index} has too many result requests")
+                eyre::eyre!("accelerator batch {index} has too many result requests")
             })?;
             eyre::ensure!(
                 batch.result_offsets.first() == Some(&0)
@@ -594,26 +595,26 @@ impl Program {
                         .result_offsets
                         .windows(2)
                         .all(|window| window[0] <= window[1]),
-                "precompute batch {index} has invalid CSR offsets"
+                "accelerator batch {index} has invalid CSR offsets"
             );
             eyre::ensure!(
                 batch.result_requests.len() == batch.result_targets.len(),
-                "precompute batch {index} request/target lengths differ"
+                "accelerator batch {index} request/target lengths differ"
             );
             let capacity = match batch.kind {
-                BatchKind::Precompute(kind) => kind.expected_results().ok_or_else(|| {
-                    eyre::eyre!("precompute batch {index} has no declared result capacity")
+                BatchKind::Accelerator(kind) => kind.expected_results().ok_or_else(|| {
+                    eyre::eyre!("accelerator batch {index} has no declared result capacity")
                 })?,
-                BatchKind::InjectedPoseidon2 { t } => PrecomputeKind::Poseidon2 { t }
+                BatchKind::PrecomputedPoseidon2 { t } => AcceleratorKind::Poseidon2 { t }
                     .expected_results()
                     .ok_or_else(|| {
-                        eyre::eyre!("precompute batch {index} has no declared result capacity")
+                        eyre::eyre!("accelerator batch {index} has no declared result capacity")
                     })?,
                 BatchKind::IsZeroReveal => 3,
             };
             let normal_result_bank = match batch.kind {
-                BatchKind::Precompute(PrecomputeKind::Reveal { .. }) => Some(Bank::Public),
-                BatchKind::Precompute(_) => Some(
+                BatchKind::Accelerator(AcceleratorKind::Reveal { .. }) => Some(Bank::Public),
+                BatchKind::Accelerator(_) => Some(
                     if batch
                         .input_slots
                         .iter()
@@ -624,9 +625,9 @@ impl Program {
                         Bank::Public
                     },
                 ),
-                // An injected site is always `Shared`-domain by construction (see
-                // `precompute_result_bank`); a batch built any other way is rejected above.
-                BatchKind::InjectedPoseidon2 { .. } => Some(Bank::Shared),
+                // A host-precomputed site is always `Shared`-domain by construction (see
+                // `accelerator_result_bank`); a batch built any other way is rejected above.
+                BatchKind::PrecomputedPoseidon2 { .. } => Some(Bank::Shared),
                 BatchKind::IsZeroReveal => None,
             };
             for site in 0..batch.sites {
@@ -634,21 +635,21 @@ impl Program {
                 let hi = batch.result_offsets[site + 1] as usize;
                 eyre::ensure!(
                     hi <= batch.result_requests.len(),
-                    "precompute batch {index} CSR row is out of bounds"
+                    "accelerator batch {index} CSR row is out of bounds"
                 );
                 let requests = &batch.result_requests[lo..hi];
                 eyre::ensure!(
                     requests.windows(2).all(|window| window[0] < window[1]),
-                    "precompute batch {index} site {site} requests are not strictly ascending"
+                    "accelerator batch {index} site {site} requests are not strictly ascending"
                 );
                 for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
                     eyre::ensure!(
                         (*request as usize) < capacity,
-                        "precompute batch {index} request {request} exceeds capacity {capacity}"
+                        "accelerator batch {index} request {request} exceeds capacity {capacity}"
                     );
                     eyre::ensure!(
                         target.bank != Bank::Local,
-                        "precompute batch {index} targets Local bank"
+                        "accelerator batch {index} targets Local bank"
                     );
                     let expected_bank = normal_result_bank.unwrap_or({
                         if *request == 2 {
@@ -659,10 +660,10 @@ impl Program {
                     });
                     eyre::ensure!(
                         target.bank == expected_bank,
-                        "precompute batch {index} result {request} targets {:?}, expected {expected_bank:?}",
+                        "accelerator batch {index} result {request} targets {:?}, expected {expected_bank:?}",
                         target.bank
                     );
-                    check_slot(target.bank, target.slot, "precompute result")?;
+                    check_slot(target.bank, target.slot, "accelerator result")?;
                 }
             }
         }
@@ -703,15 +704,15 @@ impl Program {
 mod tests {
     use super::*;
 
-    /// A minimal program with one Poseidon2 precompute batch, for `validate_encoding` tests that
+    /// A minimal program with one Poseidon2 accelerator batch, for `validate_encoding` tests that
     /// don't need a real circuit.
     fn poseidon_budget_program(bank: Bank, sites: usize, executions: usize) -> Program {
         let t = 3;
         let input_slots = (0..sites * t)
             .map(|_| SiteInput { bank, slot: 0 })
             .collect();
-        let batch = PrecomputeBatch {
-            kind: BatchKind::Precompute(PrecomputeKind::Poseidon2 { t }),
+        let batch = AcceleratorBatch {
+            kind: BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t }),
             sites,
             input_slots,
             result_requests: Vec::new(),
@@ -721,7 +722,7 @@ mod tests {
         Program::new(ProgramParts {
             instructions: (0..executions)
                 .map(|_| Instruction {
-                    op: Opcode::Precompute,
+                    op: Opcode::Accelerator,
                     dst: 0,
                     a: 0,
                     b: 0,
@@ -733,7 +734,7 @@ mod tests {
             rounds: Vec::new(),
             round_operands: Vec::new(),
             round_results: Vec::new(),
-            precompute_batches: vec![batch],
+            accelerator_batches: vec![batch],
             witness_sources: vec![WitnessSource::One],
             num_inputs: 0,
             slots: SlotCounts {

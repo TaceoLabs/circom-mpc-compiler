@@ -26,19 +26,19 @@ use ark_ff::UniformRand;
 use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::{CoCircomCompiler, OptLevel};
 use circom_mpc_compiler_tests::fixtures;
+use circom_mpc_vm::Machine;
 use circom_mpc_vm::counting_net::CountingNet;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::program::Bank;
-use circom_mpc_vm::Machine;
 use clap::Parser;
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{share_field_element, Rep3PrimeFieldShare, Rep3State};
+use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, share_field_element};
+use mpc_net::Network;
 use mpc_net::bytes::Bytes;
 use mpc_net::config::{NetworkConfig, NetworkConfigFile};
 use mpc_net::tls::TlsNetwork;
-use mpc_net::Network;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use serde::Deserialize;
 
 #[derive(Parser)]
@@ -66,7 +66,7 @@ struct Cli {
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
@@ -224,8 +224,8 @@ fn bench_batch(
         graph.num_inputs,
         graph.num_outputs,
         summary.rounds,
-        summary.precompute_sites,
-        summary.precompute_batches,
+        summary.accelerator_sites,
+        summary.accelerator_batches,
     );
 
     let t = Instant::now();

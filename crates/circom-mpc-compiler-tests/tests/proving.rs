@@ -17,7 +17,7 @@ use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{
-    combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+    Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element,
 };
 use mpc_net::local::LocalNetwork;
 use rand::thread_rng;
@@ -178,17 +178,19 @@ prove_and_verify_test!(constants_test);
 prove_and_verify_test!(babycheck_test);
 prove_and_verify_test!(control_flow);
 
-prove_and_verify_test!(precomputation_poseidon2_test);
-prove_and_verify_test!(precomputation_num2bits_test);
-prove_and_verify_test!(precomputation_iszero_test);
-prove_and_verify_test!(precomputation_aliascheck_test);
+prove_and_verify_test!(accelerator_poseidon2_test);
+prove_and_verify_test!(accelerator_num2bits_test);
+prove_and_verify_test!(accelerator_iszero_test);
+prove_and_verify_test!(accelerator_aliascheck_test);
 
 /// The split itself, against the plain driver - isolates a bad `n_pub` from a networking or proving
 /// problem if a prove+verify test above ever fails.
 #[test]
 fn plain_witness_splits_at_the_zkey_boundary() {
     let Some((matrices, _)) = zkey("multiplier2_public") else {
-        eprintln!("note: no kats/proving/multiplier2_public.zkey - run scripts/gen-proving-artifacts.sh. skipping.");
+        eprintln!(
+            "note: no kats/proving/multiplier2_public.zkey - run scripts/gen-proving-artifacts.sh. skipping."
+        );
         return;
     };
     let program = compiled("multiplier2_public");

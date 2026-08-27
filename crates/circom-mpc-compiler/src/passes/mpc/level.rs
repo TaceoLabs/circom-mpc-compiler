@@ -1,9 +1,9 @@
 //! Per-value **network level**: how many communicating events must complete before a value exists.
-//! An event is either a reshare round ([`Op::Round`]) or a shared precomputation batch service
-//! ([`Op::Precompute`]); public services execute locally at their inputs' level while retaining
+//! An event is either a reshare round ([`Op::Round`]) or a shared accelerator batch service
+//! ([`Op::Accelerator`]); public services execute locally at their inputs' level while retaining
 //! ordinary instruction order.
 //!
-//! A shared site's *results* ([`Op::PrecomputeResult`]) sit one level above its inputs because its
+//! A shared site's *results* ([`Op::AcceleratorResult`]) sit one level above its inputs because its
 //! MPC batch must communicate. Public gadget results stay at their inputs' level: they are ordinary
 //! deterministic local work, and charging a network level would split otherwise batchable shared
 //! work. Source order still keeps each public result after its producer.
@@ -56,27 +56,27 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
             Op::Add | Op::Sub | Op::Mul | Op::MulLocal => max_input(),
             // The event itself sits at the level of the values it consumes; crossing it is what
             // costs a level, which is what the two `*Result` arms below charge for.
-            Op::Round(_) | Op::Precompute(_) => max_input(),
+            Op::Round(_) | Op::Accelerator(_) => max_input(),
             Op::RoundResult(_) => level[node.inputs[0].index()] + 1,
             // A public gadget is ordinary deterministic local work. Its result must remain after
             // its producer in graph order, but it must not advance the communication axis or split
             // otherwise batchable shared work. Shared gadgets remain real network events.
             //
-            // Keyed on the *producing* `Op::Precompute` node's own domain (`domains[precompute_idx]`),
+            // Keyed on the *producing* `Op::Accelerator` node's own domain (`domains[accelerator_idx]`),
             // not the result's own (`domains[i]`). For every kind but `Reveal` the two coincide -
             // `passes::mpc::domain::compute_domains` copies a site's domain straight onto its
             // results - so this is unobservable there. `Reveal` is the one kind whose *result*
             // domain is unconditionally `Public` (that is its entire purpose) while its *site* can
             // still genuinely be `Shared` - and a genuine open is a real network event that must
             // still charge a level, exactly as if the result stayed `Shared`.
-            Op::PrecomputeResult(_) => {
-                let precompute_idx = node.inputs[0].index();
-                match domains[precompute_idx] {
-                    Domain::Public => level[precompute_idx],
-                    Domain::Shared => level[precompute_idx] + 1,
+            Op::AcceleratorResult(_) => {
+                let accelerator_idx = node.inputs[0].index();
+                match domains[accelerator_idx] {
+                    Domain::Public => level[accelerator_idx],
+                    Domain::Shared => level[accelerator_idx] + 1,
                     // Invalid lowered graphs are rejected later with a proper codegen error. Keep
                     // analysis total so diagnostics never turn that rejection into a panic.
-                    Domain::Local => level[precompute_idx] + 1,
+                    Domain::Local => level[accelerator_idx] + 1,
                 }
             }
         };
@@ -84,19 +84,19 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
     level
 }
 
-/// The **stage** of every precomputation site, indexed by [`crate::ir::PrecomputeId`] - the level of
-/// its [`Op::Precompute`] node, i.e. how many network events must complete before the site can be
+/// The **stage** of every accelerator site, indexed by [`crate::ir::AcceleratorId`] - the level of
+/// its [`Op::Accelerator`] node, i.e. how many network events must complete before the site can be
 /// serviced.
 ///
 /// Sites sharing a stage are mutually independent (see the module doc), so
 /// `(kind, stage, domain)` is a sound batch key: everything in one batch can be serviced together.
 ///
-/// Panics if a site has no `Op::Precompute` node, which [`Graph::verify`] rules out.
+/// Panics if a site has no `Op::Accelerator` node, which [`Graph::verify`] rules out.
 pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
     let level = network_levels(graph, domains);
-    let mut stages = vec![None; graph.precompute_sites().len()];
+    let mut stages = vec![None; graph.accelerator_sites().len()];
     for (i, node) in graph.nodes().iter().enumerate() {
-        if let Op::Precompute(site) = &node.op {
+        if let Op::Accelerator(site) = &node.op {
             stages[site.index()] = Some(level[i]);
         }
     }
@@ -105,7 +105,7 @@ pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
         .enumerate()
         .map(|(site, stage)| {
             stage.unwrap_or_else(|| {
-                panic!("precompute site {site} has no Op::Precompute node - Graph::verify should have rejected this")
+                panic!("accelerator site {site} has no Op::Accelerator node - Graph::verify should have rejected this")
             })
         })
         .collect()
@@ -117,20 +117,20 @@ mod tests {
 
     use super::super::domain::compute_domains;
     use super::*;
-    use crate::ir::{Node, PrecomputeId, PrecomputeKind, PrecomputeSite, SignalIdx, ValueId};
+    use crate::ir::{AcceleratorId, AcceleratorKind, AcceleratorSite, Node, SignalIdx, ValueId};
 
-    fn site(kind: PrecomputeKind, num_inputs: usize, num_outputs: usize) -> PrecomputeSite {
-        PrecomputeSite {
+    fn site(kind: AcceleratorKind, num_inputs: usize, num_outputs: usize) -> AcceleratorSite {
+        AcceleratorSite {
             kind,
             header: "Gadget_0".to_owned(),
             num_inputs,
             num_outputs,
             num_intermediates: 0,
-            injected: false,
+            precomputed: false,
         }
     }
 
-    fn graph_of(nodes: Vec<Node>, output: ValueId, sites: Vec<PrecomputeSite>) -> Graph {
+    fn graph_of(nodes: Vec<Node>, output: ValueId, sites: Vec<AcceleratorSite>) -> Graph {
         let mut graph = Graph::from_parts(
             nodes,
             vec![(SignalIdx::new(0), output)],
@@ -151,13 +151,16 @@ mod tests {
     fn site_results_are_one_level_above_their_inputs() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(0)),
+                vec![ValueId::new(0)],
+            ), // 1
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(1)]), // 2
         ];
         let graph = graph_of(
             nodes,
             ValueId::new(2),
-            vec![site(PrecomputeKind::IsZero, 1, 1)],
+            vec![site(AcceleratorKind::IsZero, 1, 1)],
         );
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),
@@ -173,20 +176,29 @@ mod tests {
     fn chained_sites_with_no_multiplication_get_distinct_stages() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
-            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(2)]), // 3
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
-            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(4)]), // 5
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(5)]), // 6
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(0)),
+                vec![ValueId::new(0)],
+            ), // 1
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(1)),
+                vec![ValueId::new(2)],
+            ), // 3
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(2)),
+                vec![ValueId::new(4)],
+            ), // 5
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(5)]), // 6
         ];
         let graph = graph_of(
             nodes,
             ValueId::new(6),
             vec![
-                site(PrecomputeKind::Num2Bits { n: 1 }, 1, 1),
-                site(PrecomputeKind::AliasCheck, 1, 1),
-                site(PrecomputeKind::IsZero, 1, 1),
+                site(AcceleratorKind::Num2Bits { n: 1 }, 1, 1),
+                site(AcceleratorKind::AliasCheck, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
             ],
         );
         assert_eq!(
@@ -201,18 +213,24 @@ mod tests {
     fn independent_sites_share_a_stage() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
-            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(0)]), // 3
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(0)),
+                vec![ValueId::new(0)],
+            ), // 1
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(1)),
+                vec![ValueId::new(0)],
+            ), // 3
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(3)]), // 4
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(4)]), // 5
         ];
         let graph = graph_of(
             nodes,
             ValueId::new(5),
             vec![
-                site(PrecomputeKind::IsZero, 1, 1),
-                site(PrecomputeKind::IsZero, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
             ],
         );
         assert_eq!(site_stages(&graph, &compute_domains(&graph)), vec![0, 0]);
@@ -222,23 +240,32 @@ mod tests {
     fn public_gadget_does_not_split_shared_batches() {
         let nodes = vec![
             Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0
-            Node::new(Op::Precompute(PrecomputeId::new(0)), vec![ValueId::new(0)]), // 1: public
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(0)),
+                vec![ValueId::new(0)],
+            ), // 1: public
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(1)]), // 2
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 3: shared
-            Node::new(Op::Precompute(PrecomputeId::new(1)), vec![ValueId::new(3)]), // 4: shared A
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(1)),
+                vec![ValueId::new(3)],
+            ), // 4: shared A
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(4)]), // 5
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(2)]), // 6
-            Node::new(Op::Precompute(PrecomputeId::new(2)), vec![ValueId::new(6)]), // 7: shared B
-            Node::new(Op::PrecomputeResult(0), vec![ValueId::new(7)]), // 8
+            Node::new(
+                Op::Accelerator(AcceleratorId::new(2)),
+                vec![ValueId::new(6)],
+            ), // 7: shared B
+            Node::new(Op::AcceleratorResult(0), vec![ValueId::new(7)]), // 8
             Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(8)]), // 9
         ];
         let graph = graph_of(
             nodes,
             ValueId::new(9),
             vec![
-                site(PrecomputeKind::IsZero, 1, 1),
-                site(PrecomputeKind::IsZero, 1, 1),
-                site(PrecomputeKind::IsZero, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
+                site(AcceleratorKind::IsZero, 1, 1),
             ],
         );
 
@@ -249,11 +276,13 @@ mod tests {
         assert_eq!(site_stages(&graph, &compute_domains(&graph)), vec![0, 0, 0]);
 
         let domains = super::super::domain::compute_domains(&graph);
-        let plans = super::super::precompute_schedule::plan_precompute_batches(&graph, &domains);
+        let plans = super::super::accelerator_schedule::plan_accelerator_batches(&graph, &domains);
         assert_eq!(plans.len(), 2, "one public service and one shared service");
-        assert!(plans
-            .iter()
-            .any(|plan| plan.domain == Domain::Shared && plan.sites.len() == 2));
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.domain == Domain::Shared && plan.sites.len() == 2)
+        );
     }
 
     /// A round costs a level exactly as a batch service does, and linear ops cost nothing.

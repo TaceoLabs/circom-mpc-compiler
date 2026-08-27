@@ -1,5 +1,6 @@
 pragma circom 2.2.2;
 
+include "taceo/accelerators.circom";
 include "taceo/precomputations.circom";
 
 
@@ -16,7 +17,7 @@ template Commit1() {
     signal input r;
     signal output out;
 
-    var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()]);
+    var hash[4] = TACEO_ACCELERATOR_Poseidon2(4)([value, 0, r, commitDs()]);
     signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
     out <== revealed[0];
 }
@@ -28,7 +29,7 @@ template Commit2() {
     signal input r;
     signal output out;
 
-    var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([balance, index, r, commitDs()]);
+    var hash[4] = TACEO_ACCELERATOR_Poseidon2(4)([balance, index, r, commitDs()]);
     signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
     out <== revealed[0];
 }
@@ -65,6 +66,6 @@ template CheckAmount(AMOUNT_BITSIZE) {
     signal input amountR;
     signal output out;
 
-    var bits[AMOUNT_BITSIZE] = TACEO_PRECOMPUTATION_Num2Bits(AMOUNT_BITSIZE)(amount);
+    var bits[AMOUNT_BITSIZE] = TACEO_ACCELERATOR_Num2Bits(AMOUNT_BITSIZE)(amount);
     out <== Commit1()(amount, amountR);
 }

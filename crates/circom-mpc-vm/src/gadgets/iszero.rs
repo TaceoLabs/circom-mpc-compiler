@@ -1,6 +1,6 @@
 //! `IsZero`: `out = 1` iff `in == 0`, plus `inv` (the helper `circuits/libs/comparators.circom`
 //! needs to constrain it: `inv <-- in!=0 ? 1/in : 0`, `out <== -in*inv + 1`). See
-//! `ir::PrecomputeKind::IsZero`.
+//! `ir::AcceleratorKind::IsZero`.
 
 use ark_bn254::Fr;
 use ark_ff::{Field, One, Zero};
@@ -69,8 +69,8 @@ pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
         Fr,
     )>,
 > {
-    use mpc_core::protocols::rep3::{arithmetic, Rep3PrimeFieldShare};
     use mpc_core::MpcState;
+    use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, arithmetic};
 
     eyre::ensure!(!inputs.is_empty(), "masked IsZero/Reveal batch is empty");
 

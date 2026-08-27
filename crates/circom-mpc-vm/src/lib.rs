@@ -12,6 +12,6 @@ mod witness;
 pub use circom_mpc_program::{
     self as program, InputValue, InputValues, Program, ProgramReadLimits,
 };
-pub use machine::{GadgetInjection, Machine, SiteTrace};
+pub use machine::{GadgetPrecomputation, Machine, SiteTrace};
 pub use mpc_net;
 pub use witness::split_witness;

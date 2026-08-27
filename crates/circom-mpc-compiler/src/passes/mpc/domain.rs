@@ -4,7 +4,7 @@
 //! lets `mul_split` tell a genuine secret product (needs a round) apart from a free public one.
 //! Shared by `mul_split`, `round_schedule`, batch planning, codegen, and diagnostics.
 
-use crate::ir::{Graph, Op, PrecomputeKind, SignalIdx};
+use crate::ir::{AcceleratorKind, Graph, Op, SignalIdx};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Domain {
@@ -30,25 +30,25 @@ pub(crate) fn compute_domains(graph: &Graph) -> Vec<Domain> {
             Op::RoundResult(_) => Domain::Shared,
             // A deterministic gadget is public exactly when all of its inputs are public. Keeping
             // this domain on the otherwise-unread service node lets each result inherit it.
-            Op::Precompute(_) => node
+            Op::Accelerator(_) => node
                 .inputs
                 .iter()
                 .fold(Domain::Public, |d, input| d.join(domains[input.index()])),
             // A `Reveal` site's result is unconditionally `Public` - that is its entire purpose,
-            // regardless of whether its own input was `Shared` (see `PrecomputeKind::Reveal`).
+            // regardless of whether its own input was `Shared` (see `AcceleratorKind::Reveal`).
             // Every other kind stays exactly what its site's domain already is.
-            Op::PrecomputeResult(_) => {
-                let precompute_idx = node.inputs[0].index();
-                match &nodes[precompute_idx].op {
-                    Op::Precompute(site_id)
+            Op::AcceleratorResult(_) => {
+                let accelerator_idx = node.inputs[0].index();
+                match &nodes[accelerator_idx].op {
+                    Op::Accelerator(site_id)
                         if matches!(
-                            graph.precompute_sites()[site_id.index()].kind,
-                            PrecomputeKind::Reveal { .. }
+                            graph.accelerator_sites()[site_id.index()].kind,
+                            AcceleratorKind::Reveal { .. }
                         ) =>
                     {
                         Domain::Public
                     }
-                    _ => domains[precompute_idx],
+                    _ => domains[accelerator_idx],
                 }
             }
         };

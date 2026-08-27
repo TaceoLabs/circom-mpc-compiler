@@ -4,7 +4,7 @@
 mod const_fold;
 mod cse;
 mod dead_code;
-// pub(crate), not private: `vm::codegen` reuses `mpc::domain` and `mpc::precompute_schedule`.
+// pub(crate), not private: `vm::codegen` reuses `mpc::domain` and `mpc::accelerator_schedule`.
 pub(crate) mod mpc;
 
 use serde::{Deserialize, Serialize};

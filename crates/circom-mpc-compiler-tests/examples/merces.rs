@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use ark_bn254::{Bn254, Fr};
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::CoCircomCompiler;
+use circom_mpc_compiler::codegen;
 use circom_mpc_compiler_tests::fixtures;
 use circom_mpc_vm::counting_net::CountingNet;
 use circom_mpc_vm::driver::plain::PlainDriver;
@@ -26,13 +26,13 @@ use circom_mpc_vm::{Machine, Program};
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{combine_field_elements, Rep3PrimeFieldShare, Rep3State};
-use mpc_net::local::LocalNetwork;
+use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements};
 use mpc_net::Network;
+use mpc_net::local::LocalNetwork;
 
 fn install_tracing() {
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
@@ -145,8 +145,8 @@ fn main() -> eyre::Result<()> {
     // The batching claim, on a real circuit: hundreds of sites, a couple of dozen services.
     println!(
         "  precompute: {} sites -> {} batch services ({} local muls, {} free public muls)",
-        summary.precompute_sites,
-        summary.precompute_batches,
+        summary.accelerator_sites,
+        summary.accelerator_batches,
         summary.local_muls,
         summary.public_muls,
     );

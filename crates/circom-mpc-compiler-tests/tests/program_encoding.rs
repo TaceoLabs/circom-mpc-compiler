@@ -16,7 +16,7 @@ fn program(circuit: &str) -> Program {
 #[test]
 fn accepts_a_freshly_compiled_program() {
     program("multiplier2").validate_encoding().unwrap();
-    program("precomputation_iszero_test")
+    program("accelerator_iszero_test")
         .validate_encoding()
         .unwrap();
 }
@@ -56,7 +56,7 @@ fn rejects_an_instruction_referencing_a_missing_round() {
 
 #[test]
 fn rejects_a_precompute_batch_with_wrong_input_count() {
-    let mut parts = program("precomputation_iszero_test").into_parts();
-    parts.precompute_batches[0].input_slots.pop();
+    let mut parts = program("accelerator_iszero_test").into_parts();
+    parts.accelerator_batches[0].input_slots.pop();
     assert!(Program::new(parts).validate_encoding().is_err());
 }

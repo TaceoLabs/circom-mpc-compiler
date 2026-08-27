@@ -1,13 +1,17 @@
-//! Verifies precomputation-gadget recognition: `Poseidon2`, `Num2Bits`, `IsZero` and `AliasCheck`
-//! are each cut into exactly one `ir::PrecomputeSite` with the expected shape, whether reached
-//! through a `TACEO_PRECOMPUTATION_*` wrapper or (for `precomputation_unsupported_gadget_test`'s
-//! `Doubler`) not recognized at all.
+//! `TACEO_PRECOMPUTATION_Poseidon2` sites: the host precomputes Poseidon2's trace and hands it to
+//! `Machine::run_with_precomputation` instead of the driver computing it. Poseidon2 is the only
+//! gadget that can be host-precomputed. Covers batching (a host-precomputed site never shares a
+//! batch with an accelerated one), plain-driver equivalence against the unwrapped `Poseidon2`
+//! twin, and the error paths around a malformed or missing precomputation.
 
 use ark_bn254::Fr;
-use circom_mpc_compiler::ir::PrecomputeKind;
+
+use circom_mpc_compiler::ir::AcceleratorKind;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
-use circom_mpc_vm::Machine;
+use circom_mpc_vm::gadgets::poseidon2;
+use circom_mpc_vm::program::BatchKind;
+use circom_mpc_vm::{GadgetPrecomputation, Machine, SiteTrace};
 
 mod common;
 
@@ -19,203 +23,148 @@ fn config() -> CompilerConfig {
     config
 }
 
-struct Wrapper {
-    circuit: &'static str,
-    inner_name: &'static str,
-    kind: PrecomputeKind,
-    num_inputs: usize,
-    num_outputs: usize,
+#[test]
+fn precomputed_poseidon2_site_is_its_own_batch() {
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+    assert_eq!(program.statistics().accelerator_batches, 1);
+    assert_eq!(program.statistics().precomputed_batches, 1);
+    let batches = program.precomputed_batches().unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].kind, AcceleratorKind::Poseidon2 { t: 3 });
+    assert_eq!(batches[0].sites, 1);
 }
 
-const WRAPPERS: &[Wrapper] = &[
-    Wrapper {
-        circuit: "precomputation_poseidon2_test",
-        inner_name: "Poseidon2",
-        kind: PrecomputeKind::Poseidon2 { t: 3 },
-        num_inputs: 3,
-        num_outputs: 3,
-    },
-    Wrapper {
-        circuit: "precomputation_num2bits_test",
-        inner_name: "Num2Bits",
-        kind: PrecomputeKind::Num2Bits { n: 8 },
-        num_inputs: 1,
-        num_outputs: 8,
-    },
-    Wrapper {
-        circuit: "precomputation_iszero_test",
-        inner_name: "IsZero",
-        kind: PrecomputeKind::IsZero,
-        num_inputs: 1,
-        num_outputs: 1,
-    },
-    Wrapper {
-        circuit: "precomputation_aliascheck_test",
-        inner_name: "AliasCheck",
-        kind: PrecomputeKind::AliasCheck,
-        num_inputs: 254,
-        num_outputs: 0,
-    },
-];
-
+/// A host-precomputed and an accelerated Poseidon2 site, at the same network stage, must land in
+/// two different batches - a host-precomputed site's trace comes from the host, so it can never
+/// share a driver call with one the driver still has to service.
 #[test]
-fn extract_yields_one_site_per_wrapper() {
-    for w in WRAPPERS {
-        let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
-            .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
-        let sites = graph.precompute_sites();
-        assert_eq!(
-            sites.len(),
-            1,
-            "{}: expected exactly one precompute site",
-            w.circuit
-        );
-        let site = &sites[0];
-        assert!(
-            site.header.starts_with(w.inner_name),
-            "{}: expected header starting with `{}`, got `{}`",
-            w.circuit,
-            w.inner_name,
-            site.header
-        );
-        assert_eq!(site.kind, w.kind, "{}", w.circuit);
-        assert_eq!(site.num_inputs, w.num_inputs, "{}", w.circuit);
-        assert_eq!(site.num_outputs, w.num_outputs, "{}", w.circuit);
-    }
-}
-
-/// An unrecognized name (wrapped or not) simply compiles its body like any other template - here,
-/// `TACEO_PRECOMPUTATION_Doubler` wraps `Doubler`, a gadget this compiler has no precomputation
-/// implementation for. Its body is deliberately pure `Add`/`Sub`/`Mul`, so this succeeds rather
-/// than failing deeper on some unrelated gap - exactly the situation the vendored
-/// `merkle_root_4.circom` is in with its `Arity4CMux`.
-#[test]
-fn unrecognized_gadget_compiles_its_body() {
-    let graph = CoCircomCompiler::parse(
-        circuit_path("precomputation_unsupported_gadget_test"),
-        config(),
-    )
-    .expect("an unrecognized gadget must compile its body");
-    assert!(
-        graph.precompute_sites().is_empty(),
-        "an unrecognized gadget must not create a site"
-    );
-
-    // And the compiled body is correct: Doubler(in) = in + in.
+fn mixed_precomputed_and_accelerated_sites_never_share_a_batch() {
     let program = CoCircomCompiler::compile(
-        circuit_path("precomputation_unsupported_gadget_test"),
+        circuit_path("precomputation_mixed_poseidon2_test"),
         config(),
     )
     .unwrap();
-    let values = [Fr::from(21u64)];
+    let stats = program.statistics();
+    assert_eq!(stats.accelerator_batches, 2, "{stats:?}");
+    assert_eq!(stats.precomputed_batches, 1, "{stats:?}");
+    let precomputed = program.precomputed_batches().unwrap();
+    assert_eq!(precomputed.len(), 1);
+    assert_eq!(precomputed[0].kind, AcceleratorKind::Poseidon2 { t: 3 });
+}
+
+/// The same circuit, computed once through an unwrapped, accelerated `Poseidon2` and once through
+/// `TACEO_PRECOMPUTATION_Poseidon2` fed the host-precomputed trace, must produce byte-identical
+/// witnesses.
+#[test]
+fn precomputed_poseidon2_matches_the_accelerated_twin() {
+    let accelerated_program =
+        CoCircomCompiler::compile(circuit_path("accelerator_poseidon2_test"), config()).unwrap();
+    let precomputed_program =
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+    let expected = {
+        let inputs = accelerated_program.classify_inputs(&values, |v| v);
+        Machine::run(&accelerated_program, &mut PlainDriver, &inputs).unwrap()
+    };
+
+    let inputs = precomputed_program.classify_inputs(&values, |v| v);
+    let mut precomputation = GadgetPrecomputation::new();
+    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
+    let got = Machine::run_with_precomputation(
+        &precomputed_program,
+        &mut PlainDriver,
+        &inputs,
+        precomputation,
+    )
+    .unwrap();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn machine_run_errors_on_a_program_with_precomputed_batches() {
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let mut driver = PlainDriver;
-    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
-    assert_eq!(witness[1], Fr::from(42u64), "witness: {witness:?}");
-}
-
-#[test]
-fn signal_span_matches_independent_total() {
-    for w in WRAPPERS {
-        let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
-            .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
-        let site = &graph.precompute_sites()[0];
-        // main *is* the wrapper for each of these circuits, so the whole circuit's signal count
-        // (minus the reserved constant-1 slot) must equal the wrapper's own I/O plus the site's
-        // full result span.
-        let expected = graph.num_inputs
-            + graph.num_outputs
-            + site.num_inputs
-            + site.num_outputs
-            + site.num_intermediates;
-        assert_eq!(graph.num_signals - 1, expected, "{}", w.circuit);
-    }
-}
-
-#[test]
-fn extract_mode_runs_end_to_end_through_the_plain_driver() {
-    // Every recognized gadget kind must actually be serviceable by `PlainDriver` - this asserts the
-    // whole VM pipeline (codegen -> Machine::precompute -> the main instruction stream) runs to
-    // completion. This is a smoke test only (all-zero inputs) - see tests/proving.rs's prove+verify
-    // tests for a real value comparison.
-    for w in WRAPPERS {
-        let program = CoCircomCompiler::compile(circuit_path(w.circuit), config())
-            .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
-        let values = vec![Fr::from(0u64); program.statistics().inputs];
-        let inputs = program.classify_inputs(&values, |v| v);
-        let mut driver = PlainDriver;
-        Machine::run(&program, &mut driver, &inputs)
-            .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
-    }
-}
-
-/// Two same-kind sites chained through secret multiplications cannot share a driver call, so they
-/// must land in two batches - and the second one's inputs only exist partway through the instruction
-/// stream, which is what staged precomputation exists for. An implementation that ran every batch up
-/// front, or keyed batches on multiplicative depth alone, would get this wrong.
-///
-/// See `circuits/precomputation_staged_test.circom` and `passes::mpc::level`.
-#[test]
-fn chained_same_kind_sites_are_staged_into_separate_batches() {
-    let graph =
-        CoCircomCompiler::parse(circuit_path("precomputation_staged_test"), config()).unwrap();
-    let summary = graph.mpc_summary();
-    assert_eq!(summary.precompute_sites, 2);
-    assert_eq!(
-        summary.precompute_batches, 2,
-        "dependent sites must not be batched together: {summary:?}"
+    let err = Machine::run(&program, &mut PlainDriver, &inputs).unwrap_err();
+    assert!(
+        err.to_string().contains("missing precomputed trace"),
+        "{err}"
     );
-
-    // And it runs: a*b == 0 for these inputs, so the first IsZero returns 1.
-    let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_staged_test"), config()).unwrap();
-    let values = vec![Fr::from(0u64), Fr::from(7u64)];
-    let inputs = program.classify_inputs(&values, |v| v);
-    let mut driver = PlainDriver;
-    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
-    // p = 0*7 = 0, so z = IsZero(0) = 1; q = z*a = 1*0 = 0, so out = IsZero(0) = 1.
-    assert_eq!(witness[1], Fr::from(1u64), "out should be 1: {witness:?}");
-}
-
-/// The counterpart: independent same-kind sites *do* share one driver call. Without this, the
-/// staging test above would pass even if batching had been broken into one-call-per-site.
-#[test]
-fn independent_same_kind_sites_share_one_batch() {
-    let graph =
-        CoCircomCompiler::parse(circuit_path("precomputation_iszero_test"), config()).unwrap();
-    let summary = graph.mpc_summary();
-    assert_eq!(summary.precompute_sites, 1);
-    assert_eq!(summary.precompute_batches, 1);
 }
 
 #[test]
-fn num2bits_zero_returns_an_empty_trace_without_panicking() {
+fn wrong_site_count_is_rejected() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_num2bits_zero_test"), config())
-            .unwrap();
-    let values = [Fr::from(0u64)];
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
-    assert!(witness[1..].iter().all(ark_ff::Zero::is_zero));
+    let mut precomputation = GadgetPrecomputation::new();
+    let mut traces = poseidon2::plain_trace(3, &values).unwrap();
+    traces.push(traces[0].clone());
+    precomputation.push_batch(traces);
+    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+        .unwrap_err();
+    assert!(err.to_string().contains("expected 1"), "{err}");
 }
 
 #[test]
-fn all_public_gadgets_stay_public_through_downstream_multiplication() {
-    let mut cfg = config();
-    cfg.opt_level = circom_mpc_compiler::OptLevel::O2;
-    let graph =
-        CoCircomCompiler::parse(circuit_path("precomputation_public_test"), cfg.clone()).unwrap();
-    let summary = graph.mpc_summary();
-    assert_eq!(summary.rounds, 0, "{summary:?}");
-    assert_eq!(summary.local_muls, 0, "{summary:?}");
-    assert_eq!(summary.public_muls, 1, "{summary:?}");
-
+fn short_intermediate_is_rejected() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_public_test"), cfg).unwrap();
-    assert_eq!(program.statistics().precompute_batches, 1);
-    assert!(program.statistics().public_precompute_results > 0);
-    let values = [Fr::from(0u64), Fr::from(9u64)];
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
-    assert_eq!(witness[1], Fr::from(0u64));
+    let mut precomputation = GadgetPrecomputation::new();
+    let traces = poseidon2::plain_trace(3, &values).unwrap();
+    precomputation.push_batch(vec![SiteTrace::new(traces[0].output.clone(), Vec::new())]);
+    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("requested intermediate slot"),
+        "{err}"
+    );
+}
+
+#[test]
+fn leftover_precomputation_after_the_run_is_rejected() {
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+    let inputs = program.classify_inputs(&values, |v| v);
+    let mut precomputation = GadgetPrecomputation::new();
+    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
+    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
+    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+        .unwrap_err();
+    assert!(err.to_string().contains("unconsumed batch"), "{err}");
+}
+
+#[test]
+fn an_all_public_precomputed_site_is_rejected_at_compile_time() {
+    let err = CoCircomCompiler::compile(circuit_path("precomputation_all_public_test"), config())
+        .unwrap_err();
+    assert!(err.to_string().contains("all-Public"), "{err}");
+}
+
+#[test]
+fn a_wrapper_kind_mismatch_is_rejected_at_compile_time() {
+    let err = CoCircomCompiler::compile(
+        circuit_path("precomputation_wrapper_mismatch_test"),
+        config(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("host-precomputed"), "{err}");
+}
+
+#[test]
+fn batch_kind_precomputed_poseidon2_is_never_used_for_an_accelerated_site() {
+    let program =
+        CoCircomCompiler::compile(circuit_path("accelerator_poseidon2_test"), config()).unwrap();
+    assert_eq!(program.statistics().precomputed_batches, 0);
+    // `precomputed_batches()` walks `BatchKind::PrecomputedPoseidon2` specifically - confirm the
+    // ordinary accelerated path never produces one.
+    assert!(program.precomputed_batches().unwrap().is_empty());
+    let _ = BatchKind::Accelerator(AcceleratorKind::Poseidon2 { t: 3 }); // kept in scope for the import
 }

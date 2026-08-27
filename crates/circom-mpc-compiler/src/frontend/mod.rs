@@ -23,8 +23,8 @@ use circom_type_analysis::check_types;
 use eyre::Result;
 use rustc_hash::FxHashMap;
 
-use crate::ir;
 use crate::CompilerConfig;
+use crate::ir;
 
 use build::GraphCompiler;
 
@@ -32,7 +32,7 @@ use crate::ir::InputList;
 
 /// A template header's total flat signal count: its own declared signals plus every signal of
 /// every subcomponent it transitively instantiates - the contiguous span circom's runtime layout
-/// reserves for one instance. Sizes a precomputation site's result-slot range. Recomputed from
+/// reserves for one instance. Sizes a accelerator site's result-slot range. Recomputed from
 /// `VCP::templates` because circom computes it only on its internal `DAG`, which
 /// `build_circuit`'s public API does not expose.
 fn compute_signal_spans(vcp: &VCP) -> FxHashMap<String, usize> {
@@ -189,16 +189,17 @@ pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Gr
         &mut compiled_graphs,
         &constant_table,
         &signal_spans,
+        config.accelerate_poseidon2,
     );
     let main_template_graph = main_graph_compiler.parse()?;
 
     let mut nodes = Vec::with_capacity(main_template_graph.nodes.len());
     let mut outputs = Vec::new();
-    let mut precompute_sites = Vec::new();
+    let mut accelerator_sites = Vec::new();
     inline::inline_template(
         &mut nodes,
         &mut outputs,
-        &mut precompute_sites,
+        &mut accelerator_sites,
         main_template_graph,
         0,
         true,
@@ -208,7 +209,7 @@ pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Gr
     let mut graph = ir::Graph::from_parts(
         nodes,
         outputs,
-        precompute_sites,
+        accelerator_sites,
         circuit.c_producer.witness_to_signal_list,
         input_list,
         public_inputs,

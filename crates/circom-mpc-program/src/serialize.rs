@@ -56,7 +56,7 @@ trait ReadLeExt: Read {
 impl<R: Read + ?Sized> ReadLeExt for R {}
 
 use crate::{
-    Bank, BatchKind, InputBinding, Instruction, Opcode, PrecomputeBatch, PrecomputeKind, Program,
+    AcceleratorBatch, AcceleratorKind, Bank, BatchKind, InputBinding, Instruction, Opcode, Program,
     ResultTarget, RoundEntry, SiteInput, SlotCounts, WitnessSource,
 };
 
@@ -114,7 +114,7 @@ impl Opcode {
             Opcode::MulSP => 8,
             Opcode::MulLocal => 9,
             Opcode::Reshare => 10,
-            Opcode::Precompute => 11,
+            Opcode::Accelerator => 11,
         }
     }
 
@@ -131,7 +131,7 @@ impl Opcode {
             8 => Opcode::MulSP,
             9 => Opcode::MulLocal,
             10 => Opcode::Reshare,
-            11 => Opcode::Precompute,
+            11 => Opcode::Accelerator,
             other => eyre::bail!("unknown opcode byte {other}"),
         })
     }
@@ -175,20 +175,20 @@ fn read_u32_vec<R: Read>(
         .collect()
 }
 
-impl PrecomputeKind {
+impl AcceleratorKind {
     fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
         match self {
-            PrecomputeKind::Poseidon2 { t } => {
+            AcceleratorKind::Poseidon2 { t } => {
                 w.write_u8(0)?;
                 w.write_u32::<LittleEndian>(*t as u32)?;
             }
-            PrecomputeKind::Num2Bits { n } => {
+            AcceleratorKind::Num2Bits { n } => {
                 w.write_u8(1)?;
                 w.write_u32::<LittleEndian>(*n as u32)?;
             }
-            PrecomputeKind::IsZero => w.write_u8(2)?,
-            PrecomputeKind::AliasCheck => w.write_u8(3)?,
-            PrecomputeKind::Reveal { n } => {
+            AcceleratorKind::IsZero => w.write_u8(2)?,
+            AcceleratorKind::AliasCheck => w.write_u8(3)?,
+            AcceleratorKind::Reveal { n } => {
                 w.write_u8(5)?;
                 w.write_u32::<LittleEndian>(*n as u32)?;
             }
@@ -198,18 +198,18 @@ impl PrecomputeKind {
 
     fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
         Ok(match r.read_u8()? {
-            0 => PrecomputeKind::Poseidon2 {
+            0 => AcceleratorKind::Poseidon2 {
                 t: r.read_u32::<LittleEndian>()? as usize,
             },
-            1 => PrecomputeKind::Num2Bits {
+            1 => AcceleratorKind::Num2Bits {
                 n: r.read_u32::<LittleEndian>()? as usize,
             },
-            2 => PrecomputeKind::IsZero,
-            3 => PrecomputeKind::AliasCheck,
-            5 => PrecomputeKind::Reveal {
+            2 => AcceleratorKind::IsZero,
+            3 => AcceleratorKind::AliasCheck,
+            5 => AcceleratorKind::Reveal {
                 n: r.read_u32::<LittleEndian>()? as usize,
             },
-            other => eyre::bail!("unknown PrecomputeKind tag {other}"),
+            other => eyre::bail!("unknown AcceleratorKind tag {other}"),
         })
     }
 }
@@ -217,12 +217,12 @@ impl PrecomputeKind {
 impl BatchKind {
     fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
         match self {
-            BatchKind::Precompute(kind) => {
+            BatchKind::Accelerator(kind) => {
                 w.write_u8(0)?;
                 kind.write(w)?;
             }
             BatchKind::IsZeroReveal => w.write_u8(1)?,
-            BatchKind::InjectedPoseidon2 { t } => {
+            BatchKind::PrecomputedPoseidon2 { t } => {
                 w.write_u8(2)?;
                 w.write_u32::<LittleEndian>(*t as u32)?;
             }
@@ -232,9 +232,9 @@ impl BatchKind {
 
     fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
         Ok(match r.read_u8()? {
-            0 => BatchKind::Precompute(PrecomputeKind::read(r)?),
+            0 => BatchKind::Accelerator(AcceleratorKind::read(r)?),
             1 => BatchKind::IsZeroReveal,
-            2 => BatchKind::InjectedPoseidon2 {
+            2 => BatchKind::PrecomputedPoseidon2 {
                 t: r.read_u32::<LittleEndian>()? as usize,
             },
             other => eyre::bail!("unknown BatchKind tag {other}"),
@@ -286,8 +286,8 @@ impl Program {
         write_u32_vec(w, &self.round_operands)?;
         write_u32_vec(w, &self.round_results)?;
 
-        w.write_u64::<LittleEndian>(self.precompute_batches.len() as u64)?;
-        for batch in &self.precompute_batches {
+        w.write_u64::<LittleEndian>(self.accelerator_batches.len() as u64)?;
+        for batch in &self.accelerator_batches {
             batch.kind.write(w)?;
             w.write_u64::<LittleEndian>(batch.sites as u64)?;
             // Banked, like a `WitnessSource::Slot` - a site input may be a `Public` slot (a literal the circuit
@@ -416,58 +416,61 @@ impl Program {
         let round_operands = read_u32_vec(r, limits, "round operand")?;
         let round_results = read_u32_vec(r, limits, "round result")?;
 
-        let batch_count = checked_count::<PrecomputeBatch>(
+        let batch_count = checked_count::<AcceleratorBatch>(
             r.read_u64::<LittleEndian>()?,
             limits,
-            "precompute batch",
+            "accelerator batch",
         )?;
         let mut batches = Vec::with_capacity(batch_count);
         for _ in 0..batch_count {
             let kind = BatchKind::read(r)?;
             let sites =
-                checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "precompute site")?;
-            eyre::ensure!(sites > 0, "precompute batch has no sites");
+                checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "accelerator site")?;
+            eyre::ensure!(sites > 0, "accelerator batch has no sites");
             let input_count = checked_count::<SiteInput>(
                 r.read_u64::<LittleEndian>()?,
                 limits,
-                "precompute input",
+                "accelerator input",
             )?;
             let mut input_slots = Vec::with_capacity(input_count);
             for _ in 0..input_count {
                 let bank = Bank::from_u8(r.read_u8()?)?;
-                eyre::ensure!(bank != Bank::Local, "precompute input bank cannot be Local");
+                eyre::ensure!(
+                    bank != Bank::Local,
+                    "accelerator input bank cannot be Local"
+                );
                 let slot = r.read_u32::<LittleEndian>()?;
                 input_slots.push(SiteInput { bank, slot });
             }
-            let result_requests = read_u32_vec(r, limits, "precompute result request")?;
-            let result_offsets = read_u32_vec(r, limits, "precompute result offset")?;
+            let result_requests = read_u32_vec(r, limits, "accelerator result request")?;
+            let result_offsets = read_u32_vec(r, limits, "accelerator result offset")?;
             let target_count = checked_count::<ResultTarget>(
                 r.read_u64::<LittleEndian>()?,
                 limits,
-                "precompute target",
+                "accelerator target",
             )?;
             let mut result_targets = Vec::with_capacity(target_count);
             for _ in 0..target_count {
                 let bank = Bank::from_u8(r.read_u8()?)?;
                 eyre::ensure!(
                     bank != Bank::Local,
-                    "precompute result bank cannot be Local"
+                    "accelerator result bank cannot be Local"
                 );
                 let slot = r.read_u32::<LittleEndian>()?;
                 result_targets.push(ResultTarget { bank, slot });
             }
             let expected_offsets = sites
                 .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("precompute batch site count overflows"))?;
+                .ok_or_else(|| eyre::eyre!("accelerator batch site count overflows"))?;
             eyre::ensure!(
                 result_offsets.len() == expected_offsets,
-                "precompute batch result_offsets has {} entries, expected sites + 1 = {}",
+                "accelerator batch result_offsets has {} entries, expected sites + 1 = {}",
                 result_offsets.len(),
                 expected_offsets
             );
             eyre::ensure!(
                 result_requests.len() == result_targets.len(),
-                "precompute batch result_requests ({}) and result_targets ({}) must have the same \
+                "accelerator batch result_requests ({}) and result_targets ({}) must have the same \
                  length - one destination per requested slot",
                 result_requests.len(),
                 result_targets.len()
@@ -476,9 +479,9 @@ impl Program {
                 result_offsets.first() == Some(&0)
                     && result_offsets.last().copied() == Some(result_requests.len() as u32)
                     && result_offsets.windows(2).all(|w| w[0] <= w[1]),
-                "precompute batch has invalid CSR result offsets"
+                "accelerator batch has invalid CSR result offsets"
             );
-            batches.push(PrecomputeBatch {
+            batches.push(AcceleratorBatch {
                 kind,
                 sites,
                 input_slots,
@@ -525,7 +528,7 @@ impl Program {
             rounds,
             round_operands,
             round_results,
-            precompute_batches: batches,
+            accelerator_batches: batches,
             witness_sources,
             num_inputs,
             slots: SlotCounts {

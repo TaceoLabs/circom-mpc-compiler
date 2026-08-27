@@ -2,7 +2,7 @@
 //! i.e. `< p` (BN254's scalar field modulus) - `circuits/libs/aliascheck.circom` wraps
 //! `CompConstant(-1)` (`circuits/libs/compconstant.circom`), which itself wraps `Num2Bits(135)`.
 //!
-//! See `ir::PrecomputeKind::AliasCheck` for why the 519-slot result layout below is derived
+//! See `ir::AcceleratorKind::AliasCheck` for why the 519-slot result layout below is derived
 //! directly from the real circuit's own signal numbering, and how it differs by one from merces'
 //! own `DEFAULT_ALIAS_TRACE` (~/repos/merces/crates/merces-core/src/circom_proof/cosnark.rs) -
 //! that trace omits `Num2Bits`' own single input signal (`num2bits.in`), which this compiler's
@@ -106,7 +106,7 @@ pub fn rep3_trace<N: mpc_net::Network>(
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
-    use mpc_core::protocols::rep3::{arithmetic, conversion, Rep3PrimeFieldShare};
+    use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, arithmetic, conversion};
     use num_bigint::BigUint;
     use num_traits::One;
 

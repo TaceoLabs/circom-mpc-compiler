@@ -1,5 +1,6 @@
 pragma circom 2.2.2;
 
+include "comparators.circom";
 include "taceo/precomputations.circom";
 
 template Main() {
