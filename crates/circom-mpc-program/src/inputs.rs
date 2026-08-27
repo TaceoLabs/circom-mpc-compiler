@@ -9,11 +9,21 @@ use crate::Program;
 /// don't want to track domains themselves (e.g. the plain-driver tests).
 #[derive(Debug, Clone)]
 pub enum InputValue<S> {
+    /// A value visible to every party.
     Public(Fr),
+    /// A value shared/secret to a single party's share representation `S`.
     Secret(S),
 }
 
+/// Converts a container of [`InputValue`]s into the slice form `Program::classify_inputs`
+/// produces, so callers can pass a `Vec`, an array, a slice, or a `Result` of one interchangeably.
 pub trait InputValues<S> {
+    /// Returns the values as a slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying container itself represents a failure (e.g. the
+    /// `eyre::Result<Vec<_>>` impl).
     fn as_inputs(&self) -> eyre::Result<&[InputValue<S>]>;
 }
 
@@ -50,6 +60,11 @@ impl Program {
     /// is only invoked for `Secret`-destined values - e.g. `|v| v` for a driver whose `Share = Fr`
     /// (`PlainDriver`), or an actual secret-sharing routine for a real MPC driver (see
     /// `tests/rep3_vm.rs`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `values.len()` doesn't match the program's input count, or if an
+    /// input's domain is `Local` (inputs cannot be `Local`).
     pub fn classify_inputs<S>(
         &self,
         values: &[Fr],

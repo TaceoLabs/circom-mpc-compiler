@@ -6,6 +6,11 @@ use ark_bn254::Fr;
 use ark_ff::{Field, One, Zero};
 
 /// `[out, inv]`.
+///
+/// # Panics
+///
+/// Never panics: `x.inverse()` is only called once `x` is known non-zero.
+#[must_use]
 pub fn plain_trace(x: Fr) -> [Fr; 2] {
     if x.is_zero() {
         [Fr::one(), Fr::zero()]
@@ -24,6 +29,10 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
 /// back into arithmetic sharing. Masking `in` by `is_zero` before inverting avoids ever inverting
 /// a genuine zero; `helper = inv - is_zero` cancels the mask back out. `out = is_zero`, `inv =
 /// helper`.
+///
+/// # Errors
+///
+/// Returns an error if any underlying computation/network round fails.
 pub fn rep3_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
@@ -49,7 +58,7 @@ pub fn rep3_trace<N: mpc_net::Network>(
     Ok(results)
 }
 
-/// One-round masked IsZero plus explicit reveal, batched across every site. This is the optimized
+/// One-round masked `IsZero` plus explicit reveal, batched across every site. This is the optimized
 /// primitive used only for the VM's conservative whole-batch `IsZero -> Reveal(1)` fusion.
 ///
 /// Each input is multiplied by its own fresh secret arithmetic mask and the products are opened
@@ -57,7 +66,18 @@ pub fn rep3_trace<N: mpc_net::Network>(
 /// public zero predicate. A uniformly random mask is itself zero with probability `1/|Fr|`, which
 /// can falsely classify a non-zero input, so the statistical-soundness tradeoff is restricted to
 /// BN254 here as well as in codegen and `Program::validate`.
-#[allow(clippy::type_complexity)]
+///
+/// # Panics
+///
+/// Never panics: `product.inverse()` is only called once `product` is known non-zero.
+///
+/// # Errors
+///
+/// Returns an error if `inputs` is empty, or the underlying computation/network round fails.
+#[allow(
+    clippy::type_complexity,
+    reason = "the tuple mirrors the fused IsZeroReveal batch's own three-value result shape; a named struct would only add ceremony for one call site"
+)]
 pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,

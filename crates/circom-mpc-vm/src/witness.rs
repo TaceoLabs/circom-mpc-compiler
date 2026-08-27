@@ -16,6 +16,11 @@ use super::driver::VmDriver;
 /// `n_pub` must be `ConstraintMatrices::num_instance_variables` for the same circuit - see the module
 /// doc. It counts the leading `1`, so `public_inputs[0] == 1` and a verifier's public input list is
 /// `public_inputs[1..]`.
+///
+/// # Errors
+///
+/// Returns an error if `n_pub` is `0` or exceeds `witness.len()`, if opening the prefix fails, or
+/// if the opened prefix's first entry isn't the reserved constant `1`.
 pub fn split_witness<D: VmDriver>(
     driver: &mut D,
     witness: Vec<D::Share>,
@@ -34,7 +39,7 @@ pub fn split_witness<D: VmDriver>(
     let mut witness = witness;
     let secret = witness.split_off(n_pub);
     let public = driver.open(&witness)?;
-    debug_assert_eq!(public.len(), n_pub);
+    debug_assert_eq!(public.len(), n_pub, "open must return one value per opened share");
     eyre::ensure!(
         public[0] == Fr::one(),
         "witness position 0 must be the reserved constant 1, got something else - either the program \
@@ -58,7 +63,8 @@ mod tests {
             Fr::from(9u64),
             Fr::from(4u64),
         ];
-        let (public, secret) = split_witness(&mut PlainDriver, witness, 3).unwrap();
+        let (public, secret) = split_witness(&mut PlainDriver, witness, 3)
+            .expect("n_pub=3 is a valid split point for this witness");
         assert_eq!(public, vec![Fr::from(1u64), Fr::from(7u64), Fr::from(9u64)]);
         assert_eq!(secret, vec![Fr::from(4u64)]);
     }
@@ -67,10 +73,16 @@ mod tests {
     fn rejects_a_misaligned_split() {
         // n_pub longer than the witness: program and zkey disagree.
         let witness = vec![Fr::from(1u64), Fr::from(2u64)];
-        assert!(split_witness(&mut PlainDriver, witness, 5).is_err());
+        drop(
+            split_witness(&mut PlainDriver, witness, 5)
+                .expect_err("n_pub longer than the witness must be rejected"),
+        );
 
         // Position 0 not the reserved 1: a malformed program, or n_pub off by one.
         let witness = vec![Fr::from(3u64), Fr::from(2u64)];
-        assert!(split_witness(&mut PlainDriver, witness, 1).is_err());
+        drop(
+            split_witness(&mut PlainDriver, witness, 1)
+                .expect_err("a witness not starting with the reserved constant 1 must be rejected"),
+        );
     }
 }

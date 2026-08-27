@@ -25,3 +25,6 @@ tcp = ["mpc-net/tcp"]
 tcp-session = ["mpc-net/tcp-session"]
 tcp-session-blocking = ["mpc-net/tcp-session-blocking"]
 tls = ["mpc-net/tls"]
+
+[lints]
+workspace = true

@@ -20,6 +20,10 @@ pub trait VmDriver {
     /// and third-party compatibility drivers remain reusable. Stateful drivers can make a prepared
     /// instance one-shot; `Machine` calls this before even validating the program or inputs, so an
     /// execution error still spends a successfully-started run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the driver refuses to start a new run (e.g. it was already spent).
     fn begin_run(&mut self) -> eyre::Result<()> {
         Ok(())
     }
@@ -27,6 +31,10 @@ pub trait VmDriver {
     /// Finishes a run after success or error, and during stack unwinding after a panic. Stateful
     /// drivers should transition to their terminal state before performing fallible consistency
     /// checks. The default is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the driver's post-run consistency checks fail.
     fn finish_run(&mut self) -> eyre::Result<()> {
         Ok(())
     }
@@ -35,14 +43,24 @@ pub trait VmDriver {
     /// ends up as a circuit output (the final witness is uniformly `Vec<Self::Share>`).
     fn promote(&mut self, value: Fr) -> Self::Share;
 
+    /// `a + b`, both `Shared`.
     fn add_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share;
+    /// `a - b`, both `Shared`.
     fn sub_ss(&mut self, a: &Self::Share, b: &Self::Share) -> Self::Share;
+    /// `a + b`, `a` `Shared`, `b` `Public`.
     fn add_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
+    /// `a - b`, `a` `Shared`, `b` `Public`.
     fn sub_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
+    /// `a - b`, `a` `Public`, `b` `Shared`.
     fn sub_ps(&mut self, a: Fr, b: &Self::Share) -> Self::Share;
+    /// `a * b`, `a` `Shared`, `b` `Public`.
     fn mul_sp(&mut self, a: &Self::Share, b: Fr) -> Self::Share;
 
     /// Executes one complete multiplication stage in a single vectorized network call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying network round fails.
     fn mul_vec(&mut self, a: &[Self::Share], b: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
 
     /// Reveals `shares` to every party, in one batched round.
@@ -53,6 +71,10 @@ pub trait VmDriver {
     /// that prefix (see `vm::witness`).
     ///
     /// The identity for `PlainDriver`, whose `Share` is already `Fr`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying network round fails.
     fn open(&mut self, shares: &[Self::Share]) -> eyre::Result<Vec<Fr>>;
 
     /// Poseidon2 traces for a batch of sites. `states` is `sites * t` shares (one length-`t` state
@@ -60,6 +82,11 @@ pub trait VmDriver {
     /// row names the site's strictly ascending logical result slots (indices into
     /// `ir::GadgetKind::Poseidon2`'s result layout). Results are returned in that same
     /// site-major CSR order, so witness-dead trace values are never materialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` is unsupported, the inputs are malformed, or the underlying
+    /// computation/network round fails.
     fn poseidon2_requested_traces(
         &mut self,
         t: usize,
@@ -68,6 +95,10 @@ pub trait VmDriver {
         result_offsets: &[u32],
     ) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is one share per site; returns `sites * n` shares (bit decompositions, in order).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying computation/network round fails.
     fn num2bits_traces(
         &mut self,
         n: usize,
@@ -75,16 +106,31 @@ pub trait VmDriver {
     ) -> eyre::Result<Vec<Self::Share>>;
     /// `inputs` is one share per site; returns `sites * 2` shares (`is_zero`, then the masked-
     /// inverse helper, per site).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying computation/network round fails.
     fn is_zero_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
-    /// Fused trace for an explicitly revealed IsZero result. Each site returns
+    /// Fused trace for an explicitly revealed `IsZero` result. Each site returns
     /// `(is_zero_share, inverse_share, revealed_is_zero)`. Rep3 implements this with one fresh
     /// arithmetic mask per site and one vector multiplication-open.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying computation/network round fails.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple mirrors the fused IsZeroReveal batch's own three-value result shape; a named struct would only add ceremony for one call site"
+    )]
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],
     ) -> eyre::Result<Vec<(Self::Share, Self::Share, Fr)>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
     /// `ir::GadgetKind::AliasCheck`'s doc for the exact layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying computation/network round fails.
     fn alias_check_traces(&mut self, inputs: &[Self::Share]) -> eyre::Result<Vec<Self::Share>>;
 }

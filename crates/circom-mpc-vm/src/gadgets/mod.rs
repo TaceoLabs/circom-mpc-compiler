@@ -71,17 +71,26 @@ pub(crate) mod test_support {
                         let shares = &shares;
                         let f = &f;
                         scope.spawn(move || {
-                            let mut state = Rep3State::new(&net, a2b_type).unwrap();
+                            let mut state = Rep3State::new(&net, a2b_type)
+                                .expect("constructing Rep3State from a fresh LocalNetwork does not fail");
                             let own_shares: Vec<_> = shares.iter().map(|s| s[party]).collect();
-                            let witness = f(&net, &mut state, &own_shares).unwrap();
+                            let witness = f(&net, &mut state, &own_shares)
+                                .expect("the test closure must succeed on well-formed shares");
                             (witness, net)
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).unzip()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a test party thread must not panic"))
+                    .unzip()
             });
 
-        let [r0, r1, r2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
+        let [r0, r1, r2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses
+            .try_into()
+            .unwrap_or_else(|w: Vec<Vec<Rep3PrimeFieldShare<Fr>>>| {
+                panic!("expected exactly 3 parties, got {}", w.len())
+            });
         (combine_field_elements(&r0, &r1, &r2), networks)
     }
 

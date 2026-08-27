@@ -9,6 +9,10 @@
 
 use crate::ir::Graph;
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
+)]
 pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     // Hand-built graphs (pass unit tests, codegen tests) pass an empty `signal_to_witness`.
     // Pruning against an empty witness would delete every output, so skip the pruning there.

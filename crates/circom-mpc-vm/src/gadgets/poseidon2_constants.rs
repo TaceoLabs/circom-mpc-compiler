@@ -690,9 +690,13 @@ impl RoundConstants {
                  {{2, 3, 4, 8, 12, 16}}"
             ),
         };
-        debug_assert_eq!(full1.len(), 4 * t);
-        debug_assert_eq!(full2.len(), 4 * t);
-        debug_assert_eq!(partial.len(), partial_rounds(t));
+        debug_assert_eq!(full1.len(), 4 * t, "wrong number of first-full-round constants");
+        debug_assert_eq!(full2.len(), 4 * t, "wrong number of second-full-round constants");
+        debug_assert_eq!(
+            partial.len(),
+            partial_rounds(t),
+            "wrong number of partial-round constants"
+        );
         Ok(Self {
             full1: decode(full1),
             partial: decode(partial),
@@ -721,7 +725,7 @@ fn parse_hex(s: &str) -> Fr {
     for chunk in padded.as_bytes().chunks(2) {
         let hi = (chunk[0] as char).to_digit(16).expect("hex literal");
         let lo = (chunk[1] as char).to_digit(16).expect("hex literal");
-        bytes.push((hi * 16 + lo) as u8);
+        bytes.push(u8::try_from(hi * 16 + lo).expect("a pair of hex digits always fits in a byte"));
     }
     Fr::from_be_bytes_mod_order(&bytes)
 }

@@ -118,7 +118,11 @@ enum RuntimePlan {
 
 /// Finds whole scheduler batches that can be replaced by the circuit-preserving Rep3 shortcut.
 /// Staying at whole-batch granularity is intentionally conservative: a mixed Reveal batch or an
-/// IsZero batch with even one non-revealed result continues through the ordinary gadget paths.
+/// `IsZero` batch with even one non-revealed result continues through the ordinary gadget paths.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a single sequential fusion-candidate scan; splitting it would not improve clarity"
+)]
 fn plan_zero_test_reveal_fusions(
     graph: &Graph,
     domains: &[Domain],
@@ -265,6 +269,7 @@ fn compute_last_use(graph: &Graph) -> Vec<usize> {
 /// `Unsupported`-style errors elsewhere in this compiler exist to catch instead of silently
 /// mis-encoding.
 fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank, bool)> {
+    use Domain::{Public, Shared};
     if da == Domain::Local || db == Domain::Local {
         eyre::bail!(
             "codegen: a Local-domain value reached {op:?} directly - it must only ever feed a \
@@ -272,7 +277,6 @@ fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank,
              shape"
         );
     }
-    use Domain::{Public, Shared};
     Ok(match (op, da, db) {
         (Op::Add, Public, Public) => (Opcode::AddPP, Bank::Public, false),
         (Op::Add, Shared, Shared) => (Opcode::AddSS, Bank::Shared, false),
@@ -331,6 +335,20 @@ fn gadget_result_bank(
 
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `CoCircomCompiler::compile`) into a `Program`.
+///
+/// # Panics
+///
+/// Panics if an internal invariant that an earlier pass is responsible for maintaining (e.g. slot
+/// or index bounds fitting into `u32`) is violated.
+///
+/// # Errors
+///
+/// Returns an error if `graph` isn't a validly lowered graph - e.g. a `Local`-domain value reaches
+/// an arithmetic op directly, or a secret x secret `Mul` survived MPC lowering.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a single forward walk over the graph doing domain classification, slot allocation, and instruction emission at once; splitting it would not improve clarity"
+)]
 pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     let nodes = graph.nodes();
     let domain = compute_domains(graph);
@@ -625,7 +643,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     u32::try_from(round_results.len()).expect("too many round results");
                 for k in 0..node.inputs.len() {
                     let result_idx = i + 1 + k;
-                    let expected_k = u32::try_from(k).unwrap();
+                    let expected_k =
+                        u32::try_from(k).expect("round has more slots than fit into u32");
                     match nodes.get(result_idx).map(|n| &n.op) {
                         Some(Op::RoundResult(slot_k)) if *slot_k == expected_k => {}
                         other => eyre::bail!(
@@ -715,7 +734,10 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         for &batch_idx in &batches_at[i] {
             if let RuntimePlan::IsZeroReveal(fusion_idx) = runtime_plans[batch_idx] {
                 let fusion = &fusion_plans[fusion_idx];
-                debug_assert!(fusion_inputs[fusion_idx].is_empty());
+                debug_assert!(
+                    fusion_inputs[fusion_idx].is_empty(),
+                    "a fusion's inputs must be collected exactly once, at its first IsZero site"
+                );
                 for pair in &fusion.pairs {
                     fusion_inputs[fusion_idx].push(site_inputs[pair.zero_test_site][0]);
                 }
@@ -762,7 +784,11 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 result_offsets.push(0);
                 for pair in &fusion.pairs {
                     let source_site = pair.zero_test_site;
-                    debug_assert_eq!(site_result_base[source_site].bank, Bank::Shared);
+                    debug_assert_eq!(
+                        site_result_base[source_site].bank,
+                        Bank::Shared,
+                        "an IsZero fused into IsZeroReveal must have Shared results"
+                    );
                     for (pos, &logical) in live_slots[source_site].iter().enumerate() {
                         debug_assert!(logical <= 1, "IsZero has exactly two result slots");
                         result_requests.push(logical);
@@ -774,9 +800,16 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     }
 
                     let reveal_base = site_result_base[pair.reveal_site];
-                    debug_assert_eq!(reveal_base.bank, Bank::Public);
+                    debug_assert_eq!(
+                        reveal_base.bank,
+                        Bank::Public,
+                        "the Reveal half of an IsZeroReveal fusion must have Public results"
+                    );
                     for (pos, &logical) in live_slots[pair.reveal_site].iter().enumerate() {
-                        debug_assert_eq!(logical, 0);
+                        debug_assert_eq!(
+                            logical, 0,
+                            "a fused Reveal(1) site has exactly one logical result slot"
+                        );
                         result_requests.push(2 + logical);
                         result_targets.push(ResultTarget {
                             bank: Bank::Public,
@@ -818,7 +851,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 debug_assert_eq!(
                     base.bank,
                     gadget_result_bank(plan.kind, plan.domain, plan.precomputed)
-                        .expect("already validated while reserving site_result_base")
+                        .expect("already validated while reserving site_result_base"),
+                    "a site's result bank must not change between reservation and assembly"
                 );
                 for (pos, &logical) in live_slots[site_id].iter().enumerate() {
                     result_requests.push(logical);
@@ -969,7 +1003,7 @@ mod tests {
             1,
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert!(
             (program.slots().public as usize) < graph.len(),
             "peak public-bank width ({}) should be well below the node count ({})",
@@ -1002,7 +1036,8 @@ mod tests {
             4,
         );
         graph.mark_lowered();
-        let err = compile(&graph).unwrap_err();
+        let err = compile(&graph)
+            .expect_err("compile should reject a Local value reaching anything but Reshare");
         assert!(err.to_string().contains("Local"), "{err}");
     }
 
@@ -1075,7 +1110,7 @@ mod tests {
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 1);
         assert_eq!(program.gadget_batches()[0].sites, 2);
         assert_eq!(
@@ -1114,7 +1149,7 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
@@ -1170,7 +1205,7 @@ mod tests {
             vec![iszero_site(), iszero_site(), reveal_site(1), reveal_site(1)],
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
@@ -1214,7 +1249,7 @@ mod tests {
             vec![iszero_site(), iszero_site(), reveal_site(1)],
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert_eq!(
@@ -1256,7 +1291,7 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1294,7 +1329,7 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1331,7 +1366,7 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1367,7 +1402,7 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             0,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1405,7 +1440,7 @@ mod tests {
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
             program
@@ -1442,7 +1477,7 @@ mod tests {
             vec![iszero_site(), iszero_site()],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(program.gadget_batches().iter().all(|b| b.sites == 1));
 
@@ -1513,7 +1548,7 @@ mod tests {
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(
             program.gadget_batches().len(),
             1,
@@ -1565,7 +1600,7 @@ mod tests {
             vec![iszero_site()],
             0,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
         let batch = &program.gadget_batches()[0];
         assert_eq!(batch.input_slots.len(), 1);
         assert_eq!(batch.input_slots[0].bank, Bank::Public);
@@ -1604,7 +1639,7 @@ mod tests {
             vec![site],
             1,
         );
-        let program = compile(&graph).unwrap();
+        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
@@ -1650,7 +1685,9 @@ mod tests {
             vec![iszero_site()],
             2,
         );
-        let err = compile(&graph).unwrap_err().to_string();
+        let err = compile(&graph)
+            .expect_err("compile should reject this ill-formed test graph")
+            .to_string();
         assert!(err.contains("Local"), "unexpected error: {err}");
     }
 }

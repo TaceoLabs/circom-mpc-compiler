@@ -17,11 +17,15 @@ use crate::driver::VmDriver;
 /// producer never has to reason about the VM's physical slot layout.
 #[derive(Debug, Clone)]
 pub struct SiteTrace<S> {
+    /// The site's output shares/values.
     pub output: Vec<S>,
+    /// The site's intermediate shares/values.
     pub intermediate: Vec<S>,
 }
 
 impl<S> SiteTrace<S> {
+    /// Builds a trace from its output and intermediate values.
+    #[must_use]
     pub fn new(output: Vec<S>, intermediate: Vec<S>) -> Self {
         Self {
             output,
@@ -42,6 +46,8 @@ pub struct GadgetPrecomputation<S> {
 }
 
 impl<S> GadgetPrecomputation<S> {
+    /// Builds an empty queue.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             batches: std::collections::VecDeque::new(),
@@ -73,6 +79,7 @@ impl<S> Default for GadgetPrecomputation<S> {
     }
 }
 
+/// Namespace for the VM's entry points.
 pub struct Machine;
 
 /// Ensures `finish_run` executes while unwinding as well as on every ordinary return. The explicit
@@ -106,7 +113,7 @@ impl<'a, D: VmDriver> RunGuard<'a, D> {
 impl<D: VmDriver> Drop for RunGuard<'_, D> {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.driver.finish_run();
+            drop(self.driver.finish_run());
         }
     }
 }
@@ -114,6 +121,10 @@ impl<D: VmDriver> Drop for RunGuard<'_, D> {
 impl Machine {
     /// Same as [`Machine::run_with_precomputation`] with an empty precomputation - errors if the program has
     /// any `BatchKind::PrecomputedPoseidon2` batch rather than silently producing a zero witness value for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as [`Machine::run_with_precomputation`].
     pub fn run<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
         program: &Program,
         driver: &mut D,
@@ -126,6 +137,12 @@ impl Machine {
     /// site instead of the driver computing it: one [`SiteTrace`] per site, queued batch-by-batch
     /// in [`Program::precomputed_batches`] order. Errors if `precomputation` is short, mismatched, or has
     /// anything left over once the run finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `inputs` doesn't match the program's declared inputs, `program` fails
+    /// its own encoding checks, `precomputation` is short, mismatched, or has entries left over
+    /// once the run finishes, or the driver itself fails.
     pub fn run_with_precomputation<D: VmDriver, I: InputValues<D::Share> + ?Sized>(
         program: &Program,
         driver: &mut D,
@@ -141,8 +158,7 @@ impl Machine {
         let finish = guard.finish();
         let witness = match (run, finish) {
             (Ok(witness), Ok(())) => Ok(witness),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
             (Err(run_error), Err(finish_error)) => Err(eyre::eyre!(
                 "{run_error:#}; driver finalization also failed: {finish_error:#}"
             )),
@@ -155,6 +171,10 @@ impl Machine {
         Ok(witness)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a single forward walk executing every opcode in the instruction stream; splitting it would not improve clarity"
+    )]
     fn run_inner<D: VmDriver>(
         program: &Program,
         driver: &mut D,
@@ -198,37 +218,37 @@ impl Machine {
         for instr in program.instructions() {
             match instr.op {
                 Opcode::AddPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] + public[instr.b as usize]
+                    public[instr.dst as usize] = public[instr.a as usize] + public[instr.b as usize];
                 }
                 Opcode::SubPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] - public[instr.b as usize]
+                    public[instr.dst as usize] = public[instr.a as usize] - public[instr.b as usize];
                 }
                 Opcode::MulPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] * public[instr.b as usize]
+                    public[instr.dst as usize] = public[instr.a as usize] * public[instr.b as usize];
                 }
                 Opcode::AddSS => {
                     shared[instr.dst as usize] =
-                        driver.add_ss(&shared[instr.a as usize], &shared[instr.b as usize])
+                        driver.add_ss(&shared[instr.a as usize], &shared[instr.b as usize]);
                 }
                 Opcode::SubSS => {
                     shared[instr.dst as usize] =
-                        driver.sub_ss(&shared[instr.a as usize], &shared[instr.b as usize])
+                        driver.sub_ss(&shared[instr.a as usize], &shared[instr.b as usize]);
                 }
                 Opcode::AddSP => {
                     shared[instr.dst as usize] =
-                        driver.add_sp(&shared[instr.a as usize], public[instr.b as usize])
+                        driver.add_sp(&shared[instr.a as usize], public[instr.b as usize]);
                 }
                 Opcode::SubSP => {
                     shared[instr.dst as usize] =
-                        driver.sub_sp(&shared[instr.a as usize], public[instr.b as usize])
+                        driver.sub_sp(&shared[instr.a as usize], public[instr.b as usize]);
                 }
                 Opcode::SubPS => {
                     shared[instr.dst as usize] =
-                        driver.sub_ps(public[instr.a as usize], &shared[instr.b as usize])
+                        driver.sub_ps(public[instr.a as usize], &shared[instr.b as usize]);
                 }
                 Opcode::MulSP => {
                     shared[instr.dst as usize] =
-                        driver.mul_sp(&shared[instr.a as usize], public[instr.b as usize])
+                        driver.mul_sp(&shared[instr.a as usize], public[instr.b as usize]);
                 }
                 Opcode::MulLocal => {
                     // Codegen may recycle these shared slots before the round boundary, so retain
@@ -399,11 +419,12 @@ impl Machine {
             return Self::store_batch_results(batch, selected, Bank::Shared, shared);
         }
         let results = match kind {
-            GadgetKind::Poseidon2 { .. } => unreachable!("handled above"),
             GadgetKind::Num2Bits { n } => driver.num2bits_traces(n, &inputs)?,
             GadgetKind::IsZero => driver.is_zero_traces(&inputs)?,
             GadgetKind::AliasCheck => driver.alias_check_traces(&inputs)?,
-            GadgetKind::Reveal { .. } => unreachable!("handled above"),
+            GadgetKind::Poseidon2 { .. } | GadgetKind::Reveal { .. } => {
+                unreachable!("handled above")
+            }
         };
         let selected = Self::select_requests(&results, batch)?;
         Self::store_batch_results(batch, selected, Bank::Shared, shared)
@@ -570,8 +591,10 @@ impl Machine {
                     inputs.len()
                 );
                 inputs
-                    .chunks_exact(254)
-                    .flat_map(aliascheck::plain_trace)
+                    .as_chunks::<254>()
+                    .0
+                    .iter()
+                    .flat_map(|chunk| aliascheck::plain_trace(chunk))
                     .collect()
             }
             // An all-public reveal is the identity: every party already holds every input in the
@@ -772,13 +795,14 @@ mod tests {
         let mut driver = PanicDriver::new();
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Machine::run(&program, &mut driver, &[]);
+            drop(Machine::run(&program, &mut driver, &[]));
         }));
         assert!(panic.is_err());
         assert_eq!(driver.lifecycle, MockLifecycle::Spent);
         assert_eq!(driver.finish_calls, 1);
 
-        let reuse = Machine::run(&program, &mut driver, &[]).unwrap_err();
+        let reuse = Machine::run(&program, &mut driver, &[])
+            .expect_err("a spent driver must refuse to run again");
         assert!(reuse.to_string().contains("spent"));
         assert_eq!(driver.finish_calls, 1, "failed begin must not call finish");
     }

@@ -8,6 +8,7 @@ use crate::gadgets::{aliascheck, iszero, num2bits, poseidon2};
 
 use super::VmDriver;
 
+/// Single-party reference [`VmDriver`]: every share is the plain field element itself.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PlainDriver;
 
@@ -91,7 +92,7 @@ impl VmDriver for PlainDriver {
             inputs.len()
         );
         let mut results = Vec::new();
-        for chunk in inputs.chunks_exact(254) {
+        for chunk in inputs.as_chunks::<254>().0 {
             results.extend(aliascheck::plain_trace(chunk));
         }
         Ok(results)

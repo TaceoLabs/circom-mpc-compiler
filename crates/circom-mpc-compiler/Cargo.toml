@@ -3,6 +3,11 @@ name = "circom-mpc-compiler"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "circom-mpc-compile"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
 ark-bn254.workspace = true
 ark-ff.workspace = true
@@ -25,7 +30,5 @@ tracing-subscriber = { workspace = true, optional = true }
 [features]
 cli = ["dep:clap", "dep:toml", "dep:tracing-subscriber"]
 
-[[bin]]
-name = "circom-mpc-compile"
-path = "src/main.rs"
-required-features = ["cli"]
+[lints]
+workspace = true

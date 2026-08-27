@@ -73,23 +73,26 @@ impl RoundId {
 #[derive(Debug, Clone)]
 pub(crate) struct RoundDesc {
     pub(crate) len: usize,
-    /// This round's position in the circuit's **network-event** order - reshare rounds and
-    /// gadget batch services interleaved on one axis (see `passes::mpc::level`). Not the
-    /// same as multiplicative depth. Diagnostic only, not consulted structurally.
-    #[allow(dead_code)]
-    pub(crate) level: usize,
 }
 
 /// The effect of MPC lowering, as reported by [`Graph::mpc_summary`]. Diagnostic - logged under
 /// `tracing` and asserted in `tests/mpc_lowering.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MpcSummary {
+    /// Number of batched MPC rounds.
     pub rounds: usize,
+    /// Total operands reshared across all rounds.
     pub reshare_elements: usize,
+    /// Fewest operands in any single round, or `None` if there are no rounds.
     pub min_slots_per_round: Option<usize>,
+    /// Most operands in any single round, or `None` if there are no rounds.
     pub max_slots_per_round: Option<usize>,
+    /// Number of secret x secret multiplications, each lowered to an `Op::MulLocal` + round pair.
     pub local_muls: usize,
+    /// Number of remaining `Op::Mul` nodes - multiplications with at least one public operand,
+    /// free of any network round.
     pub public_muls: usize,
+    /// Total gadget sites in the graph.
     pub gadget_sites: usize,
     /// How many batch services those sites actually cost - normally one per
     /// `(kind, stage, domain)` group, with an additional split when an early consumer closes a
@@ -113,8 +116,11 @@ pub struct GadgetSite {
     /// The gadget template's concrete header (parameterized name), e.g. `"Poseidon2_3"` -
     /// diagnostics only.
     pub header: String,
+    /// Number of input signals the site's component reads.
     pub num_inputs: usize,
+    /// Number of output signals the site's component produces.
     pub num_outputs: usize,
+    /// Number of witness-live intermediate signals in the site's subtree beyond its outputs.
     pub num_intermediates: usize,
     /// Whether this site is wrapped in `TACEO_PRECOMPUTATION_Poseidon2`: its trace comes from the
     /// host, not from `vm::gadgets`. Only ever true for a [`GadgetKind::Poseidon2`] kind -
@@ -134,8 +140,11 @@ pub enum Op {
     Input(SignalIdx),
     /// A field constant.
     Constant(Fr),
+    /// `a + b`.
     Add,
+    /// `a - b`.
     Sub,
+    /// `a * b`.
     Mul,
     /// Invokes a gadget site (see [`GadgetSite`]) - a std-lib gadget (`Num2Bits`,
     /// `IsZero`, `AliasCheck`, or an unwrapped `Poseidon2`) serviced by `vm::gadgets` rather than
@@ -197,7 +206,9 @@ impl Op {
 /// must point strictly earlier in the graph, as enforced by graph verification.
 #[derive(Debug, Clone)]
 pub struct Node {
+    /// The operation this node performs.
     pub op: Op,
+    /// The values this node reads, each a [`ValueId`] pointing strictly earlier in the graph.
     pub inputs: Vec<ValueId>,
 }
 
@@ -258,23 +269,32 @@ pub struct Graph {
     /// Whether MPC lowering has run. [`Graph::verify`] rejects MPC ops in a not-yet-lowered graph;
     /// pass unit tests build plain graphs by hand without running the whole pipeline.
     lowered: bool,
+    /// One entry per final witness position, giving the circuit signal index that lands there.
     pub signal_to_witness: Vec<usize>,
+    /// The circuit's declared inputs, in declaration order.
     pub input_list: InputList,
+    /// Names of the circuit's SNARK-public inputs.
     pub public_inputs: Vec<String>,
     /// Input names every MPC party holds in cleartext, even though they are not SNARK-public. A
     /// genuine declassification, supplied by `CompilerConfig::mpc_public_inputs` - never inferred.
     /// Kept separate from `public_inputs`, which remains the correct source for the SNARK
     /// statement split (see `vm::witness`).
     pub mpc_public_inputs: Vec<String>,
+    /// The circuit's total input count.
     pub num_inputs: usize,
+    /// The circuit's total output count.
     pub num_outputs: usize,
+    /// The circuit's total signal count (circom's own flat signal numbering).
     pub num_signals: usize,
 }
 
 impl Graph {
     /// Builds a fresh, not-yet-lowered ([`Stage::Plain`], no rounds) graph - the frontend's output,
     /// and what pass-level unit tests build by hand to exercise a single pass in isolation.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a plain positional constructor for tests and the frontend; grouping the fields into a struct would only add ceremony at every call site"
+    )]
     pub(crate) fn from_parts(
         nodes: Vec<Node>,
         outputs: Vec<(SignalIdx, ValueId)>,
@@ -306,19 +326,13 @@ impl Graph {
         self.nodes.len()
     }
 
-    // Only exercised by tests so far; kept as the standard single-node accessor for the passes
-    // and codegen that land in later steps.
-    #[allow(dead_code)]
-    pub(crate) fn node(&self, id: ValueId) -> &Node {
-        &self.nodes[id.index()]
-    }
-
     pub(crate) fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
     /// Every gadget site in this graph, in inlining order - the order the runtime must
     /// supply traces in.
+    #[must_use]
     pub fn gadget_sites(&self) -> &[GadgetSite] {
         &self.gadget_sites
     }
@@ -341,9 +355,6 @@ impl Graph {
     }
 
     /// Every batched MPC network round, indexed by [`RoundId`]. Empty before `passes::mpc` runs.
-    // Only exercised by pass unit tests so far (`Graph::mpc_summary` reads the private field
-    // directly) - same situation as `Graph::node` above.
-    #[allow(dead_code)]
     pub(crate) fn rounds(&self) -> &[RoundDesc] {
         &self.rounds
     }
@@ -366,7 +377,7 @@ impl Graph {
     /// (`round_schedule` merges nodes, which changes arity).
     pub(crate) fn rebuild_nodes(&mut self, nodes: Vec<Node>, remap: &[Option<ValueId>]) {
         self.nodes = nodes;
-        for (_, value) in self.outputs.iter_mut() {
+        for (_, value) in &mut self.outputs {
             *value =
                 remap[value.index()].expect("rebuild_nodes dropped a node an output depends on");
         }
@@ -376,6 +387,7 @@ impl Graph {
     /// round slot), min/mean/max slots per round, free local multiplications, free public
     /// multiplications, and gadget sites. Not a rewrite - this is what makes the round
     /// batching claims falsifiable instead of asserted; see `tests/mpc_lowering.rs`.
+    #[must_use]
     pub fn mpc_summary(&self) -> MpcSummary {
         let slot_counts: Vec<usize> = self.rounds.iter().map(|r| r.len).collect();
         let reshare_elements: usize = slot_counts.iter().sum();
@@ -448,12 +460,12 @@ impl Graph {
                 new_nodes.push(node.clone());
             }
         }
-        for node in new_nodes.iter_mut() {
-            for input in node.inputs.iter_mut() {
+        for node in &mut new_nodes {
+            for input in &mut node.inputs {
                 *input = remap[input.index()].expect("gc kept a node whose input was dropped");
             }
         }
-        for (_, value) in self.outputs.iter_mut() {
+        for (_, value) in &mut self.outputs {
             *value = remap[value.index()].expect("gc dropped a node an output depends on");
         }
 
@@ -477,6 +489,10 @@ impl Graph {
     /// - every output references a node that exists.
     ///
     /// Called once after the frontend builds the graph and, in debug builds, between every pass.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a single sequential validation pass over every graph invariant; splitting it would not improve clarity"
+    )]
     pub(crate) fn verify(&self) -> eyre::Result<()> {
         for (i, node) in self.nodes.iter().enumerate() {
             match &node.op {
@@ -691,7 +707,7 @@ impl Graph {
         }
         changed |= new_nodes.len() != old_len;
 
-        for (_, value) in self.outputs.iter_mut() {
+        for (_, value) in &mut self.outputs {
             *value = remap[value.index()].expect("rewrite dropped a node an output depends on");
         }
         self.nodes = new_nodes;
@@ -733,7 +749,9 @@ mod tests {
 
     #[test]
     fn verify_accepts_well_formed_graph() {
-        assert!(sample_graph().verify().is_ok());
+        sample_graph()
+            .verify()
+            .expect("sample_graph is well-formed");
     }
 
     fn iszero_site() -> GadgetSite {
@@ -775,7 +793,10 @@ mod tests {
             1,
             2,
         );
-        let err = graph.verify().unwrap_err().to_string();
+        let err = graph
+            .verify()
+            .expect_err("graph is ill-formed")
+            .to_string();
         assert!(
             err.contains("referenced by 2 Op::Gadget nodes"),
             "unexpected error: {err}"
@@ -799,7 +820,10 @@ mod tests {
             1,
             2,
         );
-        let err = graph.verify().unwrap_err().to_string();
+        let err = graph
+            .verify()
+            .expect_err("graph is ill-formed")
+            .to_string();
         assert!(
             err.contains("referenced by 0 Op::Gadget nodes"),
             "unexpected error: {err}"
@@ -833,7 +857,10 @@ mod tests {
         );
         // MulLocal is only legal once lowering has started.
         graph.mark_lowered();
-        let err = graph.verify().unwrap_err().to_string();
+        let err = graph
+            .verify()
+            .expect_err("graph is ill-formed")
+            .to_string();
         assert!(
             err.contains("un-reshared MulLocal"),
             "unexpected error: {err}"
@@ -880,7 +907,7 @@ mod tests {
         // the output must still resolve to a valid, in-range node after compaction
         let (_, out_value) = graph.outputs()[0];
         assert!(out_value.index() < graph.len());
-        assert!(matches!(graph.node(out_value).op, Op::Add));
-        assert!(graph.verify().is_ok());
+        assert!(matches!(graph.nodes()[out_value.index()].op, Op::Add));
+        graph.verify().expect("gc must leave the graph well-formed");
     }
 }

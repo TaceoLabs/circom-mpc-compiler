@@ -34,14 +34,23 @@ pub enum Bank {
 /// both `SubSP` and `SubPS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
+    /// `dst = a + b`, all `Public`.
     AddPP,
+    /// `dst = a - b`, all `Public`.
     SubPP,
+    /// `dst = a * b`, all `Public`.
     MulPP,
+    /// `dst = a + b`, all `Shared`.
     AddSS,
+    /// `dst = a - b`, all `Shared`.
     SubSS,
+    /// `dst = a + b`, `a`/`dst` `Shared`, `b` `Public`.
     AddSP,
+    /// `dst = a - b`, `a`/`dst` `Shared`, `b` `Public`.
     SubSP,
+    /// `dst = a - b`, `a` `Public`, `b`/`dst` `Shared`.
     SubPS,
+    /// `dst = a * b`, `a`/`dst` `Shared`, `b` `Public`.
     MulSP,
     /// The free local half of a secret x secret product: `a`/`b` are `Shared`-bank slots, `dst`
     /// is a `Local`-bank slot.
@@ -64,9 +73,13 @@ pub enum Opcode {
 /// instruction itself carries no bank tag.
 #[derive(Debug, Clone, Copy)]
 pub struct Instruction {
+    /// The operation to execute.
     pub op: Opcode,
+    /// Destination slot index.
     pub dst: u32,
+    /// First operand slot index.
     pub a: u32,
+    /// Second operand slot index.
     pub b: u32,
 }
 
@@ -75,8 +88,11 @@ pub struct Instruction {
 /// `Program::round_results` (the `Shared`-bank slot each result lands in).
 #[derive(Debug, Clone, Copy)]
 pub struct RoundEntry {
+    /// Start index into [`Program::round_operands`].
     pub operand_start: u32,
+    /// Number of operands/results in this round.
     pub len: u32,
+    /// Start index into [`Program::round_results`].
     pub result_start: u32,
 }
 
@@ -91,7 +107,9 @@ pub struct RoundEntry {
 /// table rather than an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SiteInput {
+    /// Which bank `slot` lives in.
     pub bank: Bank,
+    /// Slot index within `bank`.
     pub slot: u32,
 }
 
@@ -101,6 +119,7 @@ pub struct SiteInput {
 /// witness layout, or proving artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchKind {
+    /// A direct runtime realization of one circuit [`GadgetKind`].
     Gadget(GadgetKind),
     /// Computes a zero test's `[out, inv]` shares and the explicitly revealed `out` together.
     IsZeroReveal,
@@ -109,6 +128,7 @@ pub enum BatchKind {
     /// host-precomputed, and its result bank is always `Shared` - see
     /// `Machine::run_with_precomputation`.
     PrecomputedPoseidon2 {
+        /// The Poseidon2 state width.
         t: usize,
     },
 }
@@ -118,7 +138,9 @@ pub enum BatchKind {
 /// request table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultTarget {
+    /// Which bank `slot` lives in.
     pub bank: Bank,
+    /// Slot index within `bank`.
     pub slot: u32,
 }
 
@@ -130,16 +152,19 @@ pub struct ResultTarget {
 /// kind, stage, or domain differs, or when combining it would cross an earlier result deadline.
 #[derive(Debug, Clone)]
 pub struct GadgetBatch {
+    /// The service this batch runs.
     pub kind: BatchKind,
+    /// Number of sites batched together.
     pub sites: usize,
     /// `sites * (this kind's per-site input count)` entries, one site's inputs contiguous, in site
     /// order.
     pub input_slots: Vec<SiteInput>,
     /// Which of each site's logical result slots (`0..num_outputs + num_intermediates`) are
     /// actually witness-live - `passes::dead_signals` prunes the rest before codegen ever sees this
-    /// batch. Site-contiguous, ascending within a site; `result_offsets[site]..result_offsets[site
-    /// + 1]` is that site's own sorted sublist. Two sites in one batch can have different live
-    /// counts, which is why this isn't a flat `sites * capacity` shape recoverable by division.
+    /// batch. Site-contiguous, ascending within a site; a range `result_offsets[site]` to
+    /// `result_offsets[site + 1]` is that site's own sorted sublist. Two sites in one batch can
+    /// have different live counts, which is why this isn't a flat `sites * capacity` shape
+    /// recoverable by division.
     pub result_requests: Vec<u32>,
     /// `len == sites + 1`: CSR row pointers into
     /// [`Self::result_requests`]/[`Self::result_targets`].
@@ -153,7 +178,9 @@ pub struct GadgetBatch {
 /// caller-supplied input values before running anything else.
 #[derive(Debug, Clone, Copy)]
 pub struct InputBinding {
+    /// Which bank `slot` lives in.
     pub bank: Bank,
+    /// Slot index within `bank`.
     pub slot: u32,
     /// The circuit's own flat input index (`0..num_inputs`) - not a per-bank ordinal, so a caller
     /// doesn't need to know how many of the circuit's inputs are public vs secret ahead of time.
@@ -174,15 +201,23 @@ pub enum WitnessSource {
     /// their `Op::Input` was dead and removed from the executable graph.
     Input(u32),
     /// A value retained in one of the VM's final slot banks.
-    Slot { bank: Bank, slot: u32 },
+    Slot {
+        /// Which bank `slot` lives in.
+        bank: Bank,
+        /// Slot index within `bank`.
+        slot: u32,
+    },
 }
 
 /// How many slots each bank needs, sized by codegen's liveness-driven allocator - this is what
 /// makes VM memory track live width instead of total node count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SlotCounts {
+    /// Number of `Public`-bank slots.
     pub public: u32,
+    /// Number of `Shared`-bank slots.
     pub shared: u32,
+    /// Number of `Local`-bank slots.
     pub local: u32,
 }
 
@@ -217,40 +252,67 @@ pub struct Program {
 /// and for tests that need to build or mutate a program without going through codegen.
 #[derive(Debug, Clone)]
 pub struct ProgramParts {
+    /// See [`Program::instructions`].
     pub instructions: Vec<Instruction>,
+    /// See [`Program::constants`].
     pub constants: Vec<Fr>,
+    /// See [`Program::input_domains`].
     pub input_domains: Vec<Bank>,
+    /// See [`Program::inputs`].
     pub inputs: Vec<InputBinding>,
+    /// See [`Program::rounds`].
     pub rounds: Vec<RoundEntry>,
+    /// See [`Program::round_operands`].
     pub round_operands: Vec<u32>,
+    /// See [`Program::round_results`].
     pub round_results: Vec<u32>,
+    /// See [`Program::gadget_batches`].
     pub gadget_batches: Vec<GadgetBatch>,
+    /// See [`Program::witness_sources`].
     pub witness_sources: Vec<WitnessSource>,
+    /// See [`Program::num_inputs`].
     pub num_inputs: usize,
+    /// See [`Program::slots`].
     pub slots: SlotCounts,
 }
 
 /// One `BatchKind::PrecomputedPoseidon2` batch's shape, as reported by [`Program::precomputed_batches`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrecomputedBatch {
+    /// Always `GadgetKind::Poseidon2`.
     pub kind: GadgetKind,
+    /// Number of sites in this batch.
     pub sites: usize,
 }
 
+/// Summary counters over a [`Program`], as reported by [`Program::statistics`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgramStatistics {
+    /// Number of instructions.
     pub instructions: usize,
+    /// Number of circuit inputs.
     pub inputs: usize,
+    /// Number of final witness entries.
     pub witness_values: usize,
+    /// Number of `Public`-bank slots.
     pub public_slots: u32,
+    /// Number of `Shared`-bank slots.
     pub shared_slots: u32,
+    /// Number of `Local`-bank slots.
     pub local_slots: u32,
+    /// Number of batched MPC rounds.
     pub multiplication_rounds: usize,
+    /// Total operands reshared across all rounds.
     pub multiplication_elements: usize,
+    /// Number of gadget batches.
     pub gadget_batches: usize,
+    /// Total gadget sites across all batches.
     pub gadget_sites: usize,
+    /// Number of gadget batches with at least one `Shared` input.
     pub shared_gadget_batches: usize,
+    /// Number of `BatchKind::IsZeroReveal` batches.
     pub fused_is_zero_reveal_batches: usize,
+    /// Number of gadget results targeting the `Public` bank.
     pub public_gadget_results: usize,
     /// Batches whose trace the host supplies at run time (`BatchKind::PrecomputedPoseidon2`) rather than
     /// `vm::gadgets`.
@@ -260,6 +322,7 @@ pub struct ProgramStatistics {
 impl Program {
     /// Builds a `Program` from its raw parts - the constructor `codegen::compile` uses, and the
     /// escape hatch tests use to build or mutate a program without going through it.
+    #[must_use]
     pub fn new(parts: ProgramParts) -> Self {
         Self {
             instructions: parts.instructions,
@@ -278,6 +341,7 @@ impl Program {
 
     /// The inverse of [`Program::new`] - unwraps a program back into its mutable parts, e.g. to
     /// build a deliberately malformed program for a `validate_encoding` negative test.
+    #[must_use]
     pub fn into_parts(self) -> ProgramParts {
         ProgramParts {
             instructions: self.instructions,
@@ -294,50 +358,74 @@ impl Program {
         }
     }
 
+    /// The instruction stream.
+    #[must_use]
     pub fn instructions(&self) -> &[Instruction] {
         &self.instructions
     }
 
+    /// Constants preloaded into `Public`-bank slots at init.
+    #[must_use]
     pub fn constants(&self) -> &[Fr] {
         &self.constants
     }
 
+    /// Each circuit input's domain, in flat signal order.
+    #[must_use]
     pub fn input_domains(&self) -> &[Bank] {
         &self.input_domains
     }
 
+    /// Bindings from circuit inputs to the slots they're read from.
+    #[must_use]
     pub fn inputs(&self) -> &[InputBinding] {
         &self.inputs
     }
 
+    /// The batched MPC rounds.
+    #[must_use]
     pub fn rounds(&self) -> &[RoundEntry] {
         &self.rounds
     }
 
+    /// Flat operand table indexed into by [`RoundEntry`] ranges.
+    #[must_use]
     pub fn round_operands(&self) -> &[u32] {
         &self.round_operands
     }
 
+    /// Flat result table indexed into by [`RoundEntry`] ranges.
+    #[must_use]
     pub fn round_results(&self) -> &[u32] {
         &self.round_results
     }
 
+    /// The gadget batches, indexed by [`Opcode::Gadget`]'s `a`.
+    #[must_use]
     pub fn gadget_batches(&self) -> &[GadgetBatch] {
         &self.gadget_batches
     }
 
+    /// One source per final witness entry, in circom witness order.
+    #[must_use]
     pub fn witness_sources(&self) -> &[WitnessSource] {
         &self.witness_sources
     }
 
+    /// The circuit's total input count.
+    #[must_use]
     pub fn num_inputs(&self) -> usize {
         self.num_inputs
     }
 
+    /// The slot counts each bank was sized to.
+    #[must_use]
     pub fn slots(&self) -> SlotCounts {
         self.slots
     }
 
+    /// Summary counters over this program.
+    #[must_use]
     pub fn statistics(&self) -> ProgramStatistics {
         ProgramStatistics {
             instructions: self.instructions.len(),
@@ -384,6 +472,10 @@ impl Program {
     }
     /// One `BatchKind::PrecomputedPoseidon2` batch's shape, in the order `Machine::run_with_precomputation`
     /// consumes it (`Program::precomputed_batches`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an instruction references a gadget batch index that doesn't exist.
     pub fn precomputed_batches(&self) -> eyre::Result<Vec<PrecomputedBatch>> {
         let mut batches = Vec::new();
         for (instruction_index, instruction) in self.instructions.iter().enumerate() {
@@ -412,6 +504,15 @@ impl Program {
     /// Checks every side-table and slot reference before execution. This is intentionally usable
     /// both after deserialization and by any caller that built a `Program` via [`Program::new`]
     /// without going through codegen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the first inconsistency found - an out-of-range slot, a
+    /// malformed side table, or a reference to a missing round/gadget batch.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a single sequential validation pass over every side table; splitting it would not improve clarity"
+    )]
     pub fn validate_encoding(&self) -> eyre::Result<()> {
         let check_slot = |bank: Bank, slot: u32, what: &str| -> eyre::Result<()> {
             let limit = match bank {
@@ -536,11 +637,10 @@ impl Program {
                     );
                     t
                 }
-                BatchKind::Gadget(GadgetKind::Num2Bits { .. })
-                | BatchKind::Gadget(GadgetKind::IsZero) => 1,
+                BatchKind::Gadget(GadgetKind::Num2Bits { .. } | GadgetKind::IsZero)
+                | BatchKind::IsZeroReveal => 1,
                 BatchKind::Gadget(GadgetKind::AliasCheck) => 254,
                 BatchKind::Gadget(GadgetKind::Reveal { n }) => n,
-                BatchKind::IsZeroReveal => 1,
                 BatchKind::PrecomputedPoseidon2 { t } => {
                     eyre::ensure!(
                         POSEIDON2_SUPPORTED_WIDTHS.contains(&t),

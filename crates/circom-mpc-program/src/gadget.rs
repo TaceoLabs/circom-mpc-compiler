@@ -8,9 +8,15 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GadgetKind {
     /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 8, 12, 16}`).
-    Poseidon2 { t: usize },
+    Poseidon2 {
+        /// The state width.
+        t: usize,
+    },
     /// Bit decomposition of one field element into `n` bits.
-    Num2Bits { n: usize },
+    Num2Bits {
+        /// The number of output bits.
+        n: usize,
+    },
     /// `1` iff the input is zero, plus the field-inversion helper trace.
     IsZero,
     /// Proves a 254-bit decomposition is a canonical (non-aliased) representative.
@@ -20,7 +26,10 @@ pub enum GadgetKind {
     /// local work - see the compiler's `passes::mpc::level`'s re-keyed `GadgetResult` rule for
     /// how a `Reveal` site still charges a network level exactly when its own input was `Shared`,
     /// even though its result's *domain* is unconditionally `Public`.
-    Reveal { n: usize },
+    Reveal {
+        /// The number of values revealed.
+        n: usize,
+    },
 }
 
 impl GadgetKind {
@@ -29,6 +38,7 @@ impl GadgetKind {
     /// and `frontend/inline.rs` cross-check it against the circom-derived count from
     /// `frontend/mod.rs::compute_signal_spans`, so a trace-layout mistake is a compile-time error
     /// instead of a silently wrong witness.
+    #[must_use]
     pub fn expected_results(self) -> usize {
         match self {
             // Mirrors the template structure of `circuits/libs/taceo/poseidon2.circom`:
@@ -51,9 +61,10 @@ impl GadgetKind {
                 };
                 // ExternalMatMulT(t) = [out[t]][in[t]] + subtree. For t >= 8 the subtree is
                 // (t/4) x ExternalMatMul4 followed by 4 x Acc(t/4).
-                let emmt = |t: usize| match t {
-                    2..=4 => 2 * t + emm_leaf(t),
-                    _ => {
+                let emmt = |t: usize| {
+                    if let 2..=4 = t {
+                        2 * t + emm_leaf(t)
+                    } else {
                         let m = t / 4;
                         2 * t + m * 18 + 4 * acc(m)
                     }
@@ -74,8 +85,9 @@ impl GadgetKind {
                 let total = 2 * t + (9 + pr) * t + emmt(t) + 8 * full + pr * partial;
                 total - t
             }
-            // n output bits, no intermediates.
-            GadgetKind::Num2Bits { n } => n,
+            // n output bits/values, no intermediates - both Num2Bits(n) and a `TACEO_REVEAL(n)`
+            // site's own signal layout skip the site's own inputs.
+            GadgetKind::Num2Bits { n } | GadgetKind::Reveal { n } => n,
             // 1 output (is_zero) + 1 intermediate (the masked-inverse helper).
             GadgetKind::IsZero => 2,
             // No outputs. AliasCheck's subtree is its CompConstant subcomponent: 254 input-signal
@@ -83,9 +95,6 @@ impl GadgetKind {
             // Num2Bits(135) (1 input + 135 bits = 136). Cross-checked directly against
             // `circuits/libs/{aliascheck,compconstant}.circom`.
             GadgetKind::AliasCheck => 255 + 127 + 1 + 136,
-            // n outputs, no intermediates - a `TACEO_REVEAL(n)` site's own signal layout is exactly
-            // `[in[n]][out[n]]`, and result slots skip the site's own inputs.
-            GadgetKind::Reveal { n } => n,
         }
     }
 }

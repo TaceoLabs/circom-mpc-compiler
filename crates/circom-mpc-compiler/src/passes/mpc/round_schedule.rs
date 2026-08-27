@@ -13,6 +13,10 @@ use crate::ir::{Graph, Node, Op, RoundDesc, RoundId, ValueId};
 
 use super::domain::compute_domains;
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
+)]
 pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     let nodes = graph.nodes();
     if nodes.is_empty() {
@@ -64,8 +68,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     let mut new_nodes: Vec<Node> = Vec::with_capacity(old_len);
     let mut new_rounds: Vec<RoundDesc> = Vec::new();
 
-    for (d, (level_nodes, level_rounds)) in nodes_by_depth.iter().zip(&rounds_by_depth).enumerate()
-    {
+    for (level_nodes, level_rounds) in nodes_by_depth.iter().zip(&rounds_by_depth) {
         for &i in level_nodes {
             let node = &nodes[i];
             let remapped_inputs = node
@@ -80,7 +83,6 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
             let round_id = RoundId::new(new_rounds.len());
             new_rounds.push(RoundDesc {
                 len: level_rounds.len(),
-                level: d,
             });
             let round_inputs = level_rounds
                 .iter()
@@ -141,8 +143,8 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(3), ValueId::new(2)]), // 4: (a*b)*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(4));
-        super::super::mul_split::run(&mut graph).unwrap();
-        let changed = run(&mut graph).unwrap();
+        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.rounds().len(), 2);
         assert!(graph.rounds().iter().all(|r| r.len == 1));
@@ -160,8 +162,8 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(4)]), // 5: a*b + b*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(5));
-        super::super::mul_split::run(&mut graph).unwrap();
-        let changed = run(&mut graph).unwrap();
+        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.rounds().len(), 1);
         assert_eq!(graph.rounds()[0].len, 2);
@@ -200,15 +202,12 @@ mod tests {
                 precomputed: false,
             }],
         );
-        super::super::mul_split::run(&mut graph).unwrap();
-        let changed = run(&mut graph).unwrap();
+        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         // Two products separated by a site service: they can never share a round.
         assert_eq!(graph.rounds().len(), 2);
         assert!(graph.rounds().iter().all(|r| r.len == 1));
-        // The site sits between them on the same axis, so the second round is two levels later.
-        assert_eq!(graph.rounds()[0].level, 0);
-        assert_eq!(graph.rounds()[1].level, 2);
     }
 
     /// Even without secret multiplications, level sorting is required to put every independent
@@ -245,7 +244,7 @@ mod tests {
             .collect();
         let mut graph = graph_with_sites(nodes, ValueId::new(7), sites);
 
-        let changed = run(&mut graph).unwrap();
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert!(graph.rounds().is_empty());
 
@@ -253,12 +252,12 @@ mod tests {
             .nodes()
             .iter()
             .position(|node| matches!(&node.op, Op::Gadget(site) if site.index() == 1))
-            .unwrap();
+            .expect("site B must still be present after scheduling");
         let first_consumer = graph
             .nodes()
             .iter()
             .position(|node| matches!(node.op, Op::Add))
-            .unwrap();
+            .expect("site A's consumer must still be present after scheduling");
         assert!(
             later_site < first_consumer,
             "site B at {later_site} must precede site A's consumer at {first_consumer}"
@@ -266,7 +265,8 @@ mod tests {
 
         // This used to fail the batch anchor/deadline check in codegen.
         graph.mark_lowered();
-        let program = crate::codegen::compile(&graph).unwrap();
+        let program =
+            crate::codegen::compile(&graph).expect("compile should succeed for this test graph");
         assert_eq!(program.gadget_batches().len(), 1);
     }
 
@@ -292,11 +292,10 @@ mod tests {
         }
 
         let mut graph = graph_of(nodes, value);
-        let changed = run(&mut graph).unwrap();
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.rounds().len(), DEPTH);
-        for (level, round) in graph.rounds().iter().enumerate() {
-            assert_eq!(round.level, level);
+        for round in graph.rounds() {
             assert_eq!(round.len, 1);
         }
     }

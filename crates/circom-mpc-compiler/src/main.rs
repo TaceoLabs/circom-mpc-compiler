@@ -85,7 +85,7 @@ fn build_config(cli: &Cli) -> eyre::Result<CompilerConfig> {
         config.opt_level = opt_level(opt)?;
     }
     if let Some(version) = &cli.circom_version {
-        config.version = version.clone();
+        config.version.clone_from(version);
     }
     if cli.inspect {
         config.inspect = true;
@@ -100,9 +100,7 @@ fn output_path(cli: &Cli) -> PathBuf {
     cli.output.clone().unwrap_or_else(|| {
         let stem = cli
             .circuit
-            .file_stem()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("out"));
+            .file_stem().map_or_else(|| PathBuf::from("out"), PathBuf::from);
         stem.with_extension("cmpc")
     })
 }
@@ -116,28 +114,35 @@ fn main() -> eyre::Result<()> {
     let program = CoCircomCompiler::compile(&cli.circuit, config)?;
 
     let stats = program.statistics();
-    eprintln!("compiled: {}", cli.circuit.display());
-    eprintln!(
+    tracing::info!("compiled: {}", cli.circuit.display());
+    tracing::info!(
         "  {} instructions, {} inputs, {} witness values",
-        stats.instructions, stats.inputs, stats.witness_values
+        stats.instructions,
+        stats.inputs,
+        stats.witness_values
     );
-    eprintln!(
+    tracing::info!(
         "  slots public={} shared={} local={}",
-        stats.public_slots, stats.shared_slots, stats.local_slots
+        stats.public_slots,
+        stats.shared_slots,
+        stats.local_slots
     );
-    eprintln!(
+    tracing::info!(
         "  multiplication rounds={} elements={}",
-        stats.multiplication_rounds, stats.multiplication_elements
+        stats.multiplication_rounds,
+        stats.multiplication_elements
     );
-    eprintln!(
+    tracing::info!(
         "  gadget: {} sites -> {} batches ({} host-precomputed)",
-        stats.gadget_sites, stats.gadget_batches, stats.precomputed_batches
+        stats.gadget_sites,
+        stats.gadget_batches,
+        stats.precomputed_batches
     );
 
     program.write(&mut BufWriter::new(
         File::create(&out).map_err(|e| eyre::eyre!("creating {}: {e}", out.display()))?,
     ))?;
-    eprintln!("wrote:    {}", out.display());
+    tracing::info!("wrote:    {}", out.display());
 
     Ok(())
 }

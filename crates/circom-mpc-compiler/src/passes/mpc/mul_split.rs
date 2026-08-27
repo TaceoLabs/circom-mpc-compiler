@@ -10,6 +10,10 @@ use crate::ir::{Graph, Node, Op, RewriteAction, RoundDesc, RoundId, ValueId};
 
 use super::domain::{compute_domains, Domain};
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
+)]
 pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     // The split decision depends only on the *old* graph, so classify it up front. Inside the
     // rewrite closure only the old-space node id is stable (`Graph::rewrite` remaps inputs to
@@ -34,10 +38,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         let mul_local_id = ValueId::new(emitted.len());
         let round_new_id = ValueId::new(emitted.len() + 1);
         let round_id = RoundId::new(rounds.len());
-        rounds.push(RoundDesc {
-            len: 1,
-            level: 0, // recomputed structurally by round_schedule; unused until then
-        });
+        rounds.push(RoundDesc { len: 1 });
         RewriteAction::EmitMany(vec![
             Node::new(Op::MulLocal, node.inputs.clone()),
             Node::new(Op::Round(round_id), vec![mul_local_id]),
@@ -80,12 +81,12 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).unwrap();
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.len(), 5); // Input, Input, MulLocal, Round, RoundResult
-        assert!(matches!(graph.node(ValueId::new(2)).op, Op::MulLocal));
-        assert!(matches!(graph.node(ValueId::new(3)).op, Op::Round(_)));
-        assert!(matches!(graph.node(ValueId::new(4)).op, Op::RoundResult(0)));
+        assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::MulLocal));
+        assert!(matches!(graph.nodes()[ValueId::new(3).index()].op, Op::Round(_)));
+        assert!(matches!(graph.nodes()[ValueId::new(4).index()].op, Op::RoundResult(0)));
         assert_eq!(graph.rounds().len(), 1);
         assert_eq!(graph.rounds()[0].len, 1);
     }
@@ -99,10 +100,10 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).unwrap();
+        let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(!changed);
         assert_eq!(graph.len(), 3);
-        assert!(matches!(graph.node(ValueId::new(2)).op, Op::Mul));
+        assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::Mul));
         assert!(graph.rounds().is_empty());
     }
 }

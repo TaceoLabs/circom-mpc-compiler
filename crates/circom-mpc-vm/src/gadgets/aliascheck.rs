@@ -9,8 +9,8 @@
 //! signal-span accounting doesn't let it skip.
 //!
 //! Slot order (519 total, no outputs): `[0] compConstant.out` (`== bits[127]`, still a genuine
-//! witness signal despite aliasing one of Num2Bits' own outputs), `[1..255] compConstant.in[0..254]`
-//! (copies of AliasCheck's own 254 inputs, per circom's `==>` semantics), `[255..382] parts[0..127]`,
+//! witness signal despite aliasing one of `Num2Bits`' own outputs), `[1..255] compConstant.in[0..254]`
+//! (copies of `AliasCheck`'s own 254 inputs, per circom's `==>` semantics), `[255..382] parts[0..127]`,
 //! `[382] sout`, `[383..518] num2bits.out[0..135]`, `[518] num2bits.in` (a second copy of `sout`).
 
 use ark_bn254::Fr;
@@ -45,6 +45,11 @@ const CT_BITS_MINUS_ONE: [bool; 254] = [
 ];
 
 /// The 519-slot result trace for one `AliasCheck` site, given its 254 inputs (`in[0..254]`).
+///
+/// # Panics
+///
+/// Panics if `input.len() != 254`.
+#[must_use]
 pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     assert_eq!(
         input.len(),
@@ -62,13 +67,13 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     for i in 0..127 {
         let lo = i * 2;
         let hi = lo + 1;
-        let (clsb, cmsb) = (ct_bits[lo], ct_bits[hi]);
-        let (slsb, smsb) = (input[lo], input[hi]);
-        let part = match (cmsb, clsb) {
-            (false, false) => -b * smsb * slsb + b * smsb + b * slsb,
-            (false, true) => a * smsb * slsb - a * slsb + b * smsb - a * smsb + a,
-            (true, false) => b * smsb * slsb - a * smsb + a,
-            (true, true) => -a * smsb * slsb + a,
+        let (low_bit, high_bit) = (ct_bits[lo], ct_bits[hi]);
+        let (low_sig, high_sig) = (input[lo], input[hi]);
+        let part = match (high_bit, low_bit) {
+            (false, false) => -b * high_sig * low_sig + b * high_sig + b * low_sig,
+            (false, true) => a * high_sig * low_sig - a * low_sig + b * high_sig - a * high_sig + a,
+            (true, false) => b * high_sig * low_sig - a * high_sig + a,
+            (true, true) => -a * high_sig * low_sig + a,
         };
         sum += part;
         parts.push(part);
@@ -101,6 +106,11 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
 ///
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
 /// The strategy-selected A2B conversion and `bit_inject_many` are batched the same way.
+///
+/// # Errors
+///
+/// Returns an error if `inputs` is empty or its length isn't a multiple of 254, or if any
+/// underlying network round fails.
 pub fn rep3_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
@@ -122,7 +132,7 @@ pub fn rep3_trace<N: mpc_net::Network>(
     // Every site's 127 pairwise products, batched into one round.
     let mut lhs = Vec::with_capacity(sites * 127);
     let mut rhs = Vec::with_capacity(sites * 127);
-    for site in inputs.chunks_exact(254) {
+    for site in inputs.as_chunks::<254>().0 {
         for i in 0..127 {
             lhs.push(site[i * 2]);
             rhs.push(site[i * 2 + 1]);
@@ -132,7 +142,12 @@ pub fn rep3_trace<N: mpc_net::Network>(
 
     let mut sums = Vec::with_capacity(sites);
     let mut all_parts = Vec::with_capacity(sites);
-    for (site, prod) in inputs.chunks_exact(254).zip(products.chunks_exact(127)) {
+    for (site, prod) in inputs
+        .as_chunks::<254>()
+        .0
+        .iter()
+        .zip(products.as_chunks::<127>().0)
+    {
         let mut b = Fr::from(u128::MAX);
         let mut a = Fr::one();
         let mut e = Fr::one();
@@ -141,23 +156,25 @@ pub fn rep3_trace<N: mpc_net::Network>(
         for (i, &smsb_times_slsb) in prod.iter().enumerate() {
             let lo = i * 2;
             let hi = lo + 1;
-            let (clsb, cmsb) = (ct_bits[lo], ct_bits[hi]);
-            let (slsb, smsb) = (site[lo], site[hi]);
-            let part = match (cmsb, clsb) {
+            let (low_bit, high_bit) = (ct_bits[lo], ct_bits[hi]);
+            let (low_sig, high_sig) = (site[lo], site[hi]);
+            let part = match (high_bit, low_bit) {
                 (false, false) => {
                     arithmetic::mul_public(smsb_times_slsb, -b)
-                        + arithmetic::mul_public(smsb, b)
-                        + arithmetic::mul_public(slsb, b)
+                        + arithmetic::mul_public(high_sig, b)
+                        + arithmetic::mul_public(low_sig, b)
                 }
                 (false, true) => arithmetic::add_public(
-                    arithmetic::mul_public(smsb_times_slsb, a) - arithmetic::mul_public(slsb, a)
-                        + arithmetic::mul_public(smsb, b)
-                        - arithmetic::mul_public(smsb, a),
+                    arithmetic::mul_public(smsb_times_slsb, a)
+                        - arithmetic::mul_public(low_sig, a)
+                        + arithmetic::mul_public(high_sig, b)
+                        - arithmetic::mul_public(high_sig, a),
                     a,
                     my_id,
                 ),
                 (true, false) => arithmetic::add_public(
-                    arithmetic::mul_public(smsb_times_slsb, b) - arithmetic::mul_public(smsb, a),
+                    arithmetic::mul_public(smsb_times_slsb, b)
+                        - arithmetic::mul_public(high_sig, a),
                     a,
                     my_id,
                 ),
@@ -215,7 +232,7 @@ mod tests {
         let mut input = super::num2bits::plain_trace(Fr::from(123_456_789u64), 254);
         input.extend(super::num2bits::plain_trace(Fr::from(42u64), 254));
         let mut expected = Vec::new();
-        for site in input.chunks_exact(254) {
+        for site in input.as_chunks::<254>().0 {
             expected.extend(plain_trace(site));
         }
 

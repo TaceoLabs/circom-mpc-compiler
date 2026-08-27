@@ -6,6 +6,7 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 
 /// `x`'s canonical representative, as `n` bits, least-significant first.
+#[must_use]
 pub fn plain_trace(x: Fr, n: usize) -> Vec<Fr> {
     let bigint = x.into_bigint();
     (0..n)
@@ -22,6 +23,10 @@ pub fn plain_trace(x: Fr, n: usize) -> Vec<Fr> {
 /// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`):
 /// one strategy-selected A2B conversion across every site's input, then one `bit_inject_many`
 /// across every site's bits.
+///
+/// # Errors
+///
+/// Returns an error if any underlying computation/network round fails.
 pub fn rep3_trace<N: mpc_net::Network>(
     n: usize,
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
@@ -50,7 +55,7 @@ mod tests {
 
     #[test]
     fn rep3_agrees_with_plain_across_two_sites() {
-        let values = [Fr::from(0b1011010u64), Fr::from(0b0001111u64)];
+        let values = [Fr::from(0b101_1010u64), Fr::from(0b000_1111u64)];
         let n = 12;
         let expected: Vec<Fr> = values.iter().flat_map(|&x| plain_trace(x, n)).collect();
 

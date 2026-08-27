@@ -203,7 +203,7 @@ impl<'a> GraphCompiler<'a> {
                 is_output,
                 ..
             } => {
-                debug_assert!(*is_output);
+                debug_assert!(*is_output, "a subcomponent read must target one of its outputs");
                 let cmp_index = self.get_constant_value(cmp_address);
                 self.push_sub_cmp_output_read(cmp_index, index)
             }
@@ -223,7 +223,7 @@ impl<'a> GraphCompiler<'a> {
                 is_output,
                 ..
             } => {
-                debug_assert!(!*is_output);
+                debug_assert!(!*is_output, "a subcomponent write must target one of its inputs");
                 let cmp_index = self.get_constant_value(cmp_address);
                 self.push_sub_cmp_input(cmp_index, index, value);
             }
@@ -241,7 +241,7 @@ impl<'a> GraphCompiler<'a> {
                     store_bucket.line,
                 ));
             }
-            _ => {}
+            SizeOption::Single(_) => {}
         }
 
         let value = self.expect_value(&store_bucket.src)?;
@@ -484,19 +484,10 @@ impl<'a> GraphCompiler<'a> {
             TemplateOp::Real(Op::Mul) => Some(
                 self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
             ),
-            TemplateOp::Real(Op::Input(_))
-            // Gadget/GadgetResult/MulLocal/Round/RoundResult are inlining-or-lowering-time-
-            // only ops (see TemplateOp::arity above) and never appear here, but are included so
-            // this match stays exhaustive as Op grows.
-            | TemplateOp::Real(Op::Gadget(_))
-            | TemplateOp::Real(Op::GadgetResult(_))
-            | TemplateOp::Real(Op::MulLocal)
-            | TemplateOp::Real(Op::Round(_))
-            | TemplateOp::Real(Op::RoundResult(_))
-            | TemplateOp::LocalSignal(_)
-            | TemplateOp::LocalSignalWrite(_)
-            | TemplateOp::SubCmpInput { .. }
-            | TemplateOp::SubCmpOutput { .. } => None,
+            TemplateOp::Real(Op::Input(_) | Op::Gadget(_) | Op::GadgetResult(_) |
+Op::MulLocal | Op::Round(_) | Op::RoundResult(_)) | TemplateOp::LocalSignal(_)
+| TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } |
+TemplateOp::SubCmpOutput { .. } => None,
         }
     }
 
@@ -533,11 +524,6 @@ impl<'a> GraphCompiler<'a> {
                     self.get_constant_value(&compute_bucket.stack[0])
                         * self.get_constant_value(&compute_bucket.stack[1])
                 }
-                OperatorType::AddAddress => {
-                    assert_eq!(compute_bucket.stack.len(), 2, "add is a bin op");
-                    self.get_constant_value(&compute_bucket.stack[0])
-                        + self.get_constant_value(&compute_bucket.stack[1])
-                }
                 OperatorType::ToAddress => {
                     assert_eq!(compute_bucket.stack.len(), 1, "to address is a unary op");
                     self.get_constant_value(&compute_bucket.stack[0])
@@ -553,7 +539,7 @@ impl<'a> GraphCompiler<'a> {
                     self.get_constant_value(&compute_bucket.stack[0])
                         - self.get_constant_value(&compute_bucket.stack[1])
                 }
-                OperatorType::Add => {
+                OperatorType::AddAddress | OperatorType::Add => {
                     assert_eq!(compute_bucket.stack.len(), 2, "add is a bin op");
                     self.get_constant_value(&compute_bucket.stack[0])
                         + self.get_constant_value(&compute_bucket.stack[1])
@@ -661,9 +647,9 @@ impl<'a> GraphCompiler<'a> {
         )
     }
 
-    fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> Result<ValueId> {
+    fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> ValueId {
         match value_bucket.parse_as {
-            ValueType::BigInt => Ok(self.push_constant(value_bucket.value)),
+            ValueType::BigInt => self.push_constant(value_bucket.value),
             ValueType::U32 => unreachable!("this should never happen!!!! (I guess )"),
         }
     }
@@ -766,7 +752,7 @@ impl<'a> GraphCompiler<'a> {
 
     pub(crate) fn handle_inst(&mut self, inst: &Instruction) -> Result<Option<ValueId>> {
         match inst {
-            Instruction::Value(value_bucket) => Ok(Some(self.handle_value_bucket(value_bucket)?)),
+            Instruction::Value(value_bucket) => Ok(Some(self.handle_value_bucket(value_bucket))),
             Instruction::Load(load_bucket) => Ok(Some(self.handle_load_bucket(load_bucket)?)),
             Instruction::Store(store_bucket) => {
                 self.handle_store_bucket(store_bucket)?;
@@ -803,7 +789,7 @@ impl<'a> GraphCompiler<'a> {
     pub(crate) fn parse(mut self) -> Result<TemplateGraph> {
         tracing::debug!("parsing {}", self.code.header);
         let body = std::mem::take(&mut self.code.body);
-        for inst in body.iter() {
+        for inst in &body {
             self.handle_inst(inst)?;
         }
         Ok(TemplateGraph {

@@ -43,14 +43,13 @@ const fn external_matmul_leaf_signals(t: usize) -> usize {
 
 /// `ExternalMatMulT(t)`: `[out[t]][in[t]]` plus its subtree.
 const fn external_matmul_signals(t: usize) -> usize {
-    match t {
-        2..=4 => 2 * t + external_matmul_leaf_signals(t),
-        _ => {
-            let m = t / 4;
-            // 4 x Acc(m), then m x ExternalMatMul4 - in that order, per the instance-id rule (a sum,
-            // so the two terms' order here doesn't matter; see `external_matmul` for where it does).
-            2 * t + m * 18 + 4 * acc_signals(m)
-        }
+    if let 2..=4 = t {
+        2 * t + external_matmul_leaf_signals(t)
+    } else {
+        let m = t / 4;
+        // 4 x Acc(m), then m x ExternalMatMul4 - in that order, per the instance-id rule (a sum,
+        // so the two terms' order here doesn't matter; see `external_matmul` for where it does).
+        2 * t + m * 18 + 4 * acc_signals(m)
     }
 }
 
@@ -178,8 +177,9 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
     }
 
     fn destination(&self, logical: usize) -> Option<usize> {
-        debug_assert!(logical < self.capacity);
-        self.requests.binary_search(&(logical as u32)).ok()
+        debug_assert!(logical < self.capacity, "logical result slot out of range");
+        let logical = u32::try_from(logical).expect("Poseidon2 result count never approaches u32::MAX");
+        self.requests.binary_search(&logical).ok()
     }
 
     fn wants(&self, logical: usize) -> bool {
@@ -235,7 +235,11 @@ impl Layout {
         let initial_matmul = states + (9 + pr) * t;
         let full = initial_matmul + external_matmul_signals(t);
         let partial = full + 8 * full_round_signals(t);
-        debug_assert_eq!(partial + pr * partial_round_signals(t), result_slots(t));
+        debug_assert_eq!(
+            partial + pr * partial_round_signals(t),
+            result_slots(t),
+            "Layout::new must account for every result slot"
+        );
         Self {
             states,
             initial_matmul,
@@ -418,22 +422,21 @@ fn internal_matmul<O: Ops>(
 ) -> Vec<O::V> {
     let t = input.len();
     trace.record_slice(base + t, input);
-    let out = match t {
-        2..=3 => internal_matmul_leaf(ops, input, trace, base + 2 * t),
-        _ => {
-            let acc_value = acc(ops, input, trace, base + 2 * t + 1);
-            let out: Vec<O::V> = input
-                .iter()
-                .zip(diag)
-                .map(|(x, &d)| {
-                    let scaled = ops.mul_public(x, d);
-                    ops.add(&scaled, &acc_value)
-                })
-                .collect();
-            // Own intermediate `acc` precedes the `Acc(t)` subtree.
-            trace.record(base + 2 * t, &acc_value);
-            out
-        }
+    let out = if let 2..=3 = t {
+        internal_matmul_leaf(ops, input, trace, base + 2 * t)
+    } else {
+        let acc_value = acc(ops, input, trace, base + 2 * t + 1);
+        let out: Vec<O::V> = input
+            .iter()
+            .zip(diag)
+            .map(|(x, &d)| {
+                let scaled = ops.mul_public(x, d);
+                ops.add(&scaled, &acc_value)
+            })
+            .collect();
+        // Own intermediate `acc` precedes the `Acc(t)` subtree.
+        trace.record(base + 2 * t, &acc_value);
+        out
     };
     trace.record_slice(base, &out);
     out
@@ -454,6 +457,10 @@ fn record_sbox_e<V: Clone>(
 
 /// Runs the permutation for every site in `states` (each `t` elements, concatenated) in lock-step,
 /// so each round's s-boxes across the whole batch are one [`Ops::sbox_layer`] call.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a single sequential walk over every permutation round; splitting it would not improve clarity"
+)]
 fn walk<O: Ops>(
     ops: &mut O,
     t: usize,
@@ -464,7 +471,7 @@ fn walk<O: Ops>(
     let sites = states.len() / t;
     let pr = partial_rounds(t);
     let layout = Layout::new(t);
-    debug_assert_eq!(outputs.len(), sites);
+    debug_assert_eq!(outputs.len(), sites, "one SiteOutput per site");
 
     // Current state per site. Witness values are recorded directly into `outputs`; no round or
     // subcomponent trace blocks are materialized.
@@ -668,6 +675,11 @@ fn requested_outputs<'a, V: Clone>(
 /// All permutation state and s-box layers are still evaluated, because they feed later rounds. The
 /// optimization is that witness-dead state copies, round constants, and subcomponent intermediates
 /// are never materialized in the returned trace.
+///
+/// # Errors
+///
+/// Returns an error if `t` is unsupported, `states.len()` isn't a multiple of `t`, or
+/// `result_requests`/`result_offsets` don't form a valid CSR table over `0..result_slots(t)`.
 pub fn plain_trace_requested(
     t: usize,
     states: &[Fr],
@@ -686,6 +698,10 @@ pub fn plain_trace_requested(
 /// outputs/intermediates, and exactly the shape `Machine::run_with_precomputation` expects. A thin,
 /// full-CSR-request wrapper over [`plain_trace_requested`] for a host that wants to precompute a
 /// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`.
+///
+/// # Errors
+///
+/// Returns an error if `t` is unsupported or `states.len()` isn't a multiple of `t`.
 pub fn plain_trace(t: usize, states: &[Fr]) -> eyre::Result<Vec<crate::SiteTrace<Fr>>> {
     let sites = check_width(t, states.len())?;
     let capacity = result_slots(t);
@@ -695,13 +711,15 @@ pub fn plain_trace(t: usize, states: &[Fr]) -> eyre::Result<Vec<crate::SiteTrace
         &full_requests(sites, capacity),
         &full_offsets(sites, capacity),
     )?;
-    Ok(split_into_site_traces(t, capacity, flat))
+    Ok(split_into_site_traces(t, capacity, &flat))
 }
 
 /// A full ascending CSR request table asking for every logical slot of every site: `sites` copies
 /// of `0..capacity`, one per site row - shared by every "give me everything" entry point below.
 fn full_requests(sites: usize, capacity: usize) -> Vec<u32> {
-    (0..sites).flat_map(|_| 0..capacity as u32).collect()
+    let capacity =
+        u32::try_from(capacity).expect("Poseidon2 result capacity does not fit into u32");
+    (0..sites).flat_map(|_| 0..capacity).collect()
 }
 
 /// The matching CSR row-pointer table for [`full_requests`]: `sites` equal-width rows.
@@ -714,7 +732,7 @@ fn full_offsets(sites: usize, capacity: usize) -> Vec<u32> {
 /// Splits a flat, site-major, full-capacity trace (as produced by a `full_requests`/`full_offsets`
 /// call) into one [`crate::SiteTrace`] per site - slots `0..t` are the permutation's outputs
 /// (`Layout::states == t`), the rest its intermediates.
-fn split_into_site_traces<V>(t: usize, capacity: usize, flat: Vec<V>) -> Vec<crate::SiteTrace<V>>
+fn split_into_site_traces<V>(t: usize, capacity: usize, flat: &[V]) -> Vec<crate::SiteTrace<V>>
 where
     V: Clone,
 {
@@ -918,7 +936,7 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
 
         let n = xs.len();
         self.pool.ensure_available(n)?;
-        let pool = &mut self.pool;
+        let pool = &mut *self.pool;
         let start = pool.consumed;
         let end = start + n;
         pool.consumed = end;
@@ -1030,6 +1048,10 @@ pub struct Poseidon2Service {
 impl Poseidon2Service {
     /// Prepares the correlated randomness for `sites` sites' worth of Poseidon2(t) traces, in
     /// exactly 3 rounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` is unsupported or preparing the mask pool fails.
     pub fn new<N: mpc_net::Network>(
         t: usize,
         sites: usize,
@@ -1044,6 +1066,11 @@ impl Poseidon2Service {
     /// concatenated) and returns each site's full trace. Consumes exactly this call's share of the
     /// pool `new` prepared; calling it for more sites than `new` was sized for fails cleanly rather
     /// than running out of randomness mid-round.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` doesn't match the width `new` was prepared for, `states.len()`
+    /// isn't a multiple of `t`, or the pool/network round fails.
     pub fn trace<N: mpc_net::Network>(
         &mut self,
         t: usize,
@@ -1068,12 +1095,16 @@ impl Poseidon2Service {
             &full_requests(sites, capacity),
             &full_offsets(sites, capacity),
         )?;
-        Ok(split_into_site_traces(t, capacity, flat))
+        Ok(split_into_site_traces(t, capacity, &flat))
     }
 
     /// Verifies every prepared mask was actually consumed - a caller that sized `new` for more
     /// sites than it ever called `trace` for has a bug worth surfacing, the same way
     /// `Rep3Driver::finish_run` surfaces it for the VM's own pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any prepared mask was never consumed.
     pub fn finish(self) -> eyre::Result<()> {
         self.preprocessing.ensure_consumed()
     }
@@ -1088,15 +1119,19 @@ mod tests {
     /// A CSR request table asking for every logical slot of every site.
     fn full_csr(t: usize, sites: usize) -> (Vec<u32>, Vec<u32>) {
         let capacity = result_slots(t);
-        let requests = (0..sites).flat_map(|_| 0..capacity as u32).collect();
-        let offsets = (0..=sites).map(|s| (s * capacity) as u32).collect();
+        let capacity_u32 = u32::try_from(capacity).expect("test fixture capacity fits in u32");
+        let requests = (0..sites).flat_map(|_| 0..capacity_u32).collect();
+        let offsets = (0..=sites)
+            .map(|s| u32::try_from(s * capacity).expect("test fixture offset fits in u32"))
+            .collect();
         (requests, offsets)
     }
 
     /// The full plain trace, via the requested path (the only production path).
     fn plain_full(t: usize, states: &[Fr]) -> Vec<Fr> {
         let (requests, offsets) = full_csr(t, states.len() / t);
-        plain_trace_requested(t, states, &requests, &offsets).unwrap()
+        plain_trace_requested(t, states, &requests, &offsets)
+            .expect("a full CSR over a supported width must always succeed")
     }
 
     /// One fresh preprocessing pool + one requested trace, the way the rep3 driver runs it.
@@ -1168,8 +1203,10 @@ mod tests {
             let mut offsets = vec![0u32];
             // Site 0 requests everything, which checks that every layout path can address every
             // logical slot. Site 1 is genuinely sparse and crosses all major section boundaries.
-            requests.extend((0..capacity).map(|slot| slot as u32));
-            offsets.push(requests.len() as u32);
+            requests.extend(
+                (0..capacity).map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32")),
+            );
+            offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
             let layout = Layout::new(t);
             let mut sparse_site = vec![
                 0,
@@ -1186,12 +1223,17 @@ mod tests {
             sparse_site.extend((1..capacity).step_by(97));
             sparse_site.sort_unstable();
             sparse_site.dedup();
-            requests.extend(sparse_site.iter().map(|&slot| slot as u32));
-            offsets.push(requests.len() as u32);
+            requests.extend(
+                sparse_site
+                    .iter()
+                    .map(|&slot| u32::try_from(slot).expect("test fixture slot fits in u32")),
+            );
+            offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
             // Site 2 deliberately requests nothing; it must still ride the same permutation batch.
-            offsets.push(requests.len() as u32);
+            offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
 
-            let got = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+            let got = plain_trace_requested(t, &states, &requests, &offsets)
+                .expect("a well-formed CSR over a supported width must succeed");
             let mut expected = full[..capacity].to_vec();
             expected.extend(sparse_site.iter().map(|&slot| full[capacity + slot]));
             assert_eq!(got, expected, "t={t}");
@@ -1202,26 +1244,54 @@ mod tests {
     fn requested_trace_validates_its_csr() {
         let t = 3;
         let states = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
-        let capacity = result_slots(t) as u32;
+        let capacity = u32::try_from(result_slots(t)).expect("test fixture capacity fits in u32");
 
-        assert!(plain_trace_requested(t, &states, &[0], &[0]).is_err());
-        assert!(plain_trace_requested(t, &states, &[0], &[1, 1]).is_err());
-        assert!(plain_trace_requested(t, &states, &[0], &[0, 0]).is_err());
-        assert!(plain_trace_requested(t, &states, &[1, 0], &[0, 2]).is_err());
-        assert!(plain_trace_requested(t, &states, &[capacity], &[0, 1]).is_err());
+        drop(
+            plain_trace_requested(t, &states, &[0], &[0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(t, &states, &[0], &[1, 1])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(t, &states, &[0], &[0, 0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(t, &states, &[1, 0], &[0, 2])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(t, &states, &[capacity], &[0, 1])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
 
         assert_eq!(
-            plain_trace_requested(t, &states, &[], &[0, 0]).unwrap(),
+            plain_trace_requested(t, &states, &[], &[0, 0])
+                .expect("an empty request list is a valid (trivial) CSR"),
             Vec::<Fr>::new()
         );
     }
 
     #[test]
     fn rejects_unsupported_width_and_ragged_input() {
-        assert!(plain_trace_requested(5, &[Fr::from(0u64); 5], &[], &[0]).is_err());
-        assert!(plain_trace_requested(12, &[Fr::from(0u64); 12], &[], &[0]).is_err());
-        assert!(plain_trace_requested(3, &[], &[], &[0]).is_err());
-        assert!(plain_trace_requested(3, &[Fr::from(0u64); 4], &[], &[0]).is_err());
+        drop(
+            plain_trace_requested(5, &[Fr::from(0u64); 5], &[], &[0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(12, &[Fr::from(0u64); 12], &[], &[0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(3, &[], &[], &[0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
+        drop(
+            plain_trace_requested(3, &[Fr::from(0u64); 4], &[], &[0])
+                .expect_err("must reject a malformed CSR/width/input"),
+        );
     }
 
     /// Guards the vendored constant tables against drifting from the circuit they were copied from.
@@ -1233,7 +1303,7 @@ mod tests {
         ))
         .expect("the vendored constants circuit must be readable");
         for t in SUPPORTED_WIDTHS {
-            let rc = RoundConstants::load(t).unwrap();
+            let rc = RoundConstants::load(t).expect("t is one of the supported widths");
             assert_eq!(rc.full1.len(), 4 * t, "t={t} rc_full1");
             assert_eq!(rc.full2.len(), 4 * t, "t={t} rc_full2");
             assert_eq!(rc.partial.len(), partial_rounds(t), "t={t} rc_partial");
@@ -1285,10 +1355,11 @@ mod tests {
         let capacity = result_slots(t);
         let requests: Vec<u32> = [0, 3, 4, capacity / 2, capacity - 1, 1, 97, capacity - 2]
             .into_iter()
-            .map(|slot| slot as u32)
+            .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32"))
             .collect();
         let offsets = [0, 5, 8];
-        let expected = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+        let expected = plain_trace_requested(t, &states, &requests, &offsets)
+            .expect("a well-formed CSR over a supported width must succeed");
         let got = run3(&states, |net, state, shares| {
             rep3_requested(t, shares, net, state, &requests, &offsets)
         });
@@ -1310,16 +1381,19 @@ mod tests {
             let capacity = result_slots(t);
             let requests: Vec<u32> = [0, t - 1, t, capacity / 2, capacity - 1, 1, 97, capacity - 2]
                 .into_iter()
-                .map(|slot| slot as u32)
+                .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32"))
                 .collect();
             let offsets = [0, 5, 8];
 
             let (full_requests, full_offsets) = full_csr(t, sites);
             let mut expected = plain_full(t, &states);
-            expected.extend(plain_trace_requested(t, &states, &requests, &offsets).unwrap());
+            expected.extend(
+                plain_trace_requested(t, &states, &requests, &offsets)
+                    .expect("a well-formed CSR over a supported width must succeed"),
+            );
 
-            let per_call = mask_elements(t, sites).unwrap();
-            let total = per_call.checked_mul(2).unwrap();
+            let per_call = mask_elements(t, sites).expect("t is one of the supported widths");
+            let total = per_call.checked_mul(2).expect("test-sized mask counts do not overflow");
             let got = run3(&states, |net, state, shares| {
                 let mut preprocessing = preprocess_rep3(total, net, state)?;
                 eyre::ensure!(
@@ -1370,7 +1444,7 @@ mod tests {
         use crate::gadgets::test_support::run3_counted_with_a2b;
 
         let values = [Fr::from(1u64)];
-        let budget = mask_elements(8, 3).unwrap();
+        let budget = mask_elements(8, 3).expect("t=8 is a supported width");
         let (_, rounds) =
             run3_counted_with_a2b(&values, A2BType::default(), |net, state, _shares| {
                 let preprocessing = preprocess_rep3(budget, net, state)?;
@@ -1399,7 +1473,7 @@ mod tests {
 
         for t in SUPPORTED_WIDTHS {
             let states: Vec<Fr> = (0..t).map(|i| Fr::from(i as u64 + 19)).collect();
-            let budget = mask_elements(t, 1).unwrap();
+            let budget = mask_elements(t, 1).expect("t is one of the supported widths");
             let expected_online = 8 + partial_rounds(t);
             let expected_full = plain_full(t, &states);
             let (full_requests, full_offsets) = full_csr(t, 1);
@@ -1426,10 +1500,14 @@ mod tests {
             let capacity = result_slots(t);
             let requests: Vec<u32> = [0, t - 1, t, capacity / 2, capacity - 1]
                 .into_iter()
-                .map(|slot| slot as u32)
+                .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32"))
                 .collect();
-            let offsets = [0, requests.len() as u32];
-            let expected_sparse = plain_trace_requested(t, &states, &requests, &offsets).unwrap();
+            let offsets = [
+                0,
+                u32::try_from(requests.len()).expect("test fixture length fits in u32"),
+            ];
+            let expected_sparse = plain_trace_requested(t, &states, &requests, &offsets)
+                .expect("a well-formed CSR over a supported width must succeed");
             let (sparse, sparse_rounds) =
                 run3_counted_with_a2b(&states, A2BType::default(), |net, state, shares| {
                     let mut preprocessing = preprocess_rep3(budget, net, state)?;
@@ -1471,7 +1549,7 @@ mod tests {
 
         let t = 4;
         let sites = 3;
-        let capacity = result_slots(t) as u32;
+        let capacity = u32::try_from(result_slots(t)).expect("test fixture capacity fits in u32");
         let requests = [0, capacity - 1, 1, capacity - 2];
         let offsets = [0, 2, 2, 4];
         let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 1)).collect();
@@ -1488,7 +1566,7 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let states: Vec<Fr> = (0..2 * t).map(|i| Fr::from(i as u64 + 1)).collect();
             let flat = plain_full(t, &states);
-            let traces = plain_trace(t, &states).unwrap();
+            let traces = plain_trace(t, &states).expect("t is one of the supported widths");
             assert_eq!(traces.len(), 2, "t={t}");
             let capacity = result_slots(t);
             for (site, trace) in traces.iter().enumerate() {
@@ -1516,7 +1594,7 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let sites = 2;
             let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 3)).collect();
-            let expected = plain_trace(t, &states).unwrap();
+            let expected = plain_trace(t, &states).expect("t is one of the supported widths");
             let got = run3(&states, |net, state, shares| {
                 let mut service = Poseidon2Service::new(t, sites, net, state)?;
                 let traces = service.trace(t, shares, net, state)?;
@@ -1558,8 +1636,8 @@ mod tests {
             let state: [Fr; T] = std::array::from_fn(|i| Fr::from(i as u64 + 7));
             let (mpc_core_out, _mpc_core_trace) = Poseidon2::<Fr, T, 5>::default()
                 .plain_permutation_intermediate(state)
-                .unwrap();
-            let ours = &plain_trace(T, &state).unwrap()[0];
+                .expect("mpc-core's plain permutation does not fail");
+            let ours = &plain_trace(T, &state).expect("T is a supported width")[0];
             assert_eq!(ours.output, mpc_core_out.to_vec(), "t={T}");
         }
         // `CircomTracePlainHasher` is only implemented for these widths.

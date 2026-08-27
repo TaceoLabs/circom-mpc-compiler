@@ -93,7 +93,7 @@ impl GraphCompiler<'_> {
             };
         for &induction_var in &round_trips {
             self.add_induction_variable_node(var_index, induction_var);
-            for inst in loop_bucket.body[..loop_bucket.body.len() - 1].iter() {
+            for inst in &loop_bucket.body[..loop_bucket.body.len() - 1] {
                 if stores_variable(inst, var_index, self) {
                     eyre::bail!("loop body writes to induction variable");
                 }

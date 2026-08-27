@@ -110,7 +110,7 @@ fn build_circuit(
         prime: "bn128".to_owned(),
     };
     let (_, vcp) = circom_constraint_generation::build_circuit(program_archive, build_config)
-        .map_err(|_| eyre::eyre!("cannot build vcp"))?;
+        .map_err(|()| eyre::eyre!("cannot build vcp"))?;
     let signal_spans = compute_signal_spans(&vcp);
 
     let flags = CompilationFlags {
@@ -125,18 +125,18 @@ fn build_circuit(
 
 /// Parses `file` all the way down to a flat, verified (but not yet garbage-collected)
 /// [`ir::Graph`]. The caller (`CoCircomCompiler::parse`) runs `gc`/`verify` on the result.
-pub(crate) fn build_graph(file: String, config: CompilerConfig) -> Result<ir::Graph> {
-    let program_archive = get_program_archive(file, &config)?;
+pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::Graph> {
+    let program_archive = get_program_archive(file, config)?;
     let public_inputs = program_archive.public_inputs.clone();
     let mpc_public_inputs = config.mpc_public_inputs.clone();
-    let (mut circuit, signal_spans) = build_circuit(program_archive, &config)?;
+    let (mut circuit, signal_spans) = build_circuit(program_archive, config)?;
     let constant_table = circuit
         .c_producer
         .get_field_constant_list()
         .iter()
         .map(|s| s.parse::<Fr>())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| eyre::eyre!("cannot parse string in constant list"))?;
+        .map_err(|()| eyre::eyre!("cannot parse string in constant list"))?;
 
     let mut templates = std::mem::take(&mut circuit.templates)
         .into_iter()

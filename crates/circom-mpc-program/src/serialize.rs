@@ -65,10 +65,15 @@ const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// shim: accepting an older layout could produce a plausible-looking wrong witness.
 const VERSION: u32 = 2;
 
+/// Caps [`Program::read`] enforces against an untrusted or corrupted input before it allocates
+/// anything, so a malformed length field can't drive an unbounded allocation.
 #[derive(Clone, Copy, Debug)]
 pub struct ProgramReadLimits {
+    /// Maximum number of bytes `read` will consume from the source.
     pub max_serialized_bytes: u64,
+    /// Maximum total bytes any single table is allowed to pre-allocate for.
     pub max_estimated_allocation: usize,
+    /// Maximum number of entries any single table may declare.
     pub max_table_entries: usize,
 }
 
@@ -77,7 +82,7 @@ impl Default for ProgramReadLimits {
         Self {
             max_serialized_bytes: 256 * 1024 * 1024,
             max_estimated_allocation: 256 * 1024 * 1024,
-            max_table_entries: 16_777_216,
+            max_table_entries: 0x0100_0000,
         }
     }
 }
@@ -180,17 +185,23 @@ impl GadgetKind {
         match self {
             GadgetKind::Poseidon2 { t } => {
                 w.write_u8(0)?;
-                w.write_u32::<LittleEndian>(*t as u32)?;
+                w.write_u32::<LittleEndian>(
+                    u32::try_from(*t).map_err(|_| eyre::eyre!("Poseidon2 t exceeds u32"))?,
+                )?;
             }
             GadgetKind::Num2Bits { n } => {
                 w.write_u8(1)?;
-                w.write_u32::<LittleEndian>(*n as u32)?;
+                w.write_u32::<LittleEndian>(
+                    u32::try_from(*n).map_err(|_| eyre::eyre!("Num2Bits n exceeds u32"))?,
+                )?;
             }
             GadgetKind::IsZero => w.write_u8(2)?,
             GadgetKind::AliasCheck => w.write_u8(3)?,
             GadgetKind::Reveal { n } => {
                 w.write_u8(5)?;
-                w.write_u32::<LittleEndian>(*n as u32)?;
+                w.write_u32::<LittleEndian>(
+                    u32::try_from(*n).map_err(|_| eyre::eyre!("Reveal n exceeds u32"))?,
+                )?;
             }
         }
         Ok(())
@@ -224,7 +235,9 @@ impl BatchKind {
             BatchKind::IsZeroReveal => w.write_u8(1)?,
             BatchKind::PrecomputedPoseidon2 { t } => {
                 w.write_u8(2)?;
-                w.write_u32::<LittleEndian>(*t as u32)?;
+                w.write_u32::<LittleEndian>(
+                    u32::try_from(*t).map_err(|_| eyre::eyre!("PrecomputedPoseidon2 t exceeds u32"))?,
+                )?;
             }
         }
         Ok(())
@@ -244,6 +257,11 @@ impl BatchKind {
 
 impl Program {
     /// Serializes this program. See the module doc for the exact format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the program fails [`Program::validate_encoding`], or if writing to
+    /// `w` fails.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
         self.validate_encoding()?;
         w.write_all(MAGIC)?;
@@ -333,10 +351,20 @@ impl Program {
     }
 
     /// Deserializes a program written by [`Program::write`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `r` doesn't hold a validly-encoded program, or reading from `r` fails.
     pub fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
         Self::read_with_limits(r, ProgramReadLimits::default())
     }
 
+    /// Like [`Program::read`], but also rejects any trailing bytes left in `r` after the program.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as [`Program::read`], or if `r` has trailing
+    /// bytes after the program.
     pub fn read_exact<R: Read>(r: &mut R) -> eyre::Result<Self> {
         let program = Self::read(r)?;
         let mut trailing = [0u8; 1];
@@ -344,6 +372,17 @@ impl Program {
         Ok(program)
     }
 
+    /// Like [`Program::read`], but with caller-supplied resource limits instead of
+    /// [`ProgramReadLimits::default`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `r` doesn't hold a validly-encoded program, if any table exceeds
+    /// `limits`, or reading from `r` fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a single sequential deserialization pass mirroring Program::write's field order; splitting it would not improve clarity"
+    )]
     pub fn read_with_limits<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<Self> {
         let mut limited = r.take(limits.max_serialized_bytes.saturating_add(1));
         let r = &mut limited;
@@ -475,9 +514,11 @@ impl Program {
                 result_requests.len(),
                 result_targets.len()
             );
+            let result_request_count = u32::try_from(result_requests.len())
+                .map_err(|_| eyre::eyre!("gadget batch has too many result requests"))?;
             eyre::ensure!(
                 result_offsets.first() == Some(&0)
-                    && result_offsets.last().copied() == Some(result_requests.len() as u32)
+                    && result_offsets.last().copied() == Some(result_request_count)
                     && result_offsets.windows(2).all(|w| w[0] <= w[1]),
                 "gadget batch has invalid CSR result offsets"
             );
@@ -547,7 +588,8 @@ impl Program {
 mod tests {
     #[test]
     fn read_rejects_bad_magic() {
-        let err = super::Program::read(&mut [0u8; 16].as_slice()).unwrap_err();
+        let err = super::Program::read(&mut [0u8; 16].as_slice())
+            .expect_err("all-zero bytes are not a valid magic");
         assert!(err.to_string().contains("bad magic"), "{err}");
     }
 }

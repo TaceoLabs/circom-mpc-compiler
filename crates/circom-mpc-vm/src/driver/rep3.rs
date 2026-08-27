@@ -19,7 +19,9 @@ use super::VmDriver;
 /// The lifecycle is `Ready -> Running -> Spent`; opening/splitting the resulting witness remains
 /// allowed after `Spent` because it consumes no Poseidon masks.
 pub struct Rep3Driver<'a, N: Network> {
+    /// The network connection to the other two parties.
     pub net: &'a N,
+    /// This party's rep3 protocol state.
     pub state: &'a mut Rep3State,
     poseidon2: gadgets::poseidon2::Rep3Poseidon2Preprocessing,
     lifecycle: Lifecycle,
@@ -36,6 +38,11 @@ impl<'a, N: Network> Rep3Driver<'a, N> {
     /// Validates `program`, derives its checked mask budget from executable shared-Poseidon2
     /// instructions, and prepares the complete fresh pool in three rounds (or zero rounds when the
     /// budget is zero). The derived budget is runtime state and is not part of program serialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `program` fails its own encoding checks, or preparing the Poseidon2
+    /// mask pool fails.
     pub fn new_for_run(
         net: &'a N,
         state: &'a mut Rep3State,

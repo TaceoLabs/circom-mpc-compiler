@@ -51,7 +51,7 @@ pub(super) fn fold_binary(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<Fr> {
         OperatorType::ShiftR => {
             let val = to_bigint(lhs);
             let shift = to_bigint(rhs);
-            if shift.bits() > usize::BITS as u64 {
+            if shift.bits() > u64::from(usize::BITS) {
                 Some(Fr::zero())
             } else {
                 let bytes = shift.to_u64_digits();
@@ -59,7 +59,9 @@ pub(super) fn fold_binary(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<Fr> {
                 if shift >= val.bits() {
                     Some(Fr::zero())
                 } else {
-                    Some(Fr::from(val >> shift as usize))
+                    let shift = usize::try_from(shift)
+                        .expect("shift.bits() <= usize::BITS was checked above");
+                    Some(Fr::from(val >> shift))
                 }
             }
         }

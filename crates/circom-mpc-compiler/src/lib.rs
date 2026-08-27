@@ -1,3 +1,7 @@
+//! Compiles a circom circuit into a `circom_mpc_program::Program`: [`CoCircomCompiler::parse`]
+//! builds the frontend's [`ir::Graph`], runs the optimization/MPC-lowering [`passes`] pipeline
+//! over it, and [`CoCircomCompiler::compile`] hands the result to [`codegen`].
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -58,6 +62,17 @@ impl Default for CompilerConfig {
 pub struct CoCircomCompiler;
 
 impl CoCircomCompiler {
+    /// Parses and type-checks `file`, then runs the optimization/MPC-lowering passes over the
+    /// resulting graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `file` fails to parse, type-check, or build into a graph, or if a pass
+    /// fails.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "public API taking config by value is the established call convention across the workspace; a by-ref signature would ripple into every caller for no behavioral benefit"
+    )]
     pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph>
     where
         PathBuf: From<Pth>,
@@ -65,7 +80,8 @@ impl CoCircomCompiler {
     {
         tracing::debug!("compiler starts parsing..");
         let opt_level = config.opt_level;
-        let mut graph = frontend::build_graph(PathBuf::from(file).display().to_string(), config)?;
+        let mut graph =
+            frontend::build_graph(PathBuf::from(file).display().to_string(), &config)?;
         graph.verify()?;
         tracing::debug!("graph before passes:\n{:?}", graph);
         passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
@@ -75,6 +91,10 @@ impl CoCircomCompiler {
 
     /// `parse`, then lowers the resulting graph into a `circom_mpc_program::Program`, runnable via
     /// `circom_mpc_vm::Machine::run` against the plain or rep3 driver.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as [`Self::parse`], or if codegen fails.
     pub fn compile<Pth>(
         file: Pth,
         config: CompilerConfig,

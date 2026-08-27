@@ -39,7 +39,11 @@ use super::domain::Domain;
 /// a level, keeping same-level public gadget dependencies topological.
 pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
     let nodes = graph.nodes();
-    debug_assert_eq!(nodes.len(), domains.len());
+    debug_assert_eq!(
+        nodes.len(),
+        domains.len(),
+        "domains must have one entry per node"
+    );
     let mut level = vec![0usize; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let max_input = || {
@@ -52,11 +56,12 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
         level[i] = match &node.op {
             // Available before any network event.
             Op::Input(_) | Op::Constant(_) => 0,
-            // Free local work in every domain - no event of its own.
-            Op::Add | Op::Sub | Op::Mul | Op::MulLocal => max_input(),
-            // The event itself sits at the level of the values it consumes; crossing it is what
-            // costs a level, which is what the two `*Result` arms below charge for.
-            Op::Round(_) | Op::Gadget(_) => max_input(),
+            // Free local work in every domain (no event of its own), or the network event itself,
+            // which sits at the level of the values it consumes - crossing it is what costs a
+            // level, which is what the two `*Result` arms below charge for.
+            Op::Add | Op::Sub | Op::Mul | Op::MulLocal | Op::Round(_) | Op::Gadget(_) => {
+                max_input()
+            }
             Op::RoundResult(_) => level[node.inputs[0].index()] + 1,
             // A public gadget is ordinary deterministic local work. Its result must remain after
             // its producer in graph order, but it must not advance the communication axis or split
@@ -73,10 +78,10 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
                 let gadget_idx = node.inputs[0].index();
                 match domains[gadget_idx] {
                     Domain::Public => level[gadget_idx],
-                    Domain::Shared => level[gadget_idx] + 1,
-                    // Invalid lowered graphs are rejected later with a proper codegen error. Keep
-                    // analysis total so diagnostics never turn that rejection into a panic.
-                    Domain::Local => level[gadget_idx] + 1,
+                    // `Local` is an invalid lowered graph, rejected later with a proper codegen
+                    // error; charging it the same level as `Shared` keeps this analysis total so
+                    // diagnostics never turn that rejection into a panic.
+                    Domain::Shared | Domain::Local => level[gadget_idx] + 1,
                 }
             }
         };
@@ -299,7 +304,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(0)]), // 5
         ];
         let mut graph = graph_of(nodes, ValueId::new(5), vec![]);
-        graph.set_rounds(vec![RoundDesc { len: 1, level: 0 }]);
+        graph.set_rounds(vec![RoundDesc { len: 1 }]);
         // MulLocal is free; crossing the round costs one; the trailing Add is free.
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),

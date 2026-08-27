@@ -21,12 +21,13 @@ pub(crate) fn compute_domains(graph: &Graph) -> Vec<Domain> {
     for node in nodes {
         let domain = match &node.op {
             Op::Input(signal) => signal_domain(graph, *signal),
-            Op::Constant(_) => Domain::Public,
+            // A round's own node is never read directly (only through its `RoundResult`s), so its
+            // domain is a placeholder; `Constant` is genuinely always public.
+            Op::Constant(_) | Op::Round(_) => Domain::Public,
             Op::Add | Op::Sub | Op::Mul => {
                 domains[node.inputs[0].index()].join(domains[node.inputs[1].index()])
             }
             Op::MulLocal => Domain::Local,
-            Op::Round(_) => Domain::Public,
             Op::RoundResult(_) => Domain::Shared,
             // A deterministic gadget is public exactly when all of its inputs are public. Keeping
             // this domain on the otherwise-unread service node lets each result inherit it.
