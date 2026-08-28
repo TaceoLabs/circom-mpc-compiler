@@ -6,7 +6,7 @@
 
 use ark_bn254::Fr;
 
-use crate::GadgetKind;
+use crate::{BatchIdx, GadgetKind, InputIdx, ResultSlot, RoundIdx, Slot};
 
 /// Poseidon2 widths every gadget and the VM's batch-shape validation support (`t` in the
 /// permutation's state size).
@@ -68,19 +68,47 @@ pub enum Opcode {
     Gadget,
 }
 
-/// One instruction: a fixed-width `(opcode, dst, a, b)` record. `a`/`b`/`dst` are slot indices
-/// *within whichever bank the opcode's operands live in* - fully determined by `op`, so the
-/// instruction itself carries no bank tag.
-#[derive(Debug, Clone, Copy)]
-pub struct Instruction {
-    /// The operation to execute.
-    pub op: Opcode,
-    /// Destination slot index.
-    pub dst: u32,
-    /// First operand slot index.
-    pub a: u32,
-    /// Second operand slot index.
-    pub b: u32,
+/// One instruction. Every arithmetic opcode reads/writes bank-relative [`Slot`]s directly;
+/// `Reshare`/`Gadget` instead carry a table index into [`Program::rounds`]/[`Program::gadget_batches`],
+/// since a round's or batch's own operands and results are its own side-table lists, not encoded
+/// per instruction. Splitting these into distinct variants (rather than a single `(op, dst, a, b)`
+/// record where `a` means slot-or-round-id-or-batch-id depending on `op`) makes that distinction a
+/// type rather than a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Instruction {
+    /// An arithmetic opcode. `dst`/`a`/`b` are slot indices *within whichever bank the opcode's
+    /// operands live in* - fully determined by `op`, so the instruction itself carries no bank
+    /// tag.
+    Arith {
+        /// The operation to execute.
+        op: Opcode,
+        /// Destination slot.
+        dst: Slot,
+        /// First operand slot.
+        a: Slot,
+        /// Second operand slot.
+        b: Slot,
+    },
+    /// One batched network round: an index into [`Program::rounds`].
+    Reshare(RoundIdx),
+    /// One batched gadget service: an index into [`Program::gadget_batches`]. Being a real
+    /// instruction rather than an out-of-band phase is what lets a site's inputs depend on
+    /// earlier instructions - which the merces circuits require, since their Poseidon2 sites
+    /// chain through secret multiplications.
+    Gadget(BatchIdx),
+}
+
+impl Instruction {
+    /// The opcode this instruction executes - `Opcode::Reshare`/`Opcode::Gadget` for the
+    /// table-index variants.
+    #[must_use]
+    pub fn op(&self) -> Opcode {
+        match self {
+            Instruction::Arith { op, .. } => *op,
+            Instruction::Reshare(_) => Opcode::Reshare,
+            Instruction::Gadget(_) => Opcode::Gadget,
+        }
+    }
 }
 
 /// One batched MPC round: `operand_start/len` index into `Program::round_operands` (`Local`-bank
@@ -110,7 +138,7 @@ pub struct SiteInput {
     /// Which bank `slot` lives in.
     pub bank: Bank,
     /// Slot index within `bank`.
-    pub slot: u32,
+    pub slot: Slot,
 }
 
 /// The service executed by a [`GadgetBatch`]. Most batches are a direct runtime realization
@@ -129,7 +157,7 @@ pub enum BatchKind {
     /// `Machine::run_with_precomputation`.
     PrecomputedPoseidon2 {
         /// The Poseidon2 state width.
-        t: usize,
+        t: crate::Poseidon2Width,
     },
 }
 
@@ -141,7 +169,7 @@ pub struct ResultTarget {
     /// Which bank `slot` lives in.
     pub bank: Bank,
     /// Slot index within `bank`.
-    pub slot: u32,
+    pub slot: Slot,
 }
 
 /// Compatible gadget sites of one [`GadgetKind`], domain, and stage, batched
@@ -165,13 +193,22 @@ pub struct GadgetBatch {
     /// `result_offsets[site + 1]` is that site's own sorted sublist. Two sites in one batch can
     /// have different live counts, which is why this isn't a flat `sites * capacity` shape
     /// recoverable by division.
-    pub result_requests: Vec<u32>,
+    pub result_requests: Vec<ResultSlot>,
     /// `len == sites + 1`: CSR row pointers into
     /// [`Self::result_requests`]/[`Self::result_targets`].
     pub result_offsets: Vec<u32>,
     /// Parallel to [`Self::result_requests`]: the banked destination for each requested value.
     /// `Bank::Local` is never valid here.
     pub result_targets: Vec<ResultTarget>,
+}
+
+impl GadgetBatch {
+    /// This site's row into [`Self::result_requests`]/[`Self::result_targets`] - the CSR range
+    /// `result_offsets[site]..result_offsets[site + 1]`.
+    #[must_use]
+    pub fn site_results(&self, site: usize) -> std::ops::Range<usize> {
+        self.result_offsets[site] as usize..self.result_offsets[site + 1] as usize
+    }
 }
 
 /// Binds one circuit input to the slot it's read from - `Machine::run` fills these in from the
@@ -181,10 +218,10 @@ pub struct InputBinding {
     /// Which bank `slot` lives in.
     pub bank: Bank,
     /// Slot index within `bank`.
-    pub slot: u32,
+    pub slot: Slot,
     /// The circuit's own flat input index (`0..num_inputs`) - not a per-bank ordinal, so a caller
     /// doesn't need to know how many of the circuit's inputs are public vs secret ahead of time.
-    pub input_index: u32,
+    pub input_index: InputIdx,
 }
 
 /// Where one final witness entry comes from once the instruction stream has run. Codegen records
@@ -199,13 +236,13 @@ pub enum WitnessSource {
     Zero,
     /// One of main's original circuit inputs. Inputs remain available to `Machine::run` even when
     /// their `Op::Input` was dead and removed from the executable graph.
-    Input(u32),
+    Input(InputIdx),
     /// A value retained in one of the VM's final slot banks.
     Slot {
         /// Which bank `slot` lives in.
         bank: Bank,
         /// Slot index within `bank`.
-        slot: u32,
+        slot: Slot,
     },
 }
 
@@ -236,8 +273,8 @@ pub struct Program {
     pub(crate) input_domains: Vec<Bank>,
     pub(crate) inputs: Vec<InputBinding>,
     pub(crate) rounds: Vec<RoundEntry>,
-    pub(crate) round_operands: Vec<u32>,
-    pub(crate) round_results: Vec<u32>,
+    pub(crate) round_operands: Vec<Slot>,
+    pub(crate) round_results: Vec<Slot>,
     /// Indexed by [`Opcode::Gadget`]'s `a`. These are **not** run up front: each is serviced at
     /// its own point in the instruction stream, because a site's inputs may depend on earlier
     /// instructions.
@@ -263,9 +300,9 @@ pub struct ProgramParts {
     /// See [`Program::rounds`].
     pub rounds: Vec<RoundEntry>,
     /// See [`Program::round_operands`].
-    pub round_operands: Vec<u32>,
+    pub round_operands: Vec<Slot>,
     /// See [`Program::round_results`].
-    pub round_results: Vec<u32>,
+    pub round_results: Vec<Slot>,
     /// See [`Program::gadget_batches`].
     pub gadget_batches: Vec<GadgetBatch>,
     /// See [`Program::witness_sources`].
@@ -390,17 +427,17 @@ impl Program {
 
     /// Flat operand table indexed into by [`RoundEntry`] ranges.
     #[must_use]
-    pub fn round_operands(&self) -> &[u32] {
+    pub fn round_operands(&self) -> &[Slot] {
         &self.round_operands
     }
 
     /// Flat result table indexed into by [`RoundEntry`] ranges.
     #[must_use]
-    pub fn round_results(&self) -> &[u32] {
+    pub fn round_results(&self) -> &[Slot] {
         &self.round_results
     }
 
-    /// The gadget batches, indexed by [`Opcode::Gadget`]'s `a`.
+    /// The gadget batches, indexed by an [`Instruction::Gadget`]'s [`BatchIdx`].
     #[must_use]
     pub fn gadget_batches(&self) -> &[GadgetBatch] {
         &self.gadget_batches
@@ -479,16 +516,15 @@ impl Program {
     pub fn precomputed_batches(&self) -> eyre::Result<Vec<PrecomputedBatch>> {
         let mut batches = Vec::new();
         for (instruction_index, instruction) in self.instructions.iter().enumerate() {
-            if instruction.op != Opcode::Gadget {
+            let Instruction::Gadget(batch_idx) = instruction else {
                 continue;
-            }
+            };
             let batch = self
                 .gadget_batches
-                .get(instruction.a as usize)
+                .get(batch_idx.index())
                 .ok_or_else(|| {
                     eyre::eyre!(
-                        "instruction {instruction_index} references missing gadget batch {}",
-                        instruction.a
+                        "instruction {instruction_index} references missing gadget batch {batch_idx}"
                     )
                 })?;
             if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
@@ -514,14 +550,14 @@ impl Program {
         reason = "a single sequential validation pass over every side table; splitting it would not improve clarity"
     )]
     pub fn validate_encoding(&self) -> eyre::Result<()> {
-        let check_slot = |bank: Bank, slot: u32, what: &str| -> eyre::Result<()> {
+        let check_slot = |bank: Bank, slot: Slot, what: &str| -> eyre::Result<()> {
             let limit = match bank {
                 Bank::Public => self.slots.public,
                 Bank::Shared => self.slots.shared,
                 Bank::Local => self.slots.local,
             };
             eyre::ensure!(
-                slot < limit,
+                slot.get() < limit,
                 "{what} references {bank:?} slot {slot}, but bank size is {limit}"
             );
             Ok(())
@@ -546,7 +582,7 @@ impl Program {
             );
         }
         for binding in &self.inputs {
-            let input = binding.input_index as usize;
+            let input = binding.input_index.index();
             eyre::ensure!(
                 input < self.num_inputs,
                 "input binding index {input} is out of range"
@@ -561,41 +597,70 @@ impl Program {
         }
 
         for (index, instruction) in self.instructions.iter().enumerate() {
-            match instruction.op {
-                Opcode::AddPP | Opcode::SubPP | Opcode::MulPP => {
-                    check_slot(Bank::Public, instruction.dst, "instruction")?;
-                    check_slot(Bank::Public, instruction.a, "instruction")?;
-                    check_slot(Bank::Public, instruction.b, "instruction")?;
+            match *instruction {
+                Instruction::Arith {
+                    op: Opcode::AddPP | Opcode::SubPP | Opcode::MulPP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    check_slot(Bank::Public, dst, "instruction")?;
+                    check_slot(Bank::Public, a, "instruction")?;
+                    check_slot(Bank::Public, b, "instruction")?;
                 }
-                Opcode::AddSS | Opcode::SubSS => {
-                    check_slot(Bank::Shared, instruction.dst, "instruction")?;
-                    check_slot(Bank::Shared, instruction.a, "instruction")?;
-                    check_slot(Bank::Shared, instruction.b, "instruction")?;
+                Instruction::Arith {
+                    op: Opcode::AddSS | Opcode::SubSS,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    check_slot(Bank::Shared, dst, "instruction")?;
+                    check_slot(Bank::Shared, a, "instruction")?;
+                    check_slot(Bank::Shared, b, "instruction")?;
                 }
-                Opcode::AddSP | Opcode::SubSP | Opcode::MulSP => {
-                    check_slot(Bank::Shared, instruction.dst, "instruction")?;
-                    check_slot(Bank::Shared, instruction.a, "instruction")?;
-                    check_slot(Bank::Public, instruction.b, "instruction")?;
+                Instruction::Arith {
+                    op: Opcode::AddSP | Opcode::SubSP | Opcode::MulSP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    check_slot(Bank::Shared, dst, "instruction")?;
+                    check_slot(Bank::Shared, a, "instruction")?;
+                    check_slot(Bank::Public, b, "instruction")?;
                 }
-                Opcode::SubPS => {
-                    check_slot(Bank::Shared, instruction.dst, "instruction")?;
-                    check_slot(Bank::Public, instruction.a, "instruction")?;
-                    check_slot(Bank::Shared, instruction.b, "instruction")?;
+                Instruction::Arith {
+                    op: Opcode::SubPS,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    check_slot(Bank::Shared, dst, "instruction")?;
+                    check_slot(Bank::Public, a, "instruction")?;
+                    check_slot(Bank::Shared, b, "instruction")?;
                 }
-                Opcode::MulLocal => {
-                    check_slot(Bank::Local, instruction.dst, "instruction")?;
-                    check_slot(Bank::Shared, instruction.a, "instruction")?;
-                    check_slot(Bank::Shared, instruction.b, "instruction")?;
+                Instruction::Arith {
+                    op: Opcode::MulLocal,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    check_slot(Bank::Local, dst, "instruction")?;
+                    check_slot(Bank::Shared, a, "instruction")?;
+                    check_slot(Bank::Shared, b, "instruction")?;
                 }
-                Opcode::Reshare => eyre::ensure!(
-                    (instruction.a as usize) < self.rounds.len(),
-                    "instruction {index} references missing round {}",
-                    instruction.a
+                Instruction::Arith {
+                    op: Opcode::Reshare | Opcode::Gadget,
+                    ..
+                } => eyre::bail!(
+                    "instruction {index} carries Reshare/Gadget opcode in an Arith variant"
                 ),
-                Opcode::Gadget => eyre::ensure!(
-                    (instruction.a as usize) < self.gadget_batches.len(),
-                    "instruction {index} references missing gadget batch {}",
-                    instruction.a
+                Instruction::Reshare(round_idx) => eyre::ensure!(
+                    round_idx.index() < self.rounds.len(),
+                    "instruction {index} references missing round {round_idx}"
+                ),
+                Instruction::Gadget(batch_idx) => eyre::ensure!(
+                    batch_idx.index() < self.gadget_batches.len(),
+                    "instruction {index} references missing gadget batch {batch_idx}"
                 ),
             }
         }
@@ -630,24 +695,14 @@ impl Program {
         for (index, batch) in self.gadget_batches.iter().enumerate() {
             eyre::ensure!(batch.sites > 0, "gadget batch {index} has no sites");
             let inputs_per_site = match batch.kind {
-                BatchKind::Gadget(GadgetKind::Poseidon2 { t }) => {
-                    eyre::ensure!(
-                        POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
-                        "gadget batch {index} has unsupported Poseidon2 width {t}"
-                    );
-                    t
-                }
+                // `t` is a `Poseidon2Width`, checked against `POSEIDON2_SUPPORTED_WIDTHS` at
+                // construction - no need to re-check it here.
+                BatchKind::Gadget(GadgetKind::Poseidon2 { t })
+                | BatchKind::PrecomputedPoseidon2 { t } => t.get(),
                 BatchKind::Gadget(GadgetKind::Num2Bits { .. } | GadgetKind::IsZero)
                 | BatchKind::IsZeroReveal => 1,
                 BatchKind::Gadget(GadgetKind::AliasCheck) => 254,
                 BatchKind::Gadget(GadgetKind::Reveal { n }) => n,
-                BatchKind::PrecomputedPoseidon2 { t } => {
-                    eyre::ensure!(
-                        POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
-                        "gadget batch {index} has unsupported precomputed Poseidon2 width {t}"
-                    );
-                    t
-                }
             };
             let expected_inputs = batch
                 .sites
@@ -740,7 +795,7 @@ impl Program {
                 );
                 for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
                     eyre::ensure!(
-                        (*request as usize) < capacity,
+                        request.index() < capacity,
                         "gadget batch {index} request {request} exceeds capacity {capacity}"
                     );
                     eyre::ensure!(
@@ -748,7 +803,7 @@ impl Program {
                         "gadget batch {index} targets Local bank"
                     );
                     let expected_bank = normal_result_bank.unwrap_or({
-                        if *request == 2 {
+                        if request.get() == 2 {
                             Bank::Public
                         } else {
                             Bank::Shared
@@ -783,7 +838,7 @@ impl Program {
             match *source {
                 WitnessSource::One | WitnessSource::Zero => {}
                 WitnessSource::Input(input) => eyre::ensure!(
-                    (input as usize) < self.num_inputs,
+                    input.index() < self.num_inputs,
                     "witness source input {input} is out of range"
                 ),
                 WitnessSource::Slot { bank, slot } => {
@@ -799,13 +854,17 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Poseidon2Width;
 
     /// A minimal program with one Poseidon2 gadget batch, for `validate_encoding` tests that
     /// don't need a real circuit.
     fn poseidon_budget_program(bank: Bank, sites: usize, executions: usize) -> Program {
-        let t = 3;
-        let input_slots = (0..sites * t)
-            .map(|_| SiteInput { bank, slot: 0 })
+        let t = Poseidon2Width::new(3).expect("3 is a supported width");
+        let input_slots = (0..sites * t.get())
+            .map(|_| SiteInput {
+                bank,
+                slot: Slot::new(0),
+            })
             .collect();
         let batch = GadgetBatch {
             kind: BatchKind::Gadget(GadgetKind::Poseidon2 { t }),
@@ -817,12 +876,7 @@ mod tests {
         };
         Program::new(ProgramParts {
             instructions: (0..executions)
-                .map(|_| Instruction {
-                    op: Opcode::Gadget,
-                    dst: 0,
-                    a: 0,
-                    b: 0,
-                })
+                .map(|_| Instruction::Gadget(BatchIdx::new(0)))
                 .collect(),
             constants: Vec::new(),
             input_domains: Vec::new(),

@@ -3,7 +3,9 @@
 
 use ark_bn254::Fr;
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
-use circom_mpc_program::{GadgetKind, Bank, BatchKind, Opcode, Program, WitnessSource};
+use circom_mpc_program::{
+    Bank, BatchKind, Instruction, Poseidon2Width, Program, Slot, WitnessSource,
+};
 use circom_mpc_vm::Machine;
 use circom_mpc_vm::driver::plain::PlainDriver;
 
@@ -165,7 +167,7 @@ fn round_trips_a_staged_multi_batch_program() {
         read_back
             .instructions()
             .iter()
-            .filter(|i| i.op == Opcode::Gadget)
+            .filter(|i| matches!(i, Instruction::Gadget(_)))
             .count(),
         2
     );
@@ -178,18 +180,18 @@ fn validation_rejects_out_of_range_witness_and_batch_targets() {
     let mut invalid_witness = program("multiplier2").into_parts();
     invalid_witness.witness_sources[1] = WitnessSource::Slot {
         bank: Bank::Shared,
-        slot: invalid_witness.slots.shared,
+        slot: Slot::new(invalid_witness.slots.shared),
     };
     let invalid_witness = Program::new(invalid_witness);
     assert!(invalid_witness.validate_encoding().is_err());
     assert!(invalid_witness.write(&mut Vec::new()).is_err());
 
     let mut invalid_batch = program("gadget_iszero_test").into_parts();
-    invalid_batch.gadget_batches[0].result_targets[0].slot = invalid_batch.slots.shared;
+    invalid_batch.gadget_batches[0].result_targets[0].slot =
+        Slot::new(invalid_batch.slots.shared);
     assert!(Program::new(invalid_batch).validate_encoding().is_err());
 
-    let mut invalid_poseidon = program("gadget_poseidon2_test").into_parts();
-    invalid_poseidon.gadget_batches[0].kind =
-        BatchKind::Gadget(GadgetKind::Poseidon2 { t: 5 });
-    assert!(Program::new(invalid_poseidon).validate_encoding().is_err());
+    // An unsupported Poseidon2 width is now rejected at construction, not at
+    // `validate_encoding` time - `Poseidon2Width` can never hold one.
+    assert!(Poseidon2Width::new(5).is_err());
 }

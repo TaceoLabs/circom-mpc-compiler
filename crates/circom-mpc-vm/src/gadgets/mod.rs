@@ -1,8 +1,8 @@
 //! The five precomputation gadgets this compiler knows how to run, both plain and batched rep3 MPC.
 
-pub mod aliascheck;
-pub mod iszero;
-pub mod num2bits;
+pub(crate) mod aliascheck;
+pub(crate) mod iszero;
+pub(crate) mod num2bits;
 pub mod poseidon2;
 mod poseidon2_constants;
 

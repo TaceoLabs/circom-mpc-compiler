@@ -13,7 +13,7 @@ pub use circom_mpc_program::GadgetKind;
 /// `ValueId(i)` always refers to `graph.nodes[i]`. There is no separate wire allocator: a value's
 /// identity *is* its producer's position in the flat node list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ValueId(u32);
+pub(crate) struct ValueId(u32);
 
 impl ValueId {
     pub(crate) fn new(index: usize) -> Self {
@@ -28,7 +28,7 @@ impl ValueId {
 /// A global circuit signal index (i.e. an index into circom's own flat signal numbering, after
 /// any per-instance offset has already been resolved).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SignalIdx(pub(crate) u32);
+pub(crate) struct SignalIdx(pub(crate) u32);
 
 impl SignalIdx {
     pub(crate) fn new(index: usize) -> Self {
@@ -42,7 +42,7 @@ impl SignalIdx {
 
 /// Identifies one entry in [`Graph::gadget_sites`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GadgetId(u32);
+pub(crate) struct GadgetId(u32);
 
 impl GadgetId {
     pub(crate) fn new(index: usize) -> Self {
@@ -56,7 +56,7 @@ impl GadgetId {
 
 /// Identifies one batched rep3 network round (currently always a reshare).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RoundId(u32);
+pub(crate) struct RoundId(u32);
 
 impl RoundId {
     pub(crate) fn new(index: usize) -> Self {
@@ -135,7 +135,7 @@ pub struct GadgetSite {
 /// either rejected outright or, where all its operands are compile-time constants, folded away
 /// before it ever reaches this enum (`frontend::fold`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Op {
+pub(crate) enum Op {
     /// Reads a circuit input signal.
     Input(SignalIdx),
     /// A field constant.
@@ -205,11 +205,11 @@ impl Op {
 /// A single node in the graph. `inputs` references other nodes by [`ValueId`]; every reference
 /// must point strictly earlier in the graph, as enforced by graph verification.
 #[derive(Debug, Clone)]
-pub struct Node {
+pub(crate) struct Node {
     /// The operation this node performs.
-    pub op: Op,
+    pub(crate) op: Op,
     /// The values this node reads, each a [`ValueId`] pointing strictly earlier in the graph.
-    pub inputs: Vec<ValueId>,
+    pub(crate) inputs: Vec<ValueId>,
 }
 
 impl Node {
@@ -270,22 +270,22 @@ pub struct Graph {
     /// pass unit tests build plain graphs by hand without running the whole pipeline.
     lowered: bool,
     /// One entry per final witness position, giving the circuit signal index that lands there.
-    pub signal_to_witness: Vec<usize>,
+    pub(crate) signal_to_witness: Vec<usize>,
     /// The circuit's declared inputs, in declaration order.
-    pub input_list: InputList,
+    input_list: InputList,
     /// Names of the circuit's SNARK-public inputs.
-    pub public_inputs: Vec<String>,
+    public_inputs: Vec<String>,
     /// Input names every MPC party holds in cleartext, even though they are not SNARK-public. A
     /// genuine declassification, supplied by `CompilerConfig::mpc_public_inputs` - never inferred.
     /// Kept separate from `public_inputs`, which remains the correct source for the SNARK
     /// statement split (see `vm::witness`).
-    pub mpc_public_inputs: Vec<String>,
+    pub(crate) mpc_public_inputs: Vec<String>,
     /// The circuit's total input count.
-    pub num_inputs: usize,
+    num_inputs: usize,
     /// The circuit's total output count.
-    pub num_outputs: usize,
+    num_outputs: usize,
     /// The circuit's total signal count (circom's own flat signal numbering).
-    pub num_signals: usize,
+    num_signals: usize,
 }
 
 impl Graph {
@@ -335,6 +335,36 @@ impl Graph {
     #[must_use]
     pub fn gadget_sites(&self) -> &[GadgetSite] {
         &self.gadget_sites
+    }
+
+    /// The circuit's declared inputs, in declaration order.
+    #[must_use]
+    pub fn input_list(&self) -> &InputList {
+        &self.input_list
+    }
+
+    /// Names of the circuit's SNARK-public inputs.
+    #[must_use]
+    pub fn public_inputs(&self) -> &[String] {
+        &self.public_inputs
+    }
+
+    /// The circuit's total input count.
+    #[must_use]
+    pub fn num_inputs(&self) -> usize {
+        self.num_inputs
+    }
+
+    /// The circuit's total output count.
+    #[must_use]
+    pub fn num_outputs(&self) -> usize {
+        self.num_outputs
+    }
+
+    /// The circuit's total signal count (circom's own flat signal numbering).
+    #[must_use]
+    pub fn num_signals(&self) -> usize {
+        self.num_signals
     }
 
     pub(crate) fn outputs(&self) -> &[(SignalIdx, ValueId)] {

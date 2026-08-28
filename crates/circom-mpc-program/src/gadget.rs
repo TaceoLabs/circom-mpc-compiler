@@ -3,6 +3,59 @@
 //! own instruction/batch types and its on-disk format both need it, and this crate has no
 //! dependency on the compiler.
 
+/// A Poseidon2 permutation's state width (`t`), checked at construction against
+/// [`crate::POSEIDON2_SUPPORTED_WIDTHS`] rather than at every site that would otherwise
+/// re-validate a bare `usize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Poseidon2Width(u32);
+
+impl Poseidon2Width {
+    /// Builds a width, checking it against [`crate::POSEIDON2_SUPPORTED_WIDTHS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` is not one of the supported widths.
+    ///
+    /// # Panics
+    ///
+    /// Never - every value in [`crate::POSEIDON2_SUPPORTED_WIDTHS`] fits into `u32`.
+    pub fn new(t: usize) -> eyre::Result<Self> {
+        eyre::ensure!(
+            crate::POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
+            "unsupported Poseidon2 width {t}"
+        );
+        Ok(Self(u32::try_from(t).expect("supported widths fit into u32")))
+    }
+
+    /// The width as a `usize`, for width arithmetic.
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The width as its wire-format `u32`.
+    #[must_use]
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Builds a width from its wire-format `u32`, checking it against
+    /// [`crate::POSEIDON2_SUPPORTED_WIDTHS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` is not one of the supported widths.
+    pub fn from_u32(t: u32) -> eyre::Result<Self> {
+        Self::new(t as usize)
+    }
+}
+
+impl std::fmt::Display for Poseidon2Width {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Which gadget a `GadgetSite` runs. Resolved from the instantiated template's
 /// name in the compiler's `frontend::build::handle_create_cmp_bucket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -10,7 +63,7 @@ pub enum GadgetKind {
     /// Poseidon2 permutation over a `t`-element state (`t` in `{2, 3, 4, 8, 12, 16}`).
     Poseidon2 {
         /// The state width.
-        t: usize,
+        t: Poseidon2Width,
     },
     /// Bit decomposition of one field element into `n` bits.
     Num2Bits {
@@ -49,6 +102,7 @@ impl GadgetKind {
             // format; the vm crate's gadgets, unit-tested against this for every supported width)
             // depend on it instead of on each other.
             GadgetKind::Poseidon2 { t } => {
+                let t = t.get();
                 // `amount_partial_rounds` in poseidon2_constants.circom.
                 let pr = if t <= 4 { 56 } else { 57 };
                 // Acc(n) = [out][in[n]][sums[n]]

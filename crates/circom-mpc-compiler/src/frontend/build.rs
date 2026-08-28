@@ -371,7 +371,9 @@ impl<'a> GraphCompiler<'a> {
         let kind = match template_code.name.as_str() {
             "Poseidon2" => {
                 eyre::ensure!(num_inputs == num_outputs, "non-canonical Poseidon2 shape");
-                Some(GadgetKind::Poseidon2 { t: num_inputs })
+                Some(GadgetKind::Poseidon2 {
+                    t: circom_mpc_program::Poseidon2Width::new(num_inputs)?,
+                })
             }
             "Num2Bits" => {
                 eyre::ensure!(num_inputs == 1, "non-canonical Num2Bits shape");

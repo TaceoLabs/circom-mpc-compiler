@@ -69,8 +69,8 @@ fn non_constant_bitwise_operator_is_a_typed_error() {
 fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
     let graph = CoCircomCompiler::parse(circuit_path("multiplier2_public"), config())
         .expect("multiplier2_public compiles");
-    assert_eq!(graph.public_inputs, vec!["a".to_owned()]);
-    let mut offsets: Vec<(String, usize, usize)> = graph.input_list.clone();
+    assert_eq!(graph.public_inputs(), vec!["a".to_owned()]);
+    let mut offsets: Vec<(String, usize, usize)> = graph.input_list().clone();
     offsets.sort_by_key(|(_, start, _)| *start);
     assert_eq!(
         offsets,

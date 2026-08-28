@@ -23,7 +23,7 @@ use super::poseidon2_constants::{RoundConstants, partial_rounds};
 /// The widths any vendored circuit instantiates (merces' compression sponge uses 16).
 /// `poseidon2.circom` also defines 12; support it by restoring its constant tables in
 /// `poseidon2_constants.rs`.
-pub use circom_mpc_program::POSEIDON2_SUPPORTED_WIDTHS as SUPPORTED_WIDTHS;
+use circom_mpc_program::POSEIDON2_SUPPORTED_WIDTHS as SUPPORTED_WIDTHS;
 
 // --- Signal counts, mirroring the circuit's own template structure ---
 
@@ -680,7 +680,7 @@ fn requested_outputs<'a, V: Clone>(
 ///
 /// Returns an error if `t` is unsupported, `states.len()` isn't a multiple of `t`, or
 /// `result_requests`/`result_offsets` don't form a valid CSR table over `0..result_slots(t)`.
-pub fn plain_trace_requested(
+pub(crate) fn plain_trace_requested(
     t: usize,
     states: &[Fr],
     result_requests: &[u32],
@@ -772,22 +772,19 @@ pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
 /// ignores unreachable entries and counts a deliberately repeated batch reference once per
 /// execution.
 pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
-    use circom_mpc_program::{GadgetKind, BatchKind, Opcode};
+    use circom_mpc_program::{GadgetKind, BatchKind};
 
     let gadget_batches = program.gadget_batches();
     let mut total = 0usize;
     for (instruction_index, instruction) in program.instructions().iter().enumerate() {
-        if instruction.op != Opcode::Gadget {
+        let circom_mpc_program::Instruction::Gadget(batch_idx) = instruction else {
             continue;
-        }
-        let batch = gadget_batches
-            .get(instruction.a as usize)
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "instruction {instruction_index} references missing gadget batch {}",
-                    instruction.a
-                )
-            })?;
+        };
+        let batch = gadget_batches.get(batch_idx.index()).ok_or_else(|| {
+            eyre::eyre!(
+                "instruction {instruction_index} references missing gadget batch {batch_idx}"
+            )
+        })?;
         let BatchKind::Gadget(GadgetKind::Poseidon2 { t }) = batch.kind else {
             continue;
         };
@@ -798,7 +795,7 @@ pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
         {
             continue;
         }
-        let batch_masks = mask_elements(t, batch.sites)?;
+        let batch_masks = mask_elements(t.get(), batch.sites)?;
         total = total.checked_add(batch_masks).ok_or_else(|| {
             eyre::eyre!(
                 "program-wide Poseidon2 mask budget overflows at instruction {instruction_index}"
@@ -1168,7 +1165,10 @@ mod tests {
             let got = plain_full(t, &states);
             assert_eq!(
                 got.len(),
-                circom_mpc_program::GadgetKind::Poseidon2 { t }.expected_results(),
+                circom_mpc_program::GadgetKind::Poseidon2 {
+                    t: circom_mpc_program::Poseidon2Width::new(t).expect("supported width")
+                }
+                .expected_results(),
                 "t={t}"
             );
         }

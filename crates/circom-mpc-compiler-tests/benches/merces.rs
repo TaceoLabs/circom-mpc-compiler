@@ -40,7 +40,7 @@ fn prepare(n: usize) -> (Program, Vec<Fr>) {
         CoCircomCompiler::parse(path, merces_config()).unwrap_or_else(|e| panic!("batch{n}: {e}"));
     let summary = graph.mpc_summary();
     let mut rng = StdRng::seed_from_u64(SEED);
-    let values: Vec<Fr> = (0..graph.num_inputs).map(|_| Fr::rand(&mut rng)).collect();
+    let values: Vec<Fr> = (0..graph.num_inputs()).map(|_| Fr::rand(&mut rng)).collect();
     let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("batch{n}: {e}"));
     println!(
         "batch{n:<3} rounds={:3} reshare_elements={:6} max_slots={:5} sites={:4} batches={:3} instrs={:6}",

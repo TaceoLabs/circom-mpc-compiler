@@ -220,9 +220,9 @@ fn bench_batch(
     println!("party {my_id}: batch {n}: parse   {:.2?}", t.elapsed());
     println!(
         "party {my_id}: batch {n}:   signals={} inputs={} outputs={} rounds={} precompute: {} sites -> {} driver calls",
-        graph.num_signals,
-        graph.num_inputs,
-        graph.num_outputs,
+        graph.num_signals(),
+        graph.num_inputs(),
+        graph.num_outputs(),
         summary.rounds,
         summary.gadget_sites,
         summary.gadget_batches,

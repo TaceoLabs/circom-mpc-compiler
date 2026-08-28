@@ -28,40 +28,44 @@ struct Wrapper {
     num_outputs: usize,
 }
 
-const WRAPPERS: &[Wrapper] = &[
-    Wrapper {
-        circuit: "gadget_poseidon2_test",
-        inner_name: "Poseidon2",
-        kind: GadgetKind::Poseidon2 { t: 3 },
-        num_inputs: 3,
-        num_outputs: 3,
-    },
-    Wrapper {
-        circuit: "gadget_num2bits_test",
-        inner_name: "Num2Bits",
-        kind: GadgetKind::Num2Bits { n: 8 },
-        num_inputs: 1,
-        num_outputs: 8,
-    },
-    Wrapper {
-        circuit: "gadget_iszero_test",
-        inner_name: "IsZero",
-        kind: GadgetKind::IsZero,
-        num_inputs: 1,
-        num_outputs: 1,
-    },
-    Wrapper {
-        circuit: "gadget_aliascheck_test",
-        inner_name: "AliasCheck",
-        kind: GadgetKind::AliasCheck,
-        num_inputs: 254,
-        num_outputs: 0,
-    },
-];
+fn wrappers() -> Vec<Wrapper> {
+    vec![
+        Wrapper {
+            circuit: "gadget_poseidon2_test",
+            inner_name: "Poseidon2",
+            kind: GadgetKind::Poseidon2 {
+                t: circom_mpc_program::Poseidon2Width::new(3).expect("3 is a supported width"),
+            },
+            num_inputs: 3,
+            num_outputs: 3,
+        },
+        Wrapper {
+            circuit: "gadget_num2bits_test",
+            inner_name: "Num2Bits",
+            kind: GadgetKind::Num2Bits { n: 8 },
+            num_inputs: 1,
+            num_outputs: 8,
+        },
+        Wrapper {
+            circuit: "gadget_iszero_test",
+            inner_name: "IsZero",
+            kind: GadgetKind::IsZero,
+            num_inputs: 1,
+            num_outputs: 1,
+        },
+        Wrapper {
+            circuit: "gadget_aliascheck_test",
+            inner_name: "AliasCheck",
+            kind: GadgetKind::AliasCheck,
+            num_inputs: 254,
+            num_outputs: 0,
+        },
+    ]
+}
 
 #[test]
 fn extract_yields_one_site_per_wrapper() {
-    for w in WRAPPERS {
+    for w in &wrappers() {
         let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let sites = graph.gadget_sites();
@@ -117,19 +121,19 @@ fn unrecognized_gadget_compiles_its_body() {
 
 #[test]
 fn signal_span_matches_independent_total() {
-    for w in WRAPPERS {
+    for w in &wrappers() {
         let graph = CoCircomCompiler::parse(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let site = &graph.gadget_sites()[0];
         // main *is* the wrapper for each of these circuits, so the whole circuit's signal count
         // (minus the reserved constant-1 slot) must equal the wrapper's own I/O plus the site's
         // full result span.
-        let expected = graph.num_inputs
-            + graph.num_outputs
+        let expected = graph.num_inputs()
+            + graph.num_outputs()
             + site.num_inputs
             + site.num_outputs
             + site.num_intermediates;
-        assert_eq!(graph.num_signals - 1, expected, "{}", w.circuit);
+        assert_eq!(graph.num_signals() - 1, expected, "{}", w.circuit);
     }
 }
 
@@ -139,7 +143,7 @@ fn extract_mode_runs_end_to_end_through_the_plain_driver() {
     // whole VM pipeline (codegen -> Opcode::Gadget dispatch -> the main instruction stream) runs to
     // completion. This is a smoke test only (all-zero inputs) - see tests/proving.rs's prove+verify
     // tests for a real value comparison.
-    for w in WRAPPERS {
+    for w in &wrappers() {
         let program = CoCircomCompiler::compile(circuit_path(w.circuit), config())
             .unwrap_or_else(|e| panic!("{}: {e}", w.circuit));
         let values = vec![Fr::from(0u64); program.statistics().inputs];

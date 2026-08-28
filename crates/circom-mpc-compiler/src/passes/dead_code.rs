@@ -21,7 +21,7 @@ pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         // `Machine::run` reserves index 0 for the constant `1` and places every genuine
         // `SignalIdx` `s` at `s + 1`; `signal_to_witness` indexes into that same offset-by-one
         // space, so the mask must match it exactly.
-        let mut witness_mask = vec![false; graph.num_signals];
+        let mut witness_mask = vec![false; graph.num_signals()];
         for &idx in &graph.signal_to_witness {
             if let Some(slot) = witness_mask.get_mut(idx) {
                 *slot = true;

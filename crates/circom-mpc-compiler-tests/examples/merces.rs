@@ -134,7 +134,7 @@ fn main() -> eyre::Result<()> {
     println!("parse:   {:.2?}", t.elapsed());
     println!(
         "  signals={} inputs={} outputs={}",
-        graph.num_signals, graph.num_inputs, graph.num_outputs
+        graph.num_signals(), graph.num_inputs(), graph.num_outputs()
     );
     println!(
         "  rounds={} reshare_elements={} widest_round={}",
@@ -155,9 +155,9 @@ fn main() -> eyre::Result<()> {
         Some(name) => {
             let s = fixtures::scenario(&arg, name)?;
             println!("scenario: {name} ({})", s.note);
-            s.values(&graph.input_list)?
+            s.values(graph.input_list())?
         }
-        None => (0..graph.num_inputs)
+        None => (0..graph.num_inputs())
             .map(|i| Fr::from(i as u64 + 1))
             .collect(),
     };

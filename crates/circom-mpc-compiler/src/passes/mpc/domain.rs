@@ -76,14 +76,14 @@ impl Domain {
 /// populated only from `CompilerConfig`, never inferred).
 pub(crate) fn signal_domain(graph: &Graph, sig: SignalIdx) -> Domain {
     let idx = sig.index();
-    if idx < graph.num_outputs {
+    if idx < graph.num_outputs() {
         return Domain::Shared;
     }
-    let input_idx = idx - graph.num_outputs;
-    let is_public = graph.input_list.iter().any(|(name, start, size)| {
+    let input_idx = idx - graph.num_outputs();
+    let is_public = graph.input_list().iter().any(|(name, start, size)| {
         input_idx >= *start
             && input_idx < start + size
-            && (graph.public_inputs.iter().any(|p| p == name)
+            && (graph.public_inputs().iter().any(|p| p == name)
                 || graph.mpc_public_inputs.iter().any(|p| p == name))
     });
     if is_public {

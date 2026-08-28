@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod codegen;
 mod frontend;
 pub mod ir;
-pub mod passes;
+mod passes;
 
 pub use passes::OptLevel;
 

@@ -8,8 +8,9 @@
 use ark_bn254::Fr;
 
 use circom_mpc_program::{
-    GadgetBatch, Bank, BatchKind, InputBinding, Instruction, Opcode, Program, ProgramParts,
-    ResultTarget, RoundEntry, SiteInput, SlotCounts, WitnessSource,
+    BatchIdx, GadgetBatch, Bank, BatchKind, InputBinding, InputIdx, Instruction, Opcode, Program,
+    ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot, SlotCounts,
+    WitnessSource,
 };
 
 use crate::ir::{GadgetKind, Graph, Op, ValueId};
@@ -50,9 +51,9 @@ impl BankAlloc {
     }
 }
 
-/// Where one node's value currently lives.
+/// Where one node's value currently lives: a bank plus a bank-relative physical slot.
 #[derive(Clone, Copy)]
-struct Slot {
+struct Loc {
     bank: Bank,
     index: u32,
 }
@@ -80,7 +81,7 @@ impl Arena {
     /// Releases `value`'s slot if `current` is its last use. Taking the mapping makes release
     /// idempotent when one consumer mentions the same SSA value more than once (`x*x`, or the same
     /// value in several positions of one gadget batch).
-    fn free_if_dead(&mut self, value: ValueId, current: usize, slot: &mut [Option<Slot>]) {
+    fn free_if_dead(&mut self, value: ValueId, current: usize, slot: &mut [Option<Loc>]) {
         if self.last_use[value.index()] != current {
             return;
         }
@@ -411,14 +412,14 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     // --- Phase A: reserved (non-recycled) regions ---
     // Public bank: constants, public gadget results, then Public-domain kept Op::Input.
     // Shared bank: shared gadget results, then Shared-domain kept Op::Input.
-    let mut slot: Vec<Option<Slot>> = vec![None; nodes.len()];
+    let mut slot: Vec<Option<Loc>> = vec![None; nodes.len()];
     let mut constants: Vec<Fr> = Vec::new();
     let mut p_next: u32 = 0;
     let mut s_next: u32 = 0;
 
     for (i, node) in nodes.iter().enumerate() {
         if let Op::Constant(c) = &node.op {
-            slot[i] = Some(Slot {
+            slot[i] = Some(Loc {
                 bank: Bank::Public,
                 index: p_next,
             });
@@ -463,7 +464,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
 
     // Node-indexed physical slot for every surviving `GadgetResult`.
     let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
-    let mut site_result_base: Vec<Slot> = Vec::with_capacity(graph.gadget_sites().len());
+    let mut site_result_base: Vec<Loc> = Vec::with_capacity(graph.gadget_sites().len());
     for (site_id, site) in graph.gadget_sites().iter().enumerate() {
         let bank = gadget_result_bank(site.kind, site_domains[site_id], site.precomputed)?;
         let base = match bank {
@@ -471,7 +472,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
             Bank::Shared => s_next,
             Bank::Local => unreachable!("gadget_result_bank never returns Local"),
         };
-        site_result_base.push(Slot { bank, index: base });
+        site_result_base.push(Loc { bank, index: base });
 
         let mut physical_count = 0u32;
         for &node_idx in &live_nodes[site_id] {
@@ -485,10 +486,10 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         }
     }
 
-    let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs);
+    let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs());
     let mut input_bindings: Vec<InputBinding> = Vec::new();
-    for input_index in 0..graph.num_inputs {
-        let sig = crate::ir::SignalIdx::new(graph.num_outputs + input_index);
+    for input_index in 0..graph.num_inputs() {
+        let sig = crate::ir::SignalIdx::new(graph.num_outputs() + input_index);
         let d = signal_domain(graph, sig);
         input_domains.push(match d {
             Domain::Public => Bank::Public,
@@ -498,13 +499,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     }
     for (i, node) in nodes.iter().enumerate() {
         if let Op::Input(sig) = &node.op {
-            let input_index = sig.index() - graph.num_outputs;
+            let input_index = sig.index() - graph.num_outputs();
             let bank = input_domains[input_index];
             let s = match bank {
                 Bank::Public => {
                     let idx = p_next;
                     p_next += 1;
-                    Slot {
+                    Loc {
                         bank: Bank::Public,
                         index: idx,
                     }
@@ -512,7 +513,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 Bank::Shared => {
                     let idx = s_next;
                     s_next += 1;
-                    Slot {
+                    Loc {
                         bank: Bank::Shared,
                         index: idx,
                     }
@@ -522,8 +523,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
             slot[i] = Some(s);
             input_bindings.push(InputBinding {
                 bank,
-                slot: s.index,
-                input_index: u32::try_from(input_index).expect("input index does not fit into u32"),
+                slot: Slot::new(s.index),
+                input_index: InputIdx::try_from(input_index)?,
             });
         }
     }
@@ -547,8 +548,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         };
         graph.rounds().len()
     ];
-    let mut round_operands: Vec<u32> = Vec::new();
-    let mut round_results: Vec<u32> = Vec::new();
+    let mut round_operands: Vec<Slot> = Vec::new();
+    let mut round_results: Vec<Slot> = Vec::new();
 
     // One entry per GadgetId, filled as each Op::Gadget node is walked.
     let mut site_inputs: Vec<Vec<SiteInput>> = vec![Vec::new(); graph.gadget_sites().len()];
@@ -564,7 +565,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         let node = &nodes[i];
         match &node.op {
             Op::Constant(_) | Op::Input(_) => {
-                // Slot already assigned in Phase A.
+                // Loc already assigned in Phase A.
             }
             Op::Add | Op::Sub | Op::Mul => {
                 let da = domain[node.inputs[0].index()];
@@ -578,13 +579,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     (sa.index, sb.index)
                 };
                 let dst = arena.alloc(dst_bank);
-                instructions.push(Instruction {
+                instructions.push(Instruction::Arith {
                     op: opcode,
-                    dst,
-                    a,
-                    b,
+                    dst: Slot::new(dst),
+                    a: Slot::new(a),
+                    b: Slot::new(b),
                 });
-                slot[i] = Some(Slot {
+                slot[i] = Some(Loc {
                     bank: dst_bank,
                     index: dst,
                 });
@@ -605,13 +606,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     );
                 }
                 let dst = arena.alloc(Bank::Local);
-                instructions.push(Instruction {
+                instructions.push(Instruction::Arith {
                     op: Opcode::MulLocal,
-                    dst,
-                    a: sa.index,
-                    b: sb.index,
+                    dst: Slot::new(dst),
+                    a: Slot::new(sa.index),
+                    b: Slot::new(sb.index),
                 });
-                slot[i] = Some(Slot {
+                slot[i] = Some(Loc {
                     bank: Bank::Local,
                     index: dst,
                 });
@@ -629,7 +630,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                             s.bank
                         );
                     }
-                    round_operands.push(s.index);
+                    round_operands.push(Slot::new(s.index));
                     arena.l.free(s.index, 0);
                 }
                 let len = u32::try_from(node.inputs.len())
@@ -654,8 +655,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                         ),
                     }
                     let dst = arena.alloc(Bank::Shared);
-                    round_results.push(dst);
-                    slot[result_idx] = Some(Slot {
+                    round_results.push(Slot::new(dst));
+                    slot[result_idx] = Some(Loc {
                         bank: Bank::Shared,
                         index: dst,
                     });
@@ -665,12 +666,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     len,
                     result_start,
                 };
-                instructions.push(Instruction {
-                    op: Opcode::Reshare,
-                    dst: 0,
-                    a: u32::try_from(round_id.index()).expect("round id does not fit into u32"),
-                    b: 0,
-                });
+                instructions.push(Instruction::Reshare(RoundIdx::try_from(round_id.index())?));
                 // Free every RoundResult(k) input that died the instant it was produced (rare -
                 // an unread result would already have been dropped by an earlier gc in practice,
                 // but the allocator handles it correctly regardless).
@@ -705,7 +701,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     }
                     inputs.push(SiteInput {
                         bank: s.bank,
-                        slot: s.index,
+                        slot: Slot::new(s.index),
                     });
                 }
                 site_inputs[site_id.index()] = inputs;
@@ -723,7 +719,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     "every GadgetResult node that survives to codegen was counted \
                              into live_slots/live_nodes above",
                 );
-                slot[i] = Some(Slot {
+                slot[i] = Some(Loc {
                     bank: base.bank,
                     index: phys,
                 });
@@ -742,12 +738,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     fusion_inputs[fusion_idx].push(site_inputs[pair.zero_test_site][0]);
                 }
             }
-            instructions.push(Instruction {
-                op: Opcode::Gadget,
-                dst: 0,
-                a: u32::try_from(batch_idx).expect("more gadget batches than fit into u32"),
-                b: 0,
-            });
+            instructions.push(Instruction::Gadget(BatchIdx::try_from(batch_idx)?));
             // Site inputs were pinned to this anchor by the liveness extension above, so this is
             // where they become recyclable. A fused service retains the original IsZero operand,
             // not the intermediate result passed to Reveal.
@@ -791,11 +782,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     );
                     for (pos, &logical) in live_slots[source_site].iter().enumerate() {
                         debug_assert!(logical <= 1, "IsZero has exactly two result slots");
-                        result_requests.push(logical);
+                        result_requests.push(ResultSlot::new(logical));
                         result_targets.push(ResultTarget {
                             bank: Bank::Shared,
-                            slot: result_phys[live_nodes[source_site][pos]]
-                                .expect("every live source result has a physical slot"),
+                            slot: Slot::new(
+                                result_phys[live_nodes[source_site][pos]]
+                                    .expect("every live source result has a physical slot"),
+                            ),
                         });
                     }
 
@@ -810,11 +803,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                             logical, 0,
                             "a fused Reveal(1) site has exactly one logical result slot"
                         );
-                        result_requests.push(2 + logical);
+                        result_requests.push(ResultSlot::new(2 + logical));
                         result_targets.push(ResultTarget {
                             bank: Bank::Public,
-                            slot: result_phys[live_nodes[pair.reveal_site][pos]]
-                                .expect("every live Reveal result has a physical slot"),
+                            slot: Slot::new(
+                                result_phys[live_nodes[pair.reveal_site][pos]]
+                                    .expect("every live Reveal result has a physical slot"),
+                            ),
                         });
                     }
                     result_offsets.push(
@@ -855,11 +850,13 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                     "a site's result bank must not change between reservation and assembly"
                 );
                 for (pos, &logical) in live_slots[site_id].iter().enumerate() {
-                    result_requests.push(logical);
+                    result_requests.push(ResultSlot::new(logical));
                     result_targets.push(ResultTarget {
                         bank: base.bank,
-                        slot: result_phys[live_nodes[site_id][pos]]
-                            .expect("every live gadget result has a physical slot"),
+                        slot: Slot::new(
+                            result_phys[live_nodes[site_id][pos]]
+                                .expect("every live gadget result has a physical slot"),
+                        ),
                     });
                 }
                 result_offsets.push(
@@ -898,7 +895,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     let witness_sources = if graph.signal_to_witness.is_empty() {
         Vec::new()
     } else {
-        let mut signal_sources = vec![None; graph.num_signals];
+        let mut signal_sources = vec![None; graph.num_signals()];
         *signal_sources.get_mut(0).ok_or_else(|| {
             eyre::eyre!("codegen: witness-bearing graph has no constant-one signal")
         })? = Some(WitnessSource::One);
@@ -914,25 +911,23 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
             let destination = signal_sources.get_mut(signal_index).ok_or_else(|| {
                 eyre::eyre!(
                     "codegen: output signal {signal_index} exceeds num_signals={}",
-                    graph.num_signals
+                    graph.num_signals()
                 )
             })?;
             *destination = Some(WitnessSource::Slot {
                 bank: s.bank,
-                slot: s.index,
+                slot: Slot::new(s.index),
             });
         }
-        for input_index in 0..graph.num_inputs {
-            let signal = graph.num_outputs + input_index + 1;
+        for input_index in 0..graph.num_inputs() {
+            let signal = graph.num_outputs() + input_index + 1;
             let destination = signal_sources.get_mut(signal).ok_or_else(|| {
                 eyre::eyre!(
                     "codegen: input signal {signal} exceeds num_signals={}",
-                    graph.num_signals
+                    graph.num_signals()
                 )
             })?;
-            *destination = Some(WitnessSource::Input(
-                u32::try_from(input_index).expect("input index does not fit into u32"),
-            ));
+            *destination = Some(WitnessSource::Input(InputIdx::try_from(input_index)?));
         }
         graph
             .signal_to_witness
@@ -956,7 +951,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         round_results,
         gadget_batches: batches,
         witness_sources,
-        num_inputs: graph.num_inputs,
+        num_inputs: graph.num_inputs(),
         slots: SlotCounts {
             public: arena.p.next,
             shared: arena.s.next,
@@ -1117,7 +1112,7 @@ mod tests {
             program
                 .instructions()
                 .iter()
-                .filter(|instr| instr.op == Opcode::Gadget)
+                .filter(|instr| matches!(instr, Instruction::Gadget(_)))
                 .count(),
             1
         );
@@ -1155,7 +1150,10 @@ mod tests {
         let batch = &program.gadget_batches()[0];
         assert_eq!(batch.kind, BatchKind::IsZeroReveal);
         assert_eq!(batch.sites, 1);
-        assert_eq!(batch.result_requests, vec![0, 1, 2]);
+        assert_eq!(
+            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(
             batch
                 .result_targets
@@ -1212,7 +1210,10 @@ mod tests {
         assert_eq!(batch.kind, BatchKind::IsZeroReveal);
         assert_eq!(batch.sites, 2);
         assert_eq!(batch.result_offsets, vec![0, 3, 6]);
-        assert_eq!(batch.result_requests, vec![0, 1, 2, 0, 1, 2]);
+        assert_eq!(
+            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            vec![0, 1, 2, 0, 1, 2]
+        );
     }
 
     #[test]
@@ -1486,9 +1487,7 @@ mod tests {
                 program
                     .instructions()
                     .iter()
-                    .position(|instr| {
-                        instr.op == Opcode::Gadget && instr.a as usize == batch_idx
-                    })
+                    .position(|instr| matches!(instr, Instruction::Gadget(idx) if idx.index() == batch_idx))
                     .expect("every batch has an instruction")
             })
             .collect();
@@ -1503,8 +1502,15 @@ mod tests {
             .instructions()
             .iter()
             .position(|instr| {
-                matches!(instr.op, Opcode::AddSS | Opcode::AddSP)
-                    && (instr.a == result_slot || instr.b == result_slot)
+                matches!(
+                    instr,
+                    Instruction::Arith {
+                        op: Opcode::AddSS | Opcode::AddSP,
+                        a,
+                        b,
+                        ..
+                    } if *a == result_slot || *b == result_slot
+                )
             })
             .expect("something reads batch 0's result");
         assert!(
@@ -1558,7 +1564,7 @@ mod tests {
         let batch_pos = program
             .instructions()
             .iter()
-            .position(|instr| instr.op == Opcode::Gadget)
+            .position(|instr| matches!(instr, Instruction::Gadget(_)))
             .expect("the batch has an instruction");
 
         // No instruction before the batch may write to any of its input slots (other than the
@@ -1568,8 +1574,7 @@ mod tests {
             let clobbers = program.instructions()[..batch_pos]
                 .iter()
                 .filter(|instr| {
-                    !matches!(instr.op, Opcode::Gadget | Opcode::Reshare)
-                        && instr.dst == input.slot
+                    matches!(instr, Instruction::Arith { dst, .. } if *dst == input.slot)
                 })
                 .count();
             assert!(
@@ -1644,7 +1649,7 @@ mod tests {
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
         assert_eq!(
-            batch.result_requests,
+            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
             vec![0, 2],
             "requests logical slots 0 and 2 only"
         );
@@ -1661,8 +1666,8 @@ mod tests {
         // The two surviving results must land at adjacent physical slots (base, base + 1), not at
         // their original logical indices 0 and 2.
         assert_eq!(
-            batch.result_targets[1].slot,
-            batch.result_targets[0].slot + 1
+            batch.result_targets[1].slot.get(),
+            batch.result_targets[0].slot.get() + 1
         );
     }
 

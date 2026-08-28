@@ -38,7 +38,7 @@ fn compiled(main: &str) -> &'static (Program, InputList) {
     fn build(main: &str) -> (Program, InputList) {
         let graph = CoCircomCompiler::parse(merces_main_path(main), merces_config())
             .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
-        let input_list = graph.input_list.clone();
+        let input_list = graph.input_list().clone();
         let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"));
         (program, input_list)
     }

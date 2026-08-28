@@ -4,11 +4,13 @@
 //! crate that only needs to load and inspect a compiled program can depend on this crate alone.
 
 mod gadget;
+mod index;
 mod inputs;
 mod program;
 mod serialize;
 
-pub use gadget::GadgetKind;
+pub use gadget::{GadgetKind, Poseidon2Width};
+pub use index::{BatchIdx, InputIdx, ResultSlot, RoundIdx, Slot};
 pub use inputs::{InputValue, InputValues};
 pub use program::{
     GadgetBatch, Bank, BatchKind, InputBinding, Instruction, Opcode,

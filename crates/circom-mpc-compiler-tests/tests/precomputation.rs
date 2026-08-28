@@ -31,7 +31,7 @@ fn precomputed_poseidon2_site_is_its_own_batch() {
     assert_eq!(program.statistics().precomputed_batches, 1);
     let batches = program.precomputed_batches().unwrap();
     assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].kind, GadgetKind::Poseidon2 { t: 3 });
+    assert_eq!(batches[0].kind, GadgetKind::Poseidon2 { t: circom_mpc_program::Poseidon2Width::new(3).expect("3 is a supported width") });
     assert_eq!(batches[0].sites, 1);
 }
 
@@ -50,7 +50,7 @@ fn mixed_precomputed_and_gadget_sites_never_share_a_batch() {
     assert_eq!(stats.precomputed_batches, 1, "{stats:?}");
     let precomputed = program.precomputed_batches().unwrap();
     assert_eq!(precomputed.len(), 1);
-    assert_eq!(precomputed[0].kind, GadgetKind::Poseidon2 { t: 3 });
+    assert_eq!(precomputed[0].kind, GadgetKind::Poseidon2 { t: circom_mpc_program::Poseidon2Width::new(3).expect("3 is a supported width") });
 }
 
 /// The same circuit, computed once through an unwrapped, driver-serviced `Poseidon2` and once
@@ -166,5 +166,5 @@ fn batch_kind_precomputed_poseidon2_is_never_used_for_a_gadget_site() {
     // `precomputed_batches()` walks `BatchKind::PrecomputedPoseidon2` specifically - confirm the
     // ordinary driver-serviced path never produces one.
     assert!(program.precomputed_batches().unwrap().is_empty());
-    let _ = BatchKind::Gadget(GadgetKind::Poseidon2 { t: 3 }); // kept in scope for the import
+    let _ = BatchKind::Gadget(GadgetKind::Poseidon2 { t: circom_mpc_program::Poseidon2Width::new(3).expect("3 is a supported width") }); // kept in scope for the import
 }

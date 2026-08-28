@@ -56,9 +56,37 @@ trait ReadLeExt: Read {
 impl<R: Read + ?Sized> ReadLeExt for R {}
 
 use crate::{
-    GadgetBatch, GadgetKind, Bank, BatchKind, InputBinding, Instruction, Opcode, Program,
-    ResultTarget, RoundEntry, SiteInput, SlotCounts, WitnessSource,
+    BatchIdx, GadgetBatch, GadgetKind, Bank, BatchKind, InputBinding, InputIdx, Instruction,
+    Opcode, Poseidon2Width, Program, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput,
+    Slot, SlotCounts, WitnessSource,
 };
+
+/// A wire-format index newtype: a thin, checked wrapper over `u32`. Lets [`write_index_vec`]/
+/// [`read_index_vec`] serve every index role ([`Slot`], [`ResultSlot`]) with one implementation.
+trait WireIndex: Copy {
+    fn to_u32(self) -> u32;
+    fn from_u32(raw: u32) -> Self;
+}
+
+impl WireIndex for Slot {
+    fn to_u32(self) -> u32 {
+        self.get()
+    }
+
+    fn from_u32(raw: u32) -> Self {
+        Slot::new(raw)
+    }
+}
+
+impl WireIndex for ResultSlot {
+    fn to_u32(self) -> u32 {
+        self.get()
+    }
+
+    fn from_u32(raw: u32) -> Self {
+        ResultSlot::new(raw)
+    }
+}
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
@@ -161,8 +189,13 @@ impl Bank {
     }
 }
 
+/// Writes a length prefix as the wire format's `u64` count field.
+fn write_len<W: Write>(w: &mut W, n: usize) -> eyre::Result<()> {
+    Ok(w.write_u64::<LittleEndian>(n as u64)?)
+}
+
 fn write_u32_vec<W: Write>(w: &mut W, values: &[u32]) -> eyre::Result<()> {
-    w.write_u64::<LittleEndian>(values.len() as u64)?;
+    write_len(w, values.len())?;
     for &v in values {
         w.write_u32::<LittleEndian>(v)?;
     }
@@ -180,14 +213,31 @@ fn read_u32_vec<R: Read>(
         .collect()
 }
 
+fn write_index_vec<W: Write, T: WireIndex>(w: &mut W, values: &[T]) -> eyre::Result<()> {
+    write_len(w, values.len())?;
+    for &v in values {
+        w.write_u32::<LittleEndian>(v.to_u32())?;
+    }
+    Ok(())
+}
+
+fn read_index_vec<R: Read, T: WireIndex>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+    table: &str,
+) -> eyre::Result<Vec<T>> {
+    let len = checked_count::<u32>(r.read_u64::<LittleEndian>()?, limits, table)?;
+    (0..len)
+        .map(|_| Ok(T::from_u32(r.read_u32::<LittleEndian>()?)))
+        .collect()
+}
+
 impl GadgetKind {
     fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
         match self {
             GadgetKind::Poseidon2 { t } => {
                 w.write_u8(0)?;
-                w.write_u32::<LittleEndian>(
-                    u32::try_from(*t).map_err(|_| eyre::eyre!("Poseidon2 t exceeds u32"))?,
-                )?;
+                w.write_u32::<LittleEndian>(t.as_u32())?;
             }
             GadgetKind::Num2Bits { n } => {
                 w.write_u8(1)?;
@@ -210,7 +260,7 @@ impl GadgetKind {
     fn read<R: Read>(r: &mut R) -> eyre::Result<Self> {
         Ok(match r.read_u8()? {
             0 => GadgetKind::Poseidon2 {
-                t: r.read_u32::<LittleEndian>()? as usize,
+                t: Poseidon2Width::from_u32(r.read_u32::<LittleEndian>()?)?,
             },
             1 => GadgetKind::Num2Bits {
                 n: r.read_u32::<LittleEndian>()? as usize,
@@ -235,9 +285,7 @@ impl BatchKind {
             BatchKind::IsZeroReveal => w.write_u8(1)?,
             BatchKind::PrecomputedPoseidon2 { t } => {
                 w.write_u8(2)?;
-                w.write_u32::<LittleEndian>(
-                    u32::try_from(*t).map_err(|_| eyre::eyre!("PrecomputedPoseidon2 t exceeds u32"))?,
-                )?;
+                w.write_u32::<LittleEndian>(t.as_u32())?;
             }
         }
         Ok(())
@@ -248,7 +296,7 @@ impl BatchKind {
             0 => BatchKind::Gadget(GadgetKind::read(r)?),
             1 => BatchKind::IsZeroReveal,
             2 => BatchKind::PrecomputedPoseidon2 {
-                t: r.read_u32::<LittleEndian>()? as usize,
+                t: Poseidon2Width::from_u32(r.read_u32::<LittleEndian>()?)?,
             },
             other => eyre::bail!("unknown BatchKind tag {other}"),
         })
@@ -267,81 +315,88 @@ impl Program {
         w.write_all(MAGIC)?;
         w.write_u32::<LittleEndian>(VERSION)?;
 
-        // instructions: fixed 16-byte records (1 opcode byte + 3 padding + three u32s).
-        w.write_u64::<LittleEndian>(self.instructions.len() as u64)?;
+        // instructions: fixed 16-byte records (1 opcode byte + 3 padding + three u32s). The
+        // table-index variants (`Reshare`/`Gadget`) write their index as `a`, leaving `dst`/`b`
+        // zero - `Instruction::op` recovers the tag on read.
+        write_len(w, self.instructions.len())?;
         for instr in &self.instructions {
-            w.write_u8(instr.op.to_u8())?;
+            w.write_u8(instr.op().to_u8())?;
             w.write_all(&[0u8; 3])?;
-            w.write_u32::<LittleEndian>(instr.dst)?;
-            w.write_u32::<LittleEndian>(instr.a)?;
-            w.write_u32::<LittleEndian>(instr.b)?;
+            let (dst, a, b) = match *instr {
+                Instruction::Arith { dst, a, b, .. } => (dst.get(), a.get(), b.get()),
+                Instruction::Reshare(round_idx) => (0, round_idx.get(), 0),
+                Instruction::Gadget(batch_idx) => (0, batch_idx.get(), 0),
+            };
+            w.write_u32::<LittleEndian>(dst)?;
+            w.write_u32::<LittleEndian>(a)?;
+            w.write_u32::<LittleEndian>(b)?;
         }
 
         // constants: the one field-element table, via ark_serialize.
-        w.write_u64::<LittleEndian>(self.constants.len() as u64)?;
+        write_len(w, self.constants.len())?;
         for c in &self.constants {
             c.serialize_compressed(&mut *w)?;
         }
 
-        w.write_u64::<LittleEndian>(self.input_domains.len() as u64)?;
+        write_len(w, self.input_domains.len())?;
         for bank in &self.input_domains {
             w.write_u8(bank.to_u8())?;
         }
 
-        w.write_u64::<LittleEndian>(self.inputs.len() as u64)?;
+        write_len(w, self.inputs.len())?;
         for binding in &self.inputs {
             w.write_u8(binding.bank.to_u8())?;
-            w.write_u32::<LittleEndian>(binding.slot)?;
-            w.write_u32::<LittleEndian>(binding.input_index)?;
+            w.write_u32::<LittleEndian>(binding.slot.get())?;
+            w.write_u32::<LittleEndian>(binding.input_index.get())?;
         }
 
-        w.write_u64::<LittleEndian>(self.rounds.len() as u64)?;
+        write_len(w, self.rounds.len())?;
         for round in &self.rounds {
             w.write_u32::<LittleEndian>(round.operand_start)?;
             w.write_u32::<LittleEndian>(round.len)?;
             w.write_u32::<LittleEndian>(round.result_start)?;
         }
-        write_u32_vec(w, &self.round_operands)?;
-        write_u32_vec(w, &self.round_results)?;
+        write_index_vec(w, &self.round_operands)?;
+        write_index_vec(w, &self.round_results)?;
 
-        w.write_u64::<LittleEndian>(self.gadget_batches.len() as u64)?;
+        write_len(w, self.gadget_batches.len())?;
         for batch in &self.gadget_batches {
             batch.kind.write(w)?;
-            w.write_u64::<LittleEndian>(batch.sites as u64)?;
+            write_len(w, batch.sites)?;
             // Banked, like a `WitnessSource::Slot` - a site input may be a `Public` slot (a literal the circuit
             // passed to the gadget), not only a share. See `SiteInput`.
-            w.write_u64::<LittleEndian>(batch.input_slots.len() as u64)?;
+            write_len(w, batch.input_slots.len())?;
             for input in &batch.input_slots {
                 w.write_u8(input.bank.to_u8())?;
-                w.write_u32::<LittleEndian>(input.slot)?;
+                w.write_u32::<LittleEndian>(input.slot.get())?;
             }
-            write_u32_vec(w, &batch.result_requests)?;
+            write_index_vec(w, &batch.result_requests)?;
             write_u32_vec(w, &batch.result_offsets)?;
-            w.write_u64::<LittleEndian>(batch.result_targets.len() as u64)?;
+            write_len(w, batch.result_targets.len())?;
             for target in &batch.result_targets {
                 w.write_u8(target.bank.to_u8())?;
-                w.write_u32::<LittleEndian>(target.slot)?;
+                w.write_u32::<LittleEndian>(target.slot.get())?;
             }
         }
 
-        w.write_u64::<LittleEndian>(self.witness_sources.len() as u64)?;
+        write_len(w, self.witness_sources.len())?;
         for source in &self.witness_sources {
             match *source {
                 WitnessSource::One => w.write_u8(0)?,
                 WitnessSource::Zero => w.write_u8(3)?,
                 WitnessSource::Input(input) => {
                     w.write_u8(1)?;
-                    w.write_u32::<LittleEndian>(input)?;
+                    w.write_u32::<LittleEndian>(input.get())?;
                 }
                 WitnessSource::Slot { bank, slot } => {
                     w.write_u8(2)?;
                     w.write_u8(bank.to_u8())?;
-                    w.write_u32::<LittleEndian>(slot)?;
+                    w.write_u32::<LittleEndian>(slot.get())?;
                 }
             }
         }
 
-        w.write_u64::<LittleEndian>(self.num_inputs as u64)?;
+        write_len(w, self.num_inputs)?;
 
         w.write_u32::<LittleEndian>(self.slots.public)?;
         w.write_u32::<LittleEndian>(self.slots.shared)?;
@@ -409,7 +464,16 @@ impl Program {
             let dst = r.read_u32::<LittleEndian>()?;
             let a = r.read_u32::<LittleEndian>()?;
             let b = r.read_u32::<LittleEndian>()?;
-            instructions.push(Instruction { op, dst, a, b });
+            instructions.push(match op {
+                Opcode::Reshare => Instruction::Reshare(RoundIdx::new(a)),
+                Opcode::Gadget => Instruction::Gadget(BatchIdx::new(a)),
+                op => Instruction::Arith {
+                    op,
+                    dst: Slot::new(dst),
+                    a: Slot::new(a),
+                    b: Slot::new(b),
+                },
+            });
         }
 
         let const_count = checked_count::<Fr>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
@@ -430,8 +494,8 @@ impl Program {
         let mut inputs = Vec::with_capacity(binding_count);
         for _ in 0..binding_count {
             let bank = Bank::from_u8(r.read_u8()?)?;
-            let slot = r.read_u32::<LittleEndian>()?;
-            let input_index = r.read_u32::<LittleEndian>()?;
+            let slot = Slot::new(r.read_u32::<LittleEndian>()?);
+            let input_index = InputIdx::new(r.read_u32::<LittleEndian>()?);
             inputs.push(InputBinding {
                 bank,
                 slot,
@@ -452,8 +516,8 @@ impl Program {
                 result_start,
             });
         }
-        let round_operands = read_u32_vec(r, limits, "round operand")?;
-        let round_results = read_u32_vec(r, limits, "round result")?;
+        let round_operands = read_index_vec(r, limits, "round operand")?;
+        let round_results = read_index_vec(r, limits, "round result")?;
 
         let batch_count = checked_count::<GadgetBatch>(
             r.read_u64::<LittleEndian>()?,
@@ -478,10 +542,10 @@ impl Program {
                     bank != Bank::Local,
                     "gadget input bank cannot be Local"
                 );
-                let slot = r.read_u32::<LittleEndian>()?;
+                let slot = Slot::new(r.read_u32::<LittleEndian>()?);
                 input_slots.push(SiteInput { bank, slot });
             }
-            let result_requests = read_u32_vec(r, limits, "gadget result request")?;
+            let result_requests = read_index_vec::<_, ResultSlot>(r, limits, "gadget result request")?;
             let result_offsets = read_u32_vec(r, limits, "gadget result offset")?;
             let target_count = checked_count::<ResultTarget>(
                 r.read_u64::<LittleEndian>()?,
@@ -495,7 +559,7 @@ impl Program {
                     bank != Bank::Local,
                     "gadget result bank cannot be Local"
                 );
-                let slot = r.read_u32::<LittleEndian>()?;
+                let slot = Slot::new(r.read_u32::<LittleEndian>()?);
                 result_targets.push(ResultTarget { bank, slot });
             }
             let expected_offsets = sites
@@ -541,10 +605,10 @@ impl Program {
         for _ in 0..witness_count {
             let source = match r.read_u8()? {
                 0 => WitnessSource::One,
-                1 => WitnessSource::Input(r.read_u32::<LittleEndian>()?),
+                1 => WitnessSource::Input(InputIdx::new(r.read_u32::<LittleEndian>()?)),
                 2 => WitnessSource::Slot {
                     bank: Bank::from_u8(r.read_u8()?)?,
-                    slot: r.read_u32::<LittleEndian>()?,
+                    slot: Slot::new(r.read_u32::<LittleEndian>()?),
                 },
                 3 => WitnessSource::Zero,
                 other => eyre::bail!("unknown WitnessSource tag {other}"),

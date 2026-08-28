@@ -2,7 +2,7 @@
 //! malformed shapes via `Program::into_parts`.
 
 use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
-use circom_mpc_program::{Opcode, Program};
+use circom_mpc_program::{Instruction, Program, RoundIdx, Slot};
 
 fn program(circuit: &str) -> Program {
     let root = env!("CARGO_MANIFEST_DIR");
@@ -35,9 +35,12 @@ fn rejects_an_instruction_slot_out_of_bank_bounds() {
     let instruction = parts
         .instructions
         .iter_mut()
-        .find(|instruction| instruction.op == Opcode::MulLocal)
+        .find(|instruction| matches!(instruction, Instruction::Arith { op: circom_mpc_program::Opcode::MulLocal, .. }))
         .expect("multiplier2's product is a genuine secret x secret multiplication");
-    instruction.a = shared;
+    let Instruction::Arith { a, .. } = instruction else {
+        unreachable!("just matched above")
+    };
+    *a = Slot::new(shared);
     assert!(Program::new(parts).validate_encoding().is_err());
 }
 
@@ -48,9 +51,9 @@ fn rejects_an_instruction_referencing_a_missing_round() {
     let instruction = parts
         .instructions
         .iter_mut()
-        .find(|instruction| instruction.op == Opcode::Reshare)
+        .find(|instruction| matches!(instruction, Instruction::Reshare(_)))
         .expect("multiplier2's product needs one reshare round");
-    instruction.a = rounds_len;
+    *instruction = Instruction::Reshare(RoundIdx::new(rounds_len));
     assert!(Program::new(parts).validate_encoding().is_err());
 }
 

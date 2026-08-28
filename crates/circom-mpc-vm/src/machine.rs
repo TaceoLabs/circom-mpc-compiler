@@ -6,11 +6,29 @@ use ark_bn254::Fr;
 use ark_ff::{One, Zero};
 
 use circom_mpc_program::{
-    GadgetBatch, GadgetKind, Bank, BatchKind, InputValue, InputValues, Opcode, Program,
-    WitnessSource,
+    GadgetBatch, GadgetKind, Bank, BatchKind, InputValue, InputValues, Instruction, Program,
+    Slot, WitnessSource,
 };
 
 use crate::driver::VmDriver;
+
+/// One physical bank (`public`/`shared`), indexed by [`Slot`] instead of a bare `usize` - the one
+/// place a `Slot` is finally cast down to index a `Vec`.
+struct SlotBank<T>(Vec<T>);
+
+impl<T> std::ops::Index<Slot> for SlotBank<T> {
+    type Output = T;
+
+    fn index(&self, slot: Slot) -> &T {
+        &self.0[slot.index()]
+    }
+}
+
+impl<T> std::ops::IndexMut<Slot> for SlotBank<T> {
+    fn index_mut(&mut self, slot: Slot) -> &mut T {
+        &mut self.0[slot.index()]
+    }
+}
 
 /// One site's precomputed trace, shaped like co-snarks' `ComponentGadgetOutput` -
 /// `output`/`intermediate` are exactly `GadgetSite`'s own outputs and intermediates, so a
@@ -189,17 +207,17 @@ impl Machine {
         );
 
         let slots = program.slots();
-        let mut public: Vec<Fr> = vec![Fr::zero(); slots.public as usize];
-        let mut shared: Vec<D::Share> = vec![D::Share::default(); slots.shared as usize];
+        let mut public = SlotBank(vec![Fr::zero(); slots.public as usize]);
+        let mut shared = SlotBank(vec![D::Share::default(); slots.shared as usize]);
 
         for (i, c) in program.constants().iter().enumerate() {
-            public[i] = *c;
+            public.0[i] = *c;
         }
 
         for binding in program.inputs() {
-            match (binding.bank, &inputs[binding.input_index as usize]) {
-                (Bank::Public, InputValue::Public(v)) => public[binding.slot as usize] = *v,
-                (Bank::Shared, InputValue::Secret(v)) => shared[binding.slot as usize] = v.clone(),
+            match (binding.bank, &inputs[binding.input_index.index()]) {
+                (Bank::Public, InputValue::Public(v)) => public[binding.slot] = *v,
+                (Bank::Shared, InputValue::Secret(v)) => shared[binding.slot] = v.clone(),
                 (bank, _) => eyre::bail!(
                     "input {} is {bank:?}-domain but was supplied as the other InputValue variant",
                     binding.input_index
@@ -214,52 +232,100 @@ impl Machine {
 
         let mut pending_mul_lhs: Vec<D::Share> = Vec::new();
         let mut pending_mul_rhs: Vec<D::Share> = Vec::new();
-        let mut pending_mul_dst: Vec<u32> = Vec::new();
+        let mut pending_mul_dst: Vec<Slot> = Vec::new();
         for instr in program.instructions() {
-            match instr.op {
-                Opcode::AddPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] + public[instr.b as usize];
+            match *instr {
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::AddPP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    public[dst] = public[a] + public[b];
                 }
-                Opcode::SubPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] - public[instr.b as usize];
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::SubPP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    public[dst] = public[a] - public[b];
                 }
-                Opcode::MulPP => {
-                    public[instr.dst as usize] = public[instr.a as usize] * public[instr.b as usize];
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::MulPP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    public[dst] = public[a] * public[b];
                 }
-                Opcode::AddSS => {
-                    shared[instr.dst as usize] =
-                        driver.add_ss(&shared[instr.a as usize], &shared[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::AddSS,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.add_ss(&shared[a], &shared[b]);
                 }
-                Opcode::SubSS => {
-                    shared[instr.dst as usize] =
-                        driver.sub_ss(&shared[instr.a as usize], &shared[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::SubSS,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.sub_ss(&shared[a], &shared[b]);
                 }
-                Opcode::AddSP => {
-                    shared[instr.dst as usize] =
-                        driver.add_sp(&shared[instr.a as usize], public[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::AddSP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.add_sp(&shared[a], public[b]);
                 }
-                Opcode::SubSP => {
-                    shared[instr.dst as usize] =
-                        driver.sub_sp(&shared[instr.a as usize], public[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::SubSP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.sub_sp(&shared[a], public[b]);
                 }
-                Opcode::SubPS => {
-                    shared[instr.dst as usize] =
-                        driver.sub_ps(public[instr.a as usize], &shared[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::SubPS,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.sub_ps(public[a], &shared[b]);
                 }
-                Opcode::MulSP => {
-                    shared[instr.dst as usize] =
-                        driver.mul_sp(&shared[instr.a as usize], public[instr.b as usize]);
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::MulSP,
+                    dst,
+                    a,
+                    b,
+                } => {
+                    shared[dst] = driver.mul_sp(&shared[a], public[b]);
                 }
-                Opcode::MulLocal => {
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::MulLocal,
+                    dst,
+                    a,
+                    b,
+                } => {
                     // Codegen may recycle these shared slots before the round boundary, so retain
                     // the values rather than only their indices. The expensive masked product is
                     // still delayed and vectorized across the complete round.
-                    pending_mul_lhs.push(shared[instr.a as usize].clone());
-                    pending_mul_rhs.push(shared[instr.b as usize].clone());
-                    pending_mul_dst.push(instr.dst);
+                    pending_mul_lhs.push(shared[a].clone());
+                    pending_mul_rhs.push(shared[b].clone());
+                    pending_mul_dst.push(dst);
                 }
-                Opcode::Reshare => {
-                    let entry = rounds[instr.a as usize];
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::Reshare | circom_mpc_program::Opcode::Gadget,
+                    ..
+                } => unreachable!("Reshare/Gadget never appear in an Arith instruction"),
+                Instruction::Reshare(round_idx) => {
+                    let entry = rounds[round_idx.index()];
                     let start = entry.operand_start as usize;
                     let len = entry.len as usize;
                     eyre::ensure!(
@@ -277,11 +343,11 @@ impl Machine {
                     );
                     let rstart = entry.result_start as usize;
                     for (k, r) in results.into_iter().enumerate() {
-                        shared[round_results[rstart + k] as usize] = r;
+                        shared[round_results[rstart + k]] = r;
                     }
                 }
-                Opcode::Gadget => Self::run_batch(
-                    &gadget_batches[instr.a as usize],
+                Instruction::Gadget(batch_idx) => Self::run_batch(
+                    &gadget_batches[batch_idx.index()],
                     driver,
                     &mut public,
                     &mut shared,
@@ -303,18 +369,18 @@ impl Machine {
             witness.push(match *source {
                 WitnessSource::One => driver.promote(Fr::one()),
                 WitnessSource::Zero => driver.promote(Fr::zero()),
-                WitnessSource::Input(input_index) => match &inputs[input_index as usize] {
+                WitnessSource::Input(input_index) => match &inputs[input_index.index()] {
                     InputValue::Public(value) => driver.promote(*value),
                     InputValue::Secret(value) => value.clone(),
                 },
                 WitnessSource::Slot {
                     bank: Bank::Public,
                     slot,
-                } => driver.promote(public[slot as usize]),
+                } => driver.promote(public[slot]),
                 WitnessSource::Slot {
                     bank: Bank::Shared,
                     slot,
-                } => shared[slot as usize].clone(),
+                } => shared[slot].clone(),
                 WitnessSource::Slot {
                     bank: Bank::Local, ..
                 } => unreachable!("codegen never emits a Local witness source"),
@@ -339,15 +405,15 @@ impl Machine {
     fn run_batch<D: VmDriver>(
         batch: &GadgetBatch,
         driver: &mut D,
-        public: &mut [Fr],
-        shared: &mut [D::Share],
+        public: &mut SlotBank<Fr>,
+        shared: &mut SlotBank<D::Share>,
         precomputation: &mut GadgetPrecomputation<D::Share>,
     ) -> eyre::Result<()> {
         if batch.kind == BatchKind::IsZeroReveal {
             return Self::run_is_zero_reveal_batch(batch, driver, public, shared);
         }
         if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
-            return Self::run_precomputed_batch(t, batch, precomputation, shared);
+            return Self::run_precomputed_batch(t.get(), batch, precomputation, shared);
         }
         let BatchKind::Gadget(kind) = batch.kind else {
             unreachable!("fused and host-precomputed batches handled above")
@@ -362,6 +428,8 @@ impl Machine {
             .iter()
             .any(|input| input.bank == Bank::Shared);
 
+        let result_requests: Vec<u32> = batch.result_requests.iter().map(|r| r.get()).collect();
+
         if !needs_mpc {
             let inputs: Vec<Fr> = batch
                 .input_slots
@@ -371,14 +439,14 @@ impl Machine {
                         input.bank == Bank::Public,
                         "public gadget batch has a non-public input"
                     );
-                    Ok(public[input.slot as usize])
+                    Ok(public[input.slot])
                 })
                 .collect::<eyre::Result<_>>()?;
             if let GadgetKind::Poseidon2 { t } = kind {
                 let selected = crate::gadgets::poseidon2::plain_trace_requested(
-                    t,
+                    t.get(),
                     &inputs,
-                    &batch.result_requests,
+                    &result_requests,
                     &batch.result_offsets,
                 )?;
                 return Self::store_batch_results(batch, selected, Bank::Public, public);
@@ -394,8 +462,8 @@ impl Machine {
             .input_slots
             .iter()
             .map(|input| match input.bank {
-                Bank::Public => driver.promote(public[input.slot as usize]),
-                Bank::Shared => shared[input.slot as usize].clone(),
+                Bank::Public => driver.promote(public[input.slot]),
+                Bank::Shared => shared[input.slot].clone(),
                 Bank::Local => unreachable!(
                     "Graph::verify and codegen both reject an un-reshared MulLocal feeding a site"
                 ),
@@ -411,9 +479,9 @@ impl Machine {
         }
         if let GadgetKind::Poseidon2 { t } = kind {
             let selected = driver.poseidon2_requested_traces(
-                t,
+                t.get(),
                 &inputs,
-                &batch.result_requests,
+                &result_requests,
                 &batch.result_offsets,
             )?;
             return Self::store_batch_results(batch, selected, Bank::Shared, shared);
@@ -433,8 +501,8 @@ impl Machine {
     fn run_is_zero_reveal_batch<D: VmDriver>(
         batch: &GadgetBatch,
         driver: &mut D,
-        public: &mut [Fr],
-        shared: &mut [D::Share],
+        public: &mut SlotBank<Fr>,
+        shared: &mut SlotBank<D::Share>,
     ) -> eyre::Result<()> {
         eyre::ensure!(batch.sites > 0, "fused IsZero/Reveal batch has no sites");
         eyre::ensure!(
@@ -451,7 +519,7 @@ impl Machine {
                     input.bank == Bank::Shared,
                     "fused IsZero/Reveal requires one Shared input per site"
                 );
-                Ok(shared[input.slot as usize].clone())
+                Ok(shared[input.slot].clone())
             })
             .collect::<eyre::Result<_>>()?;
         let traces = driver.is_zero_reveal_traces(&inputs)?;
@@ -477,18 +545,18 @@ impl Machine {
                 .iter()
                 .zip(&batch.result_targets[lo..hi])
             {
-                match logical {
+                match logical.get() {
                     0 => {
                         eyre::ensure!(target.bank == Bank::Shared, "IsZero.out must target Shared");
-                        shared[target.slot as usize] = is_zero.clone();
+                        shared[target.slot] = is_zero.clone();
                     }
                     1 => {
                         eyre::ensure!(target.bank == Bank::Shared, "IsZero.inv must target Shared");
-                        shared[target.slot as usize] = inverse.clone();
+                        shared[target.slot] = inverse.clone();
                     }
                     2 => {
                         eyre::ensure!(target.bank == Bank::Public, "Reveal.out must target Public");
-                        public[target.slot as usize] = revealed;
+                        public[target.slot] = revealed;
                     }
                     other => {
                         eyre::bail!("fused IsZero/Reveal requested invalid logical slot {other}")
@@ -508,7 +576,7 @@ impl Machine {
         t: usize,
         batch: &GadgetBatch,
         precomputation: &mut GadgetPrecomputation<S>,
-        shared: &mut [S],
+        shared: &mut SlotBank<S>,
     ) -> eyre::Result<()> {
         let num_outputs = t;
         let sites = precomputation.pop().ok_or_else(|| {
@@ -550,7 +618,7 @@ impl Machine {
                     target.bank == Bank::Shared,
                     "precomputed Poseidon2{{t={t}}} result must target Shared"
                 );
-                let logical = logical as usize;
+                let logical = logical.index();
                 let value = if logical < num_outputs {
                     trace.output[logical].clone()
                 } else {
@@ -563,7 +631,7 @@ impl Machine {
                         )
                     })?
                 };
-                shared[target.slot as usize] = value;
+                shared[target.slot] = value;
             }
         }
         Ok(())
@@ -626,7 +694,7 @@ impl Machine {
             let lo = batch.result_offsets[site] as usize;
             let hi = batch.result_offsets[site + 1] as usize;
             for &logical in &batch.result_requests[lo..hi] {
-                let logical = logical as usize;
+                let logical = logical.index();
                 eyre::ensure!(
                     logical < capacity,
                     "gadget batch ({:?}) requested slot {logical}, exceeding the {capacity} \
@@ -643,7 +711,7 @@ impl Machine {
         batch: &GadgetBatch,
         results: Vec<T>,
         expected_bank: Bank,
-        destination: &mut [T],
+        destination: &mut SlotBank<T>,
     ) -> eyre::Result<()> {
         eyre::ensure!(
             results.len() == batch.result_targets.len(),
@@ -659,7 +727,7 @@ impl Machine {
                 "gadget batch ({:?}) result targets mixed banks unexpectedly",
                 batch.kind
             );
-            destination[target.slot as usize] = value;
+            destination[target.slot] = value;
         }
         Ok(())
     }
