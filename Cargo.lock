@@ -939,7 +939,7 @@ dependencies = [
 [[package]]
 name = "circom_algebra"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "constant_tracking",
  "num-bigint-dig",
@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "co-circom-types"
 version = "0.6.0"
-source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb#78108cb23fedb4d9eec8ad7f19651531c82e7996"
+source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb23fedb4d9eec8ad7f19651531c82e7996#78108cb23fedb4d9eec8ad7f19651531c82e7996"
 dependencies = [
  "ark-ff 0.6.0",
  "ark-serialize 0.6.0",
@@ -1016,7 +1016,7 @@ dependencies = [
 [[package]]
 name = "co-groth16"
 version = "0.10.0"
-source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb#78108cb23fedb4d9eec8ad7f19651531c82e7996"
+source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb23fedb4d9eec8ad7f19651531c82e7996#78108cb23fedb4d9eec8ad7f19651531c82e7996"
 dependencies = [
  "ark-ec",
  "ark-ff 0.6.0",
@@ -1039,7 +1039,7 @@ dependencies = [
 [[package]]
 name = "code_producers"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "circom_algebra",
  "handlebars",
@@ -1086,7 +1086,7 @@ dependencies = [
 [[package]]
 name = "compiler"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "code_producers",
  "constant_tracking",
@@ -1104,12 +1104,12 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "constant_tracking"
 version = "2.0.0"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 
 [[package]]
 name = "constraint_generation"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "ansi_term",
  "circom_algebra",
@@ -1125,7 +1125,7 @@ dependencies = [
 [[package]]
 name = "constraint_list"
 version = "2.1.8"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "circom_algebra",
  "constraint_writers",
@@ -1138,7 +1138,7 @@ dependencies = [
 [[package]]
 name = "constraint_writers"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "circom_algebra",
  "json",
@@ -1314,7 +1314,7 @@ dependencies = [
 [[package]]
 name = "dag"
 version = "2.2.0"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "circom_algebra",
  "constraint_list",
@@ -2257,7 +2257,7 @@ dependencies = [
 [[package]]
 name = "mpc-core"
 version = "0.10.0"
-source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb#78108cb23fedb4d9eec8ad7f19651531c82e7996"
+source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb23fedb4d9eec8ad7f19651531c82e7996#78108cb23fedb4d9eec8ad7f19651531c82e7996"
 dependencies = [
  "ark-bls12-377",
  "ark-bls12-381",
@@ -2290,7 +2290,7 @@ dependencies = [
 [[package]]
 name = "mpc-net"
 version = "0.5.0"
-source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb#78108cb23fedb4d9eec8ad7f19651531c82e7996"
+source = "git+https://github.com/TaceoLabs/co-snarks?rev=78108cb23fedb4d9eec8ad7f19651531c82e7996#78108cb23fedb4d9eec8ad7f19651531c82e7996"
 dependencies = [
  "byteorder",
  "bytes",
@@ -2541,7 +2541,7 @@ dependencies = [
 [[package]]
 name = "parser"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
@@ -2733,7 +2733,7 @@ dependencies = [
 [[package]]
 name = "program_structure"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "codespan",
  "codespan-reporting",
@@ -4105,7 +4105,7 @@ dependencies = [
 [[package]]
 name = "type_analysis"
 version = "2.2.2"
-source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
+source = "git+https://github.com/TaceoLabs/circom?rev=53c1ccd0c74f12665c5aeb89592360f42c3d1226#53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 dependencies = [
  "num-bigint-dig",
  "num-traits",
