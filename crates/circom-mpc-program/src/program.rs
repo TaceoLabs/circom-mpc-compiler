@@ -771,15 +771,26 @@ impl Program {
                 );
                 check_slot(input.bank, input.slot, "gadget input")?;
             }
-            if batch.kind == BatchKind::IsZeroReveal
-                || matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. })
-            {
+            if batch.kind == BatchKind::IsZeroReveal {
                 eyre::ensure!(
                     batch
                         .input_slots
                         .iter()
                         .all(|input| input.bank == Bank::Shared),
-                    "fused IsZeroReveal / precomputed batch {index} must have only Shared inputs"
+                    "fused IsZeroReveal batch {index} must have only Shared inputs"
+                );
+            }
+            if matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. }) {
+                // Mirrors `codegen::gadget_result_bank`'s `Domain::Shared` requirement: a
+                // host-precomputed site may mix Public and Shared inputs (e.g. a public domain
+                // separator alongside real shares), but at least one input must be Shared -
+                // otherwise there is nothing for the host to precompute.
+                eyre::ensure!(
+                    batch
+                        .input_slots
+                        .iter()
+                        .any(|input| input.bank == Bank::Shared),
+                    "precomputed batch {index} must have at least one Shared input"
                 );
             }
 

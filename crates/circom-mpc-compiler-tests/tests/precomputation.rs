@@ -11,11 +11,17 @@ use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::gadgets::poseidon2;
 use circom_mpc_vm::program::BatchKind;
-use circom_mpc_vm::{GadgetPrecomputation, Machine, SiteTrace};
+use circom_mpc_vm::{GadgetPrecomputation, InputValue, Machine, SiteTrace};
 
 mod common;
 
 use common::{circuit_path, libs_path};
+
+/// Wraps every value as `InputValue::Secret` - the all-shared case most of this file's tests
+/// exercise; the mixed-domain case gets its own test below.
+fn secret(values: &[Fr]) -> Vec<InputValue<Fr>> {
+    values.iter().copied().map(InputValue::Secret).collect()
+}
 
 fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
@@ -71,7 +77,44 @@ fn precomputed_poseidon2_matches_the_gadget_twin() {
 
     let inputs = precomputed_program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
-    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
+    precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
+    let got = Machine::run_with_precomputation(
+        &precomputed_program,
+        &mut PlainDriver,
+        &inputs,
+        precomputation,
+    )
+    .unwrap();
+    assert_eq!(got, expected);
+}
+
+/// A host-precomputed site may mix Public and Shared inputs - only an all-Public site is rejected
+/// (see `an_all_public_precomputed_site_is_rejected_at_compile_time`). The host builds the trace
+/// from the same mix of `InputValue::Public`/`InputValue::Secret` the program itself classifies
+/// its inputs into, and the resulting witness must match the driver-serviced twin.
+#[test]
+fn precomputed_poseidon2_with_a_mixed_public_and_shared_input_matches_the_gadget_twin() {
+    let gadget_program =
+        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), config())
+            .unwrap();
+    let precomputed_program =
+        CoCircomCompiler::compile(circuit_path("precomputation_mixed_domain_test"), config())
+            .unwrap();
+
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+    let expected = {
+        let inputs = gadget_program.classify_inputs(&values, |v| v);
+        Machine::run(&gadget_program, &mut PlainDriver, &inputs).unwrap()
+    };
+
+    let inputs = precomputed_program.classify_inputs(&values, |v| v);
+    let mut precomputation = GadgetPrecomputation::new();
+    let states = [
+        InputValue::Public(values[0]),
+        InputValue::Secret(values[1]),
+        InputValue::Secret(values[2]),
+    ];
+    precomputation.push_batch(poseidon2::plain_trace(3, &states).unwrap());
     let got = Machine::run_with_precomputation(
         &precomputed_program,
         &mut PlainDriver,
@@ -102,7 +145,7 @@ fn wrong_site_count_is_rejected() {
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
-    let mut traces = poseidon2::plain_trace(3, &values).unwrap();
+    let mut traces = poseidon2::plain_trace(3, &secret(&values)).unwrap();
     traces.push(traces[0].clone());
     precomputation.push_batch(traces);
     let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
@@ -117,7 +160,7 @@ fn short_intermediate_is_rejected() {
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
-    let traces = poseidon2::plain_trace(3, &values).unwrap();
+    let traces = poseidon2::plain_trace(3, &secret(&values)).unwrap();
     precomputation.push_batch(vec![SiteTrace::new(traces[0].output.clone(), Vec::new())]);
     let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
         .unwrap_err();
@@ -134,8 +177,8 @@ fn leftover_precomputation_after_the_run_is_rejected() {
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
-    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
-    precomputation.push_batch(poseidon2::plain_trace(3, &values).unwrap());
+    precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
+    precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
     let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
         .unwrap_err();
     assert!(err.to_string().contains("unconsumed batch"), "{err}");

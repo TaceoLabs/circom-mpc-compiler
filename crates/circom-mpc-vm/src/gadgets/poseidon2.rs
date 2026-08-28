@@ -17,6 +17,7 @@
 
 use ark_bn254::Fr;
 use ark_ff::AdditiveGroup;
+use mpc_core::MpcState as _;
 
 use super::poseidon2_constants::{RoundConstants, partial_rounds};
 
@@ -697,17 +698,28 @@ pub(crate) fn plain_trace_requested(
 /// `t` output elements) and `intermediate` (its round trace) - exactly `GadgetSite`'s own
 /// outputs/intermediates, and exactly the shape `Machine::run_with_precomputation` expects. A thin,
 /// full-CSR-request wrapper over [`plain_trace_requested`] for a host that wants to precompute a
-/// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`.
+/// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`. `states` may mix
+/// `InputValue::Public` and `InputValue::Secret` - a site's inputs need not all be secret, only
+/// at least one of them (see `Program::validate_encoding`).
 ///
 /// # Errors
 ///
 /// Returns an error if `t` is unsupported or `states.len()` isn't a multiple of `t`.
-pub fn plain_trace(t: usize, states: &[Fr]) -> eyre::Result<Vec<crate::SiteTrace<Fr>>> {
+pub fn plain_trace(
+    t: usize,
+    states: &[circom_mpc_program::InputValue<Fr>],
+) -> eyre::Result<Vec<crate::SiteTrace<Fr>>> {
+    let states: Vec<Fr> = states
+        .iter()
+        .map(|value| match value {
+            circom_mpc_program::InputValue::Public(v) | circom_mpc_program::InputValue::Secret(v) => *v,
+        })
+        .collect();
     let sites = check_width(t, states.len())?;
     let capacity = result_slots(t);
     let flat = plain_trace_requested(
         t,
-        states,
+        &states,
         &full_requests(sites, capacity),
         &full_offsets(sites, capacity),
     )?;
@@ -1059,10 +1071,12 @@ impl Poseidon2Service {
         Ok(Self { t, preprocessing })
     }
 
-    /// Runs the permutation over `states` (`sites * t` shares, one length-`t` state per site,
-    /// concatenated) and returns each site's full trace. Consumes exactly this call's share of the
-    /// pool `new` prepared; calling it for more sites than `new` was sized for fails cleanly rather
-    /// than running out of randomness mid-round.
+    /// Runs the permutation over `states` (`sites * t` values, one length-`t` state per site,
+    /// concatenated) and returns each site's full trace. `states` may mix `InputValue::Public` and
+    /// `InputValue::Secret` - a public entry is promoted to a trivial share before the permutation
+    /// runs, at no network cost. Consumes exactly this call's share of the pool `new` prepared;
+    /// calling it for more sites than `new` was sized for fails cleanly rather than running out of
+    /// randomness mid-round.
     ///
     /// # Errors
     ///
@@ -1071,7 +1085,7 @@ impl Poseidon2Service {
     pub fn trace<N: mpc_net::Network>(
         &mut self,
         t: usize,
-        states: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
+        states: &[circom_mpc_program::InputValue<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>],
         net: &N,
         rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
     ) -> eyre::Result<Vec<crate::SiteTrace<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>>>
@@ -1081,11 +1095,23 @@ impl Poseidon2Service {
             "Poseidon2Service was prepared for t={}, called with t={t}",
             self.t
         );
+        let states: Vec<_> = states
+            .iter()
+            .map(|value| match value {
+                circom_mpc_program::InputValue::Public(v) => {
+                    mpc_core::protocols::rep3::arithmetic::promote_to_trivial_share(
+                        rep3_state.id(),
+                        *v,
+                    )
+                }
+                circom_mpc_program::InputValue::Secret(share) => *share,
+            })
+            .collect();
         let sites = check_width(t, states.len())?;
         let capacity = result_slots(t);
         let flat = rep3_trace_requested_preprocessed(
             t,
-            states,
+            &states,
             net,
             rep3_state,
             &mut self.preprocessing,
@@ -1112,6 +1138,16 @@ mod tests {
     use ark_bn254::Fr;
 
     use super::*;
+
+    /// Wraps a slice of values as `InputValue::Secret` - most of this module's own tests only care
+    /// about the all-shared case; the mixed-domain case is covered separately.
+    fn as_secret<T: Clone>(values: &[T]) -> Vec<circom_mpc_program::InputValue<T>> {
+        values
+            .iter()
+            .cloned()
+            .map(circom_mpc_program::InputValue::Secret)
+            .collect()
+    }
 
     /// A CSR request table asking for every logical slot of every site.
     fn full_csr(t: usize, sites: usize) -> (Vec<u32>, Vec<u32>) {
@@ -1566,7 +1602,7 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let states: Vec<Fr> = (0..2 * t).map(|i| Fr::from(i as u64 + 1)).collect();
             let flat = plain_full(t, &states);
-            let traces = plain_trace(t, &states).expect("t is one of the supported widths");
+            let traces = plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
             assert_eq!(traces.len(), 2, "t={t}");
             let capacity = result_slots(t);
             for (site, trace) in traces.iter().enumerate() {
@@ -1594,10 +1630,10 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let sites = 2;
             let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 3)).collect();
-            let expected = plain_trace(t, &states).expect("t is one of the supported widths");
+            let expected = plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
             let got = run3(&states, |net, state, shares| {
                 let mut service = Poseidon2Service::new(t, sites, net, state)?;
-                let traces = service.trace(t, shares, net, state)?;
+                let traces = service.trace(t, &as_secret(shares), net, state)?;
                 service.finish()?;
                 Ok(traces
                     .into_iter()
@@ -1637,7 +1673,7 @@ mod tests {
             let (mpc_core_out, _mpc_core_trace) = Poseidon2::<Fr, T, 5>::default()
                 .plain_permutation_intermediate(state)
                 .expect("mpc-core's plain permutation does not fail");
-            let ours = &plain_trace(T, &state).expect("T is a supported width")[0];
+            let ours = &plain_trace(T, &as_secret(&state)).expect("T is a supported width")[0];
             assert_eq!(ours.output, mpc_core_out.to_vec(), "t={T}");
         }
         // `CircomTracePlainHasher` is only implemented for these widths.

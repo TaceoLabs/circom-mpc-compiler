@@ -418,7 +418,12 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
                     // build a Merkle path from).
                     net.reset();
                     let mut service = Poseidon2Service::new(3, 1, &net, &mut state).unwrap();
-                    let traces = service.trace(3, &my_shares, &net, &mut state).unwrap();
+                    let states: Vec<_> = my_shares
+                        .iter()
+                        .copied()
+                        .map(circom_mpc_vm::InputValue::Secret)
+                        .collect();
+                    let traces = service.trace(3, &states, &net, &mut state).unwrap();
                     service.finish().unwrap();
                     let precompute_rounds = net.rounds();
 
@@ -472,5 +477,80 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
         );
     }
     let got = combine_field_elements(&runs[0].witness, &runs[1].witness, &runs[2].witness);
+    assert_eq!(got, expected);
+}
+
+/// The same setup as [`precomputing_poseidon2_removes_its_rounds_from_the_proof_run`], but the
+/// precomputed site's own input mixes Public and Shared - `a` is a genuinely public value, so
+/// [`Poseidon2Service::trace`] promotes it to a trivial share (no network cost) instead of the
+/// host secret-sharing it.
+#[test]
+fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
+    use circom_mpc_vm::GadgetPrecomputation;
+    use circom_mpc_vm::InputValue;
+    use circom_mpc_vm::driver::plain::PlainDriver;
+    use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
+
+    let program = CoCircomCompiler::compile(circuit_path("precomputation_mixed_domain_test"), config())
+        .unwrap();
+    let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+    let expected = {
+        let baseline =
+            CoCircomCompiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), config())
+                .unwrap();
+        let inputs = baseline.classify_inputs(&values, |v| v);
+        Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
+    };
+
+    // `share_inputs` only secret-shares `Bank::Shared` inputs - `a` is `Bank::Public`, so `shares`
+    // covers just `b` and `c`, in that order.
+    let shares = share_inputs(&program, &values);
+    assert_eq!(shares.len(), 2, "only b and c are Shared");
+
+    let runs: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+        LocalNetwork::new(3)
+            .into_iter()
+            .enumerate()
+            .map(|(party, net)| {
+                let program = &program;
+                let shares = &shares;
+                let values = &values;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let my_shares: Vec<Rep3PrimeFieldShare<Fr>> =
+                        shares.iter().map(|s| s[party]).collect();
+
+                    let mut service = Poseidon2Service::new(3, 1, &net, &mut state).unwrap();
+                    let states = [
+                        InputValue::Public(values[0]),
+                        InputValue::Secret(my_shares[0]),
+                        InputValue::Secret(my_shares[1]),
+                    ];
+                    let traces = service.trace(3, &states, &net, &mut state).unwrap();
+                    service.finish().unwrap();
+
+                    let mut precomputation = GadgetPrecomputation::new();
+                    precomputation.push_batch(traces);
+
+                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let mut next = 0;
+                    let inputs = program
+                        .classify_inputs(values, |_v| {
+                            let s = shares[next][party];
+                            next += 1;
+                            s
+                        })
+                        .unwrap();
+                    Machine::run_with_precomputation(program, &mut driver, &inputs, precomputation)
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    let got = combine_field_elements(&runs[0], &runs[1], &runs[2]);
     assert_eq!(got, expected);
 }
