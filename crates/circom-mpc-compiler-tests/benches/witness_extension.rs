@@ -82,16 +82,16 @@ fn prepare(case: &Case) -> (Program, Vec<Fr>) {
     let graph = CoCircomCompiler::parse(case.path.clone(), config(case))
         .unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let summary = graph.mpc_summary();
+    let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let values = match case.merces_scenario {
         Some(scenario) => fixtures::scenario(case.name, scenario)
-            .and_then(|s| s.values(graph.input_list()))
+            .and_then(|s| s.values(program.input_signals()))
             .unwrap_or_else(|e| panic!("{}: {e}", case.name)),
         // Arbitrary but non-zero, so nothing degenerates into a trivial product.
         None => (0..graph.num_inputs())
             .map(|i| Fr::from(i as u64 + 1))
             .collect(),
     };
-    let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{}: {e}", case.name));
     println!(
         "{:26} rounds={:3} reshare_elements={:6} max_slots={:5} sites={:4} batches={:3} instrs={:6}",
         case.name,

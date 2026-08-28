@@ -56,9 +56,9 @@ trait ReadLeExt: Read {
 impl<R: Read + ?Sized> ReadLeExt for R {}
 
 use crate::{
-    BatchIdx, GadgetBatch, GadgetKind, Bank, BatchKind, InputBinding, InputIdx, Instruction,
-    Opcode, Poseidon2Width, Program, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput,
-    Slot, SlotCounts, WitnessSource,
+    BatchIdx, GadgetBatch, GadgetKind, Bank, BatchKind, InputBinding, InputIdx, InputSignal,
+    Instruction, Opcode, Poseidon2Width, Program, ResultSlot, ResultTarget, RoundEntry, RoundIdx,
+    SiteInput, Slot, SlotCounts, WitnessSource,
 };
 
 /// A wire-format index newtype: a thin, checked wrapper over `u32`. Lets [`write_index_vec`]/
@@ -192,6 +192,22 @@ impl Bank {
 /// Writes a length prefix as the wire format's `u64` count field.
 fn write_len<W: Write>(w: &mut W, n: usize) -> eyre::Result<()> {
     Ok(w.write_u64::<LittleEndian>(n as u64)?)
+}
+
+/// Writes a length-prefixed UTF-8 string.
+fn write_string<W: Write>(w: &mut W, s: &str) -> eyre::Result<()> {
+    write_len(w, s.len())?;
+    w.write_all(s.as_bytes())?;
+    Ok(())
+}
+
+/// Reads a string written by [`write_string`], bounding the byte count the same way
+/// [`checked_count`] bounds table lengths.
+fn read_string<R: Read>(r: &mut R, limits: ProgramReadLimits, field: &str) -> eyre::Result<String> {
+    let len = checked_count::<u8>(r.read_u64::<LittleEndian>()?, limits, field)?;
+    let mut bytes = vec![0u8; len];
+    r.read_exact(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|e| eyre::eyre!("{field} is not valid UTF-8: {e}"))
 }
 
 fn write_u32_vec<W: Write>(w: &mut W, values: &[u32]) -> eyre::Result<()> {
@@ -350,6 +366,13 @@ impl Program {
             w.write_u32::<LittleEndian>(binding.input_index.get())?;
         }
 
+        write_len(w, self.input_signals.len())?;
+        for signal in &self.input_signals {
+            write_string(w, &signal.name)?;
+            write_len(w, signal.offset)?;
+            write_len(w, signal.size)?;
+        }
+
         write_len(w, self.rounds.len())?;
         for round in &self.rounds {
             w.write_u32::<LittleEndian>(round.operand_start)?;
@@ -503,6 +526,16 @@ impl Program {
             });
         }
 
+        let signal_count =
+            checked_count::<u64>(r.read_u64::<LittleEndian>()?, limits, "input signal")?;
+        let mut input_signals = Vec::with_capacity(signal_count);
+        for _ in 0..signal_count {
+            let name = read_string(r, limits, "input signal name")?;
+            let offset = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input signal offset")?;
+            let size = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input signal size")?;
+            input_signals.push(InputSignal { name, offset, size });
+        }
+
         let round_count =
             checked_count::<RoundEntry>(r.read_u64::<LittleEndian>()?, limits, "round")?;
         let mut rounds = Vec::with_capacity(round_count);
@@ -630,6 +663,7 @@ impl Program {
             constants,
             input_domains,
             inputs,
+            input_signals,
             rounds,
             round_operands,
             round_results,

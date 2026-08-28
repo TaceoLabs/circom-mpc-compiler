@@ -53,6 +53,55 @@ fn round_trips_a_program_with_a_round_byte_identically() {
 }
 
 #[test]
+fn round_trips_input_signal_names() {
+    use circom_mpc_program::{InputValue, InputValues};
+    use std::collections::BTreeMap;
+
+    let original = program("multiplier2");
+    assert!(
+        !original.input_signals().is_empty(),
+        "fixture must declare named inputs for this test to cover anything"
+    );
+    let mut bytes = Vec::new();
+    original.write(&mut bytes).unwrap();
+    let read_back = Program::read(&mut bytes.as_slice()).unwrap();
+
+    assert_eq!(read_back.input_signals(), original.input_signals());
+
+    // A name-keyed map, resolved against the round-tripped program's own `input_signals`, must
+    // scatter into the same positional order `classify_inputs` produces for the same values.
+    let positional_values = [Fr::from(5u64), Fr::from(10u64)];
+    let positional = read_back
+        .classify_inputs(&positional_values, |v| v)
+        .unwrap();
+
+    let mut named: BTreeMap<String, Vec<InputValue<Fr>>> = BTreeMap::new();
+    for signal in read_back.input_signals() {
+        let values = (signal.offset..signal.offset + signal.size)
+            .map(|i| positional[i].clone())
+            .collect();
+        named.insert(signal.name.clone(), values);
+    }
+    let via_map = named.as_inputs(&read_back).unwrap();
+
+    fn unwrap(v: &InputValue<Fr>) -> Fr {
+        match v {
+            InputValue::Public(v) | InputValue::Secret(v) => *v,
+        }
+    }
+
+    assert_eq!(via_map.len(), positional.len());
+    for (m, p) in via_map.iter().zip(&positional) {
+        assert_eq!(
+            std::mem::discriminant(m),
+            std::mem::discriminant(p),
+            "named map must classify each input the same way as classify_inputs"
+        );
+        assert_eq!(unwrap(m), unwrap(p));
+    }
+}
+
+#[test]
 fn round_trips_a_program_with_a_precompute_site_byte_identically() {
     let original = program("gadget_iszero_test");
     let mut bytes = Vec::new();

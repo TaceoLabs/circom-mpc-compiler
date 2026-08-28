@@ -151,17 +151,6 @@ fn main() -> eyre::Result<()> {
         summary.public_muls,
     );
 
-    let values: Vec<Fr> = match &scenario_name {
-        Some(name) => {
-            let s = fixtures::scenario(&arg, name)?;
-            println!("scenario: {name} ({})", s.note);
-            s.values(graph.input_list())?
-        }
-        None => (0..graph.num_inputs())
-            .map(|i| Fr::from(i as u64 + 1))
-            .collect(),
-    };
-
     let t = Instant::now();
     let program = codegen::compile(&graph)?;
     println!("codegen: {:.2?}", t.elapsed());
@@ -172,6 +161,17 @@ fn main() -> eyre::Result<()> {
         program.statistics().shared_slots,
         program.statistics().local_slots,
     );
+
+    let values: Vec<Fr> = match &scenario_name {
+        Some(name) => {
+            let s = fixtures::scenario(&arg, name)?;
+            println!("scenario: {name} ({})", s.note);
+            s.values(program.input_signals())?
+        }
+        None => (0..graph.num_inputs())
+            .map(|i| Fr::from(i as u64 + 1))
+            .collect(),
+    };
 
     let t = Instant::now();
     let plain = {

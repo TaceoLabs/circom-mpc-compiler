@@ -211,6 +211,20 @@ impl GadgetBatch {
     }
 }
 
+/// One declared circuit input signal and the flat input range it occupies - lets a caller resolve
+/// a name (e.g. from a circom-style `input.json`) into the positional range `Program::inputs`
+/// addresses, without needing the compiler's `ir::Graph` around at run time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSignal {
+    /// The signal's declared name.
+    pub name: String,
+    /// First flat input index this signal occupies, 0-based over the circuit's inputs alone.
+    pub offset: usize,
+    /// Number of field elements this signal occupies (1 for a scalar, the product of the
+    /// dimensions for an array).
+    pub size: usize,
+}
+
 /// Binds one circuit input to the slot it's read from - `Machine::run` fills these in from the
 /// caller-supplied input values before running anything else.
 #[derive(Debug, Clone, Copy)]
@@ -272,6 +286,10 @@ pub struct Program {
     /// which representation to prepare without needing it to be live.
     pub(crate) input_domains: Vec<Bank>,
     pub(crate) inputs: Vec<InputBinding>,
+    /// The circuit's declared input signals by name, in declaration order - lets a caller resolve
+    /// a name-keyed input map without the compiler's `ir::Graph`. Empty for a program with no
+    /// named inputs (e.g. a test fixture built directly from `ProgramParts`).
+    pub(crate) input_signals: Vec<InputSignal>,
     pub(crate) rounds: Vec<RoundEntry>,
     pub(crate) round_operands: Vec<Slot>,
     pub(crate) round_results: Vec<Slot>,
@@ -297,6 +315,8 @@ pub struct ProgramParts {
     pub input_domains: Vec<Bank>,
     /// See [`Program::inputs`].
     pub inputs: Vec<InputBinding>,
+    /// See [`Program::input_signals`].
+    pub input_signals: Vec<InputSignal>,
     /// See [`Program::rounds`].
     pub rounds: Vec<RoundEntry>,
     /// See [`Program::round_operands`].
@@ -366,6 +386,7 @@ impl Program {
             constants: parts.constants,
             input_domains: parts.input_domains,
             inputs: parts.inputs,
+            input_signals: parts.input_signals,
             rounds: parts.rounds,
             round_operands: parts.round_operands,
             round_results: parts.round_results,
@@ -385,6 +406,7 @@ impl Program {
             constants: self.constants,
             input_domains: self.input_domains,
             inputs: self.inputs,
+            input_signals: self.input_signals,
             rounds: self.rounds,
             round_operands: self.round_operands,
             round_results: self.round_results,
@@ -417,6 +439,12 @@ impl Program {
     #[must_use]
     pub fn inputs(&self) -> &[InputBinding] {
         &self.inputs
+    }
+
+    /// The circuit's declared input signals by name, in declaration order.
+    #[must_use]
+    pub fn input_signals(&self) -> &[InputSignal] {
+        &self.input_signals
     }
 
     /// The batched MPC rounds.
@@ -594,6 +622,29 @@ impl Program {
                 self.input_domains[input]
             );
             check_slot(binding.bank, binding.slot, "input binding")?;
+        }
+
+        let signal_total: usize = self.input_signals.iter().map(|s| s.size).sum();
+        eyre::ensure!(
+            signal_total == self.num_inputs,
+            "input signal sizes sum to {signal_total}, expected {}",
+            self.num_inputs
+        );
+        let mut seen_signal_names = std::collections::HashSet::with_capacity(self.input_signals.len());
+        for signal in &self.input_signals {
+            eyre::ensure!(
+                signal.offset + signal.size <= self.num_inputs,
+                "input signal `{}` occupies {}..{}, out of range for {} inputs",
+                signal.name,
+                signal.offset,
+                signal.offset + signal.size,
+                self.num_inputs
+            );
+            eyre::ensure!(
+                seen_signal_names.insert(signal.name.as_str()),
+                "input signal name `{}` is declared more than once",
+                signal.name
+            );
         }
 
         for (index, instruction) in self.instructions.iter().enumerate() {
@@ -881,6 +932,7 @@ mod tests {
             constants: Vec::new(),
             input_domains: Vec::new(),
             inputs: Vec::new(),
+            input_signals: Vec::new(),
             rounds: Vec::new(),
             round_operands: Vec::new(),
             round_results: Vec::new(),

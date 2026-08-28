@@ -15,7 +15,6 @@ use std::sync::OnceLock;
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::codegen;
-use circom_mpc_compiler::ir::InputList;
 use circom_mpc_compiler_tests::fixtures::{
     self, merces_config, merces_main_path, rep3::run_witness,
 };
@@ -34,16 +33,14 @@ fn manifest_dir() -> &'static str {
 /// Compiles a merces main once and shares it across every scenario in this test binary -
 /// `CoCircomCompiler::parse` costs seconds on `transfer_arity4_batch8`, and nothing about parsing or
 /// codegen depends on the scenario's input values.
-fn compiled(main: &str) -> &'static (Program, InputList) {
-    fn build(main: &str) -> (Program, InputList) {
+fn compiled(main: &str) -> &'static Program {
+    fn build(main: &str) -> Program {
         let graph = CoCircomCompiler::parse(merces_main_path(main), merces_config())
             .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
-        let input_list = graph.input_list().clone();
-        let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"));
-        (program, input_list)
+        codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"))
     }
-    static BATCH1: OnceLock<(Program, InputList)> = OnceLock::new();
-    static BATCH8: OnceLock<(Program, InputList)> = OnceLock::new();
+    static BATCH1: OnceLock<Program> = OnceLock::new();
+    static BATCH8: OnceLock<Program> = OnceLock::new();
     match main {
         "transfer_arity4_batch1" => BATCH1.get_or_init(|| build(main)),
         "transfer_arity4_batch8" => BATCH8.get_or_init(|| build(main)),
@@ -51,11 +48,11 @@ fn compiled(main: &str) -> &'static (Program, InputList) {
     }
 }
 
-/// One scenario's inputs, flattened against `main`'s declared `input_list`.
+/// One scenario's inputs, flattened against `main`'s declared input signals.
 fn scenario_values(main: &str, name: &str) -> Vec<Fr> {
-    let (_, input_list) = compiled(main);
+    let program = compiled(main);
     fixtures::scenario(main, name)
-        .and_then(|s| s.values(input_list))
+        .and_then(|s| s.values(program.input_signals()))
         .unwrap_or_else(|e| panic!("{main}/{name}: {e}"))
 }
 
@@ -67,7 +64,7 @@ fn plain_witness(program: &Program, values: &[Fr]) -> Vec<Fr> {
 
 /// The core end-to-end assertion, for one (main, scenario) pair.
 fn witness_extension_agrees(main: &str, scenario: &str) {
-    let (program, _) = compiled(main);
+    let program = compiled(main);
     let values = scenario_values(main, scenario);
 
     let plain = plain_witness(program, &values);
@@ -111,7 +108,7 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
         ("transfer_arity4_batch1", "deposit"),
         ("transfer_arity4_batch8", "full_batch"),
     ] {
-        let (program, _) = compiled(main);
+        let program = compiled(main);
         let values = scenario_values(main, scenario);
         let (_, preprocessing, online) = run_witness_counted(program, &values);
         let combined: [usize; 3] =
@@ -136,7 +133,7 @@ fn server_mains_separate_preprocessing_from_online_rounds() {
 #[test]
 fn batching_collapses_many_sites_into_few_driver_calls() {
     for main in ["transfer_arity4_batch1", "transfer_arity4_batch8"] {
-        let (program, _) = compiled(main);
+        let program = compiled(main);
         let sites = program.statistics().gadget_sites;
         let shared_batches = program.statistics().shared_gadget_batches;
         assert!(
@@ -222,9 +219,9 @@ fn proves_and_verifies(main: &str, scenario: &str) {
     // `vm::witness`'s module doc for why this comes from the zkey and not from `input_domains`.
     let n_pub = matrices.num_instance_variables;
 
-    let (program, input_list) = compiled(main);
+    let program = compiled(main);
     let values = fixtures::scenario(main, scenario)
-        .and_then(|s| s.values(input_list))
+        .and_then(|s| s.values(program.input_signals()))
         .unwrap_or_else(|e| panic!("{main}/{scenario}: {e}"));
     assert_eq!(
         program.statistics().witness_values,

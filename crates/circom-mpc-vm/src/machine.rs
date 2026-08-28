@@ -167,12 +167,12 @@ impl Machine {
         inputs: &I,
         mut precomputation: GadgetPrecomputation<D::Share>,
     ) -> eyre::Result<Vec<D::Share>> {
-        let inputs = inputs.as_inputs()?;
+        let inputs = inputs.as_inputs(program)?;
         // Begin at the absolute run boundary. Once this succeeds, an invalid program, bad input,
         // network error, or panic all spend a one-shot prepared driver.
         driver.begin_run()?;
         let mut guard = RunGuard::<D>::new(driver);
-        let run = Self::run_inner(program, guard.driver(), inputs, &mut precomputation);
+        let run = Self::run_inner(program, guard.driver(), &inputs, &mut precomputation);
         let finish = guard.finish();
         let witness = match (run, finish) {
             (Ok(witness), Ok(())) => Ok(witness),
@@ -852,6 +852,7 @@ mod tests {
             constants: Vec::new(),
             input_domains: Vec::new(),
             inputs: Vec::new(),
+            input_signals: Vec::new(),
             rounds: Vec::new(),
             round_operands: Vec::new(),
             round_results: Vec::new(),

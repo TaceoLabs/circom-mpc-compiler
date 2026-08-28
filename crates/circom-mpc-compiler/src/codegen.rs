@@ -8,9 +8,9 @@
 use ark_bn254::Fr;
 
 use circom_mpc_program::{
-    BatchIdx, GadgetBatch, Bank, BatchKind, InputBinding, InputIdx, Instruction, Opcode, Program,
-    ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot, SlotCounts,
-    WitnessSource,
+    BatchIdx, GadgetBatch, Bank, BatchKind, InputBinding, InputIdx, InputSignal, Instruction,
+    Opcode, Program, ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot,
+    SlotCounts, WitnessSource,
 };
 
 use crate::ir::{GadgetKind, Graph, Op, ValueId};
@@ -486,6 +486,16 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         }
     }
 
+    let input_signals: Vec<InputSignal> = graph
+        .input_list()
+        .iter()
+        .map(|(name, offset, size)| InputSignal {
+            name: name.clone(),
+            offset: *offset,
+            size: *size,
+        })
+        .collect();
+
     let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs());
     let mut input_bindings: Vec<InputBinding> = Vec::new();
     for input_index in 0..graph.num_inputs() {
@@ -946,6 +956,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         constants,
         input_domains,
         inputs: input_bindings,
+        input_signals,
         rounds,
         round_operands,
         round_results,

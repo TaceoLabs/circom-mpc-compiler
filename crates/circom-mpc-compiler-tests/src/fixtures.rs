@@ -14,8 +14,8 @@ use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
 use num_bigint::BigUint;
 
-use circom_mpc_compiler::ir::InputList;
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
+use circom_mpc_program::InputSignal;
 
 /// The compiler configuration for the vendored merces circuits, mirroring how merces itself
 /// compiles them (`-l circom/node_modules -l circom`): `circuits/libs/` resolves circomlib plus
@@ -252,30 +252,35 @@ fn from_input_json(json: &serde_json::Value) -> eyre::Result<NamedInputs> {
 }
 
 /// Orders `inputs` into the flat `&[Fr]` `Program::classify_inputs` expects, using the circuit's own
-/// `Graph::input_list` (`(name, start, size)` per input signal) rather than any assumed ordering.
+/// `Program::input_signals` rather than any assumed ordering.
 ///
 /// Errors if a name the circuit declares is missing, its length disagrees with what the circuit
 /// expects, or `inputs` carries a name the circuit does not declare at all (a stale key in a
 /// hand-edited scenario file, otherwise a silent no-op).
-fn flatten(inputs: &NamedInputs, input_list: &InputList) -> eyre::Result<Vec<Fr>> {
-    let total = input_list.iter().map(|(_, _, size)| size).sum();
+fn flatten(inputs: &NamedInputs, input_signals: &[InputSignal]) -> eyre::Result<Vec<Fr>> {
+    let total = input_signals.iter().map(|s| s.size).sum();
     let mut flat = vec![Fr::zero(); total];
     let mut claimed: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (name, start, size) in input_list {
-        claimed.insert(name.as_str());
-        let values = inputs.get(name).ok_or_else(|| {
+    for signal in input_signals {
+        claimed.insert(signal.name.as_str());
+        let values = inputs.get(&signal.name).ok_or_else(|| {
             eyre::eyre!(
-                "no value supplied for circuit input `{name}` (the circuit declares {size} \
-                 element(s) at offset {start}); supplied names: {:?}",
+                "no value supplied for circuit input `{}` (the circuit declares {} \
+                 element(s) at offset {}); supplied names: {:?}",
+                signal.name,
+                signal.size,
+                signal.offset,
                 inputs.keys().collect::<Vec<_>>()
             )
         })?;
         eyre::ensure!(
-            values.len() == *size,
-            "circuit input `{name}` needs {size} element(s), got {}",
+            values.len() == signal.size,
+            "circuit input `{}` needs {} element(s), got {}",
+            signal.name,
+            signal.size,
             values.len()
         );
-        flat[*start..start + size].copy_from_slice(values);
+        flat[signal.offset..signal.offset + signal.size].copy_from_slice(values);
     }
     if let Some(stale) = inputs.keys().find(|name| !claimed.contains(name.as_str())) {
         eyre::bail!("supplied input `{stale}` is not declared by this circuit");
@@ -396,9 +401,9 @@ impl Scenario {
         from_input_json(&json).map_err(|e| eyre::eyre!("{}: {e}", self.file_name()))
     }
 
-    /// This scenario's inputs, flattened against a circuit's declared `input_list`.
-    pub fn values(&self, input_list: &InputList) -> eyre::Result<Vec<Fr>> {
-        flatten(&self.named_inputs()?, input_list)
+    /// This scenario's inputs, flattened against a circuit's declared input signals.
+    pub fn values(&self, input_signals: &[InputSignal]) -> eyre::Result<Vec<Fr>> {
+        flatten(&self.named_inputs()?, input_signals)
     }
 
     /// `inputs/<main>_<name>.json`, matching the file this scenario was baked in from.
@@ -547,11 +552,19 @@ mod tests {
         let mut inputs: NamedInputs = BTreeMap::new();
         inputs.insert("depth".to_owned(), vec![Fr::from(3u64)]);
 
-        let list: InputList = vec![("nope".to_owned(), 0, 1)];
+        let list = [InputSignal {
+            name: "nope".to_owned(),
+            offset: 0,
+            size: 1,
+        }];
         let err = flatten(&inputs, &list).unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
 
-        let list: InputList = vec![("depth".to_owned(), 0, 4)];
+        let list = [InputSignal {
+            name: "depth".to_owned(),
+            offset: 0,
+            size: 4,
+        }];
         let err = flatten(&inputs, &list).unwrap_err().to_string();
         assert!(err.contains("needs 4 element(s)"), "{err}");
     }
@@ -561,7 +574,11 @@ mod tests {
         let mut inputs: NamedInputs = BTreeMap::new();
         inputs.insert("a".to_owned(), vec![Fr::from(1u64)]);
         inputs.insert("stale".to_owned(), vec![Fr::from(2u64)]);
-        let list: InputList = vec![("a".to_owned(), 0, 1)];
+        let list = [InputSignal {
+            name: "a".to_owned(),
+            offset: 0,
+            size: 1,
+        }];
         let err = flatten(&inputs, &list).unwrap_err().to_string();
         assert!(err.contains("stale"), "{err}");
     }
@@ -572,7 +589,18 @@ mod tests {
         inputs.insert("a".to_owned(), vec![Fr::from(1u64), Fr::from(2u64)]);
         inputs.insert("b".to_owned(), vec![Fr::from(3u64)]);
         // Deliberately not in alphabetical order, to prove the offsets drive placement.
-        let list: InputList = vec![("b".to_owned(), 0, 1), ("a".to_owned(), 1, 2)];
+        let list = [
+            InputSignal {
+                name: "b".to_owned(),
+                offset: 0,
+                size: 1,
+            },
+            InputSignal {
+                name: "a".to_owned(),
+                offset: 1,
+                size: 2,
+            },
+        ];
         assert_eq!(
             flatten(&inputs, &list).unwrap(),
             vec![Fr::from(3u64), Fr::from(1u64), Fr::from(2u64)]
