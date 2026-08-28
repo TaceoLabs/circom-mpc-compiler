@@ -234,18 +234,16 @@ fn proves_and_verifies(main: &str, scenario: &str) {
 
     // Each party needs two connections: one for witness extension, one for proving.
     let extension_nets = LocalNetwork::new(3);
-    let proving_nets0 = LocalNetwork::new(3);
-    let proving_nets1 = LocalNetwork::new(3);
+    let proving_nets = LocalNetwork::new(3);
 
     let matrices = &matrices;
     let pkey = &pkey;
     let proofs = std::thread::scope(|scope| {
         extension_nets
             .into_iter()
-            .zip(proving_nets0)
-            .zip(proving_nets1)
+            .zip(proving_nets)
             .enumerate()
-            .map(|(party, ((ext_net, p0), p1))| {
+            .map(|(party, (ext_net, p))| {
                 let secret_shares = &secret_shares;
                 let values = &values;
                 scope.spawn(move || {
@@ -266,8 +264,8 @@ fn proves_and_verifies(main: &str, scenario: &str) {
                         witness: secret,
                     };
                     let public = public_inputs;
-                    let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
-                        &p0, &p1, pkey, matrices, shared,
+                    let proof = Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
+                        &p, pkey, matrices, shared,
                     )
                     .unwrap();
                     (proof, public)

@@ -14,7 +14,7 @@ use ark_ff::{BigInteger, Field, PrimeField};
 use num_bigint::BigUint;
 use num_traits::Zero as _;
 
-use circom_compiler::intermediate_representation::ir_interface::OperatorType;
+use circom_compiler::intermediate_representation::ir_interface::{OperatorType, SizeOption};
 
 /// Field elements as an unsigned big integer, matching circom's own semantics for `\`, `<<`, `>>`,
 /// `|`, `&`, `^` (which all operate on the canonical integer representative, not the field element
@@ -29,7 +29,7 @@ fn to_bigint(f: Fr) -> BigUint {
 ///
 /// Returns `None` if `op` has no compile-time-constant arithmetic semantics here (comparisons,
 /// booleans, `Mod`, ...).
-pub(super) fn fold_binary(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<Fr> {
+pub(super) fn fold_binary(op: &OperatorType, lhs: Fr, rhs: Fr) -> Option<Fr> {
     match op {
         OperatorType::Add => Some(lhs + rhs),
         OperatorType::Sub => Some(lhs - rhs),
@@ -99,12 +99,13 @@ fn circom_cmp(lhs: Fr, rhs: Fr) -> Ordering {
 ///
 /// Ordering uses circom's signed field convention: canonical representatives at or above
 /// `floor(p / 2) + 1` denote negative integers.
-pub(super) fn fold_condition(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<bool> {
+pub(super) fn fold_condition(op: &OperatorType, lhs: Fr, rhs: Fr) -> Option<bool> {
     match op {
-        // `Eq(n)`'s payload is an array length: `n == 1` is the scalar comparison circom emits for
-        // `a == b` on single signals/vars. A wider compare is a genuine element-wise array
-        // comparison, which this returns `None` for rather than silently checking only element 0.
-        OperatorType::Eq(1) => Some(lhs == rhs),
+        // `Eq(n)`'s payload is an array length: `n == Single(1)` is the scalar comparison circom
+        // emits for `a == b` on single signals/vars. A wider compare is a genuine element-wise
+        // array comparison, which this returns `None` for rather than silently checking only
+        // element 0.
+        OperatorType::Eq(SizeOption::Single(1)) => Some(lhs == rhs),
         OperatorType::NotEq => Some(lhs != rhs),
         OperatorType::Lesser => Some(circom_cmp(lhs, rhs).is_lt()),
         OperatorType::Greater => Some(circom_cmp(lhs, rhs).is_gt()),
@@ -117,7 +118,7 @@ pub(super) fn fold_condition(op: OperatorType, lhs: Fr, rhs: Fr) -> Option<bool>
 }
 
 /// The unary counterpart of [`fold_condition`], for `if (!x)`.
-pub(super) fn fold_unary_condition(op: OperatorType, operand: Fr) -> Option<bool> {
+pub(super) fn fold_unary_condition(op: &OperatorType, operand: Fr) -> Option<bool> {
     match op {
         OperatorType::BoolNot => Some(operand.is_zero()),
         _ => None,

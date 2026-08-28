@@ -52,7 +52,7 @@ impl GraphCompiler<'_> {
                 } else {
                     eyre::bail!("loop induction step must contain a constant")
                 };
-                let step = match compute_bucket.op {
+                let step = match &compute_bucket.op {
                     OperatorType::Add => Step::Up(step_size),
                     OperatorType::Sub => Step::Down(step_size),
                     x => eyre::bail!("unsupported loop induction operator {}", x.to_string()),

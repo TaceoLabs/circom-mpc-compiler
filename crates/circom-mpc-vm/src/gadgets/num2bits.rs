@@ -34,13 +34,12 @@ pub fn rep3_trace<N: mpc_net::Network>(
     state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
     use mpc_core::protocols::rep3::conversion;
-    use num_bigint::BigUint;
-    use num_traits::One;
+    use mpc_core::uint::FieldUint;
 
     let a2b = super::a2b_many_selector(inputs, net, state)?;
     let mut all_bits = Vec::with_capacity(inputs.len() * n);
     for a2b in &a2b {
-        all_bits.extend((0..n).map(|i| (a2b >> i) & BigUint::one()));
+        all_bits.extend((0..n).map(|i| (a2b >> i).and_mask(&<Fr as FieldUint>::Uint::from(1u64))));
     }
     conversion::bit_inject_many(&all_bits, net, state)
 }

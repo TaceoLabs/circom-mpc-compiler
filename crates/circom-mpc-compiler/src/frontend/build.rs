@@ -520,7 +520,7 @@ TemplateOp::SubCmpOutput { .. } => None,
                     panic!("non variable loading in get constant value");
                 }
             }
-            Instruction::Compute(compute_bucket) => match compute_bucket.op {
+            Instruction::Compute(compute_bucket) => match &compute_bucket.op {
                 OperatorType::MulAddress => {
                     assert_eq!(compute_bucket.stack.len(), 2, "mul is a bin op");
                     self.get_constant_value(&compute_bucket.stack[0])
@@ -573,14 +573,14 @@ TemplateOp::SubCmpOutput { .. } => None,
         // position) or a removed operator that only survives if every operand folds to a
         // constant (Div/IntDiv/Pow/Shift*/Bit*), or genuinely unsupported (comparisons, Mod,
         // booleans, ...).
-        match compute_bucket.op {
+        match &compute_bucket.op {
             OperatorType::Add | OperatorType::Sub | OperatorType::Mul => {
                 let operands = compute_bucket
                     .stack
                     .iter()
                     .map(|inst| self.expect_value(inst))
                     .collect::<Result<Vec<_>>>()?;
-                let op = match compute_bucket.op {
+                let op = match &compute_bucket.op {
                     OperatorType::Add => Op::Add,
                     OperatorType::Sub => Op::Sub,
                     OperatorType::Mul => Op::Mul,
@@ -717,17 +717,17 @@ TemplateOp::SubCmpOutput { .. } => None,
                 2 => {
                     let lhs = self.eval_constant_operand(&compute_bucket.stack[0])?;
                     let rhs = self.eval_constant_operand(&compute_bucket.stack[1])?;
-                    if let Some(folded) = fold_condition(compute_bucket.op, lhs, rhs) {
+                    if let Some(folded) = fold_condition(&compute_bucket.op, lhs, rhs) {
                         return Some(folded);
                     }
                     // Not a comparison - an *arithmetic* expression used for its truthiness
                     // (`if (a - b)`). Fold the arithmetic, then test against zero.
-                    let value = fold_binary(compute_bucket.op, lhs, rhs)?;
+                    let value = fold_binary(&compute_bucket.op, lhs, rhs)?;
                     return Some(!value.is_zero());
                 }
                 1 => {
                     let operand = self.eval_constant_operand(&compute_bucket.stack[0])?;
-                    return fold_unary_condition(compute_bucket.op, operand);
+                    return fold_unary_condition(&compute_bucket.op, operand);
                 }
                 _ => return None,
             }

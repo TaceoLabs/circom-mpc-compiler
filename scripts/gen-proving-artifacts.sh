@@ -12,14 +12,12 @@
 #
 # Prerequisites:
 #
-#   A `circom` built from THIS CRATE'S PINNED FORK REVISION (`rev = "1cc17fb"` in Cargo.toml), not
+#   A `circom` built from THIS CRATE'S PINNED FORK REVISION (`rev = "53c1ccd"` in Cargo.toml), not
 #   whatever is on PATH. Different forks disagree on constraint-simplification-driven witness
 #   compaction, so a circuit's variable count can differ for the same source and the same flags.
-#   That revision also self-reports as circom 2.2.0 and rejects `pragma circom 2.2.2`, so patch
-#   the VERSION const before building it:
+#   That revision already self-reports as circom 2.2.2, so no VERSION patch is needed:
 #
-#     cd ~/.cargo/git/checkouts/circom-*/1cc17fb
-#     sed -i '' 's/^pub const VERSION.*/pub const VERSION: \&str = "2.2.2";/' circom/src/main.rs
+#     cd ~/.cargo/git/checkouts/circom-*/53c1ccd
 #     cargo build --release --bin circom
 #
 #   then point CIRCOM at the result. `snarkjs` on PATH.
@@ -55,7 +53,7 @@ if ! command -v snarkjs >/dev/null 2>&1; then
 fi
 
 echo "circom: $CIRCOM ($("$CIRCOM" --version 2>&1 | head -1))"
-echo "note: this MUST be the pinned fork rev 1cc17fb - a stock circom produces different variable"
+echo "note: this MUST be the pinned fork rev 53c1ccd - a stock circom produces different variable"
 echo "      counts for the same circuit, and the prove+verify test will fail confusingly."
 
 mkdir -p "$OUT"

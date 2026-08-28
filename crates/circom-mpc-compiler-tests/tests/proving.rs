@@ -83,10 +83,9 @@ fn prove_and_verify(name: &str) {
             .map(|(_, &v)| share_field_element(v, &mut rng))
             .collect();
 
-        // Each party needs one connection for witness extension and two for proving.
+        // Each party needs one connection for witness extension and one for proving.
         let extension = LocalNetwork::new(3);
-        let proving0 = LocalNetwork::new(3);
-        let proving1 = LocalNetwork::new(3);
+        let proving = LocalNetwork::new(3);
 
         let program = &program;
         let values = &values;
@@ -96,10 +95,9 @@ fn prove_and_verify(name: &str) {
             std::thread::scope(|scope| {
                 extension
                     .into_iter()
-                    .zip(proving0)
-                    .zip(proving1)
+                    .zip(proving)
                     .enumerate()
-                    .map(|(party, ((ext, p0), p1))| {
+                    .map(|(party, (ext, p))| {
                         let shares = &shares;
                         scope.spawn(move || {
                             let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
@@ -119,8 +117,8 @@ fn prove_and_verify(name: &str) {
                                 public_inputs: public_inputs.clone(),
                                 witness: secret,
                             };
-                            let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
-                                &p0, &p1, pkey, matrices, shared,
+                            let proof = Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
+                                &p, pkey, matrices, shared,
                             )
                             .unwrap();
                             (full_witness, proof, public_inputs)

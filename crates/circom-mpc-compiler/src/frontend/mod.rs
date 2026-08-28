@@ -70,6 +70,7 @@ fn get_program_archive(file: String, config: &CompilerConfig) -> Result<ProgramA
         &config.version,
         config.link_library.clone(),
         &field_dig,
+        false,
     ) {
         Ok((mut program_archive, warnings)) => {
             Report::print_reports(&warnings, &program_archive.file_library);
@@ -116,6 +117,8 @@ fn build_circuit(
     let flags = CompilationFlags {
         main_inputs_log: false,
         wat_flag: false,
+        no_asm_flag: false,
+        constraint_assert_disabled_flag: false,
     };
     Ok((
         CircomCircuit::build(vcp, flags, &config.version),

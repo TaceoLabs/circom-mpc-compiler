@@ -288,25 +288,22 @@ fn run_rep3(
     println!("rep3:    (3 parties over an in-process LocalNetwork)");
     println!("  share inputs:  {:.2?}", t.elapsed());
 
-    // A second and third connection per party are only needed if we are actually proving.
+    // A second connection per party is only needed if we are actually proving.
     let extension_nets = LocalNetwork::new(3);
-    let proving_nets0 = zkey.map(|_| LocalNetwork::new(3));
-    let proving_nets1 = zkey.map(|_| LocalNetwork::new(3));
+    let proving_nets = zkey.map(|_| LocalNetwork::new(3));
 
     let results: Vec<(
         Vec<Rep3PrimeFieldShare<Fr>>,
         PartyMetrics,
         Option<(co_groth16::Proof<Bn254>, Vec<Fr>)>,
     )> = std::thread::scope(|scope| {
-        let mut proving0 = proving_nets0.map(|n| n.into_iter());
-        let mut proving1 = proving_nets1.map(|n| n.into_iter());
+        let mut proving = proving_nets.map(|n| n.into_iter());
         extension_nets
             .into_iter()
             .enumerate()
             .map(|(party, net)| {
                 let shares = &shares;
-                let p0 = proving0.as_mut().map(|it| it.next().unwrap());
-                let p1 = proving1.as_mut().map(|it| it.next().unwrap());
+                let p = proving.as_mut().map(|it| it.next().unwrap());
                 scope.spawn(move || {
                     let net = CountingNet::new(net);
                     let t = Instant::now();
@@ -349,9 +346,8 @@ fn run_rep3(
                             public_inputs: public_inputs.clone(),
                             witness: secret,
                         };
-                        let proof = Rep3CoGroth16::prove::<_, CircomReduction>(
-                            p0.as_ref().unwrap(),
-                            p1.as_ref().unwrap(),
+                        let proof = Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
+                            p.as_ref().unwrap(),
                             pkey,
                             matrices,
                             shared,
