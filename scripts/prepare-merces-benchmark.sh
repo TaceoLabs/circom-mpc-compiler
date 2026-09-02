@@ -3,17 +3,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOLS_DIR="${MERCES_BENCH_TOOLS_DIR:-$HOME/.local/share/merces-benchmark-tools}"
-TOOLS_BIN="$TOOLS_DIR/node_modules/.bin"
+CIRCUIT_BIN="$ROOT/circuits/node_modules/.bin"
 
 CIRCOM_REV="53c1ccd0c74f12665c5aeb89592360f42c3d1226"
 CIRCOM_HELPERS_REV="8aacd73ed6ab0a2b9b2158e613acfa920860865a"
 
-# pnpm's standalone package avoids depending on the benchmark AMI's Node version.
-npm install --prefix "$TOOLS_DIR" --no-save \
-    @pnpm/exe@11.22.0 \
+# Keep this compatible with the benchmark AMI's Node 18. The package versions match
+# circuits/package.json and its pnpm lockfile; --no-save leaves both manifests untouched.
+npm install --prefix "$ROOT/circuits" --no-save --no-package-lock \
+    @taceo/circom-lib@0.9.0 \
+    circomlib@2.0.5 \
     snarkjs@0.7.5
-"$TOOLS_BIN/pnpm" -C "$ROOT/circuits" install --frozen-lockfile
 
 cargo install just --version 1.42.4 --locked
 cargo install \
@@ -29,7 +29,7 @@ cargo install \
     --bin convert-zkey-to-ark \
     taceo-circom-types
 
-export PATH="$TOOLS_BIN:$HOME/.cargo/bin:$PATH"
+export PATH="$CIRCUIT_BIN:$HOME/.cargo/bin:$PATH"
 
 just --justfile "$ROOT/justfile" download-ptau
 just --justfile "$ROOT/justfile" merces-zkeys 1 8 16 32
