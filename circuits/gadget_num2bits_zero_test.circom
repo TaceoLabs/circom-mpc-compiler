@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
+include "circomlib/circuits/bitify.circom";
 
 template Num2BitsZeroWrapper() {
     signal input in;

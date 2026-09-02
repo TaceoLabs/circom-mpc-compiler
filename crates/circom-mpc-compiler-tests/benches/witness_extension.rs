@@ -67,12 +67,17 @@ fn cases() -> Vec<Case> {
 
 fn config(case: &Case) -> CompilerConfig {
     if case.merces_config {
-        return fixtures::merces_config();
+        // The scenario fixtures don't carry precomputed commitment hashes, so this bench (which
+        // calls `Machine::run` directly, not `run_with_precomputation`) needs the commit sites
+        // compiled as ordinary driver-serviced Poseidon2, not host-precomputed.
+        let mut config = fixtures::merces_config();
+        config.precomputed_gadgets = false;
+        return config;
     }
     let mut config = CompilerConfig::default();
     config
         .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
+        .push(format!("{}/circuits/node_modules/", manifest_dir()).into());
     config
 }
 

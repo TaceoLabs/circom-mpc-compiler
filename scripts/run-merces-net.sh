@@ -2,9 +2,11 @@
 # Smoke-runs `merces-net` as three real processes on loopback, over a genuine TLS network - builds
 # the binary, then launches all three parties against party configs (TOML + TLS key/cert material)
 # produced outside this repo. Run this from wherever those configs' relative cert paths resolve.
+# Each run reports precomputation, witness extension, and (for the first `--prove-runs` runs, if a
+# matching `inputs/zkey/transfer_arity4_batch<N>.arks.zkey` is present) proving.
 #
 # Usage:
-#   scripts/run-merces-net.sh [merces-net args, e.g. --runs 5 --opt 2 --batches 1,8,16,32]
+#   scripts/run-merces-net.sh [merces-net args, e.g. --runs 5 --prove-runs 1 --opt 2 --batches 1,8,16,32]
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -301,10 +301,12 @@ fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank,
 /// Which bank a gadget site's results live in. Every kind but [`GadgetKind::Reveal`]
 /// keeps the site's own domain (deterministic public work stays `Public`, a real share stays
 /// `Shared`) - `Reveal`'s entire purpose is to leave the `Public` domain regardless of whether its
-/// own input was `Shared`, since that is exactly what a genuine MPC open does. A `precomputed`
-/// site must be `Shared` - the host has nothing to compute for an all-public site, so seeing one
-/// here is a circuit-authoring mistake (should have dropped the `TACEO_PRECOMPUTATION_` wrapper
-/// and called `Poseidon2` directly) rather than something to encode.
+/// own input was `Shared`, since that is exactly what a genuine MPC open does. `precomputed` is
+/// `true` only for a `Shared` site - callers (`codegen::compile`,
+/// `passes::mpc::gadget_schedule::plan_gadget_batches`) already downgrade an all-public
+/// `TACEO_PRECOMPUTATION_Poseidon2` site to an ordinary one before calling this, since the host has
+/// nothing to precompute for it; `precomputed && domain != Shared` reaching here is their bug, not
+/// the circuit's.
 fn gadget_result_bank(
     kind: GadgetKind,
     domain: Domain,
@@ -319,8 +321,8 @@ fn gadget_result_bank(
     if precomputed {
         eyre::ensure!(
             domain == Domain::Shared,
-            "codegen: a host-precomputed {kind:?} site is all-Public - nothing for the host to \
-             precompute; drop the TACEO_PRECOMPUTATION_ wrapper and call Poseidon2 directly"
+            "codegen: a host-precomputed {kind:?} site is all-Public - the caller should have \
+             downgraded it to an ordinary gadget site before calling gadget_result_bank"
         );
         return Ok(Bank::Shared);
     }
@@ -466,7 +468,12 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
     let mut site_result_base: Vec<Loc> = Vec::with_capacity(graph.gadget_sites().len());
     for (site_id, site) in graph.gadget_sites().iter().enumerate() {
-        let bank = gadget_result_bank(site.kind, site_domains[site_id], site.precomputed)?;
+        // Mirrors `gadget_schedule::plan_gadget_batches`'s own downgrade: a wrapped site with
+        // nothing to precompute (fully public) falls through to an ordinary gadget site instead
+        // of erroring, so `site_result_base`'s bank always matches the batch `plan.precomputed`
+        // built from the same site.
+        let precomputed = site.precomputed && site_domains[site_id] == Domain::Shared;
+        let bank = gadget_result_bank(site.kind, site_domains[site_id], precomputed)?;
         let base = match bank {
             Bank::Public => p_next,
             Bank::Shared => s_next,

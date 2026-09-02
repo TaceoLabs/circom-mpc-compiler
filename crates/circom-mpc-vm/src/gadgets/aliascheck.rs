@@ -1,6 +1,6 @@
 //! `AliasCheck`: proves a 254-bit decomposition is the canonical (non-aliased) representative,
-//! i.e. `< p` (BN254's scalar field modulus) - `circuits/libs/aliascheck.circom` wraps
-//! `CompConstant(-1)` (`circuits/libs/compconstant.circom`), which itself wraps `Num2Bits(135)`.
+//! i.e. `< p` (BN254's scalar field modulus) - `circuits/node_modules/circomlib/circuits/aliascheck.circom` wraps
+//! `CompConstant(-1)` (`circuits/node_modules/circomlib/circuits/compconstant.circom`), which itself wraps `Num2Bits(135)`.
 //!
 //! See `ir::GadgetKind::AliasCheck` for why the 519-slot result layout below is derived
 //! directly from the real circuit's own signal numbering, and how it differs by one from merces'

@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "taceo/poseidon2.circom";
+include "@taceo/circom-lib/circuits/poseidon2.circom";
 
 // The driver-serviced twin of `precomputation_mixed_domain_test.circom` - same signal layout
 // (`a` public, `b`/`c` secret), an unwrapped `Poseidon2` call instead of the

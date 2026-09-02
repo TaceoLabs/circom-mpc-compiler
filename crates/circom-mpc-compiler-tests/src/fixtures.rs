@@ -18,7 +18,7 @@ use circom_mpc_compiler::{CompilerConfig, OptLevel};
 use circom_mpc_program::InputSignal;
 
 /// The compiler configuration for the vendored merces circuits, mirroring how merces itself
-/// compiles them (`-l circom/node_modules -l circom`): `circuits/libs/` resolves circomlib plus
+/// compiles them (`-l circom/node_modules -l circom`): `circuits/node_modules/` resolves circomlib plus
 /// the vendored `taceo/` subtree, `circuits/merces/` the `merces/`/`oblivious_vector/`
 /// cross-references. The circuits are `pragma circom 2.2.2` verbatim.
 pub fn merces_config() -> CompilerConfig {
@@ -26,7 +26,7 @@ pub fn merces_config() -> CompilerConfig {
     CompilerConfig {
         version: "2.2.2".to_owned(),
         link_library: vec![
-            format!("{root}/circuits/libs/").into(),
+            format!("{root}/circuits/node_modules/").into(),
             format!("{root}/circuits/merces/").into(),
         ],
         opt_level: OptLevel::O2,
@@ -41,6 +41,188 @@ pub fn merces_main_path(main: &str) -> String {
         "{}/circuits/merces/main/{main}.circom",
         concat!(env!("CARGO_MANIFEST_DIR"), "/../..")
     )
+}
+
+/// Reads a zkey for proving, in whichever of the two formats this repo uses: `.arks.zkey` is the
+/// merces ceremony key (ark-serialized, uncompressed - see `tests/merces.rs`'s `ceremony_zkey`),
+/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g.
+/// `kats/proving/multiplier3.zkey`). Shared by `examples/merces.rs` and `merces-net`.
+#[cfg(feature = "prove")]
+pub mod zkey {
+    use std::io::BufReader;
+
+    use ark_bn254::{Bn254, Fr};
+    use ark_serialize::{CanonicalDeserialize, Compress, Validate};
+    use co_groth16::{ConstraintMatrices, ProvingKey};
+
+    /// Streams the file rather than `fs::read`-ing it first: a batch32 ceremony key is several
+    /// hundred MB, and reading it into a `Vec` before deserializing would hold two copies at once.
+    pub fn read(path: &str) -> eyre::Result<(ConstraintMatrices<Fr>, ProvingKey<Bn254>)> {
+        let file = std::fs::File::open(path).map_err(|e| eyre::eyre!("opening {path}: {e}"))?;
+        Ok(if path.ends_with(".arks.zkey") {
+            // `Validate::No`: validating hundreds of MB of group elements costs far more than the
+            // proof itself, and a bad zkey shows up immediately as a proof that fails to verify.
+            circom_types::groth16::ArkZkey::<Bn254>::deserialize_with_mode(
+                BufReader::new(file),
+                Compress::No,
+                Validate::No,
+            )
+            .map_err(|e| eyre::eyre!("parsing {path}: {e}"))?
+            .into_inner()
+        } else {
+            circom_types::groth16::Zkey::<Bn254>::from_reader(file, circom_types::CheckElement::No)
+                .map_err(|e| eyre::eyre!("parsing {path}: {e}"))?
+                .into()
+        })
+    }
+}
+
+/// Host-side Poseidon2 commit precomputation for the merces circuits, mirroring merces' own
+/// `Engine::commit_batch`: one width-4 site per `Commit1`/`Commit2` call
+/// (`circuits/merces/oblivious_vector/hash.circom`), `[value, index, r, commitDs()]` with the
+/// first three secret and the domain separator public. Not feature-gated - `merces-net` builds
+/// `--no-default-features --features tls`, without `rep3` below.
+pub mod precomputation {
+    use ark_bn254::Fr;
+    use ark_ff::{PrimeField, UniformRand};
+    use mpc_core::protocols::rep3::Rep3PrimeFieldShare;
+    use rand::Rng;
+
+    use circom_mpc_program::{GadgetKind, InputValue, Program};
+    use circom_mpc_vm::gadgets::poseidon2;
+    use circom_mpc_vm::{GadgetPrecomputation, SiteTrace};
+
+    /// The Poseidon2 width every merces commit site uses.
+    pub const COMMIT_T: usize = 4;
+
+    /// `commitDs()` from `circuits/merces/oblivious_vector/hash.circom`: the ASCII bytes
+    /// `"TACEO-Merces-Commit"` read as a big-endian integer.
+    pub fn commit_domain_separator() -> Fr {
+        Fr::from_be_bytes_mod_order(b"TACEO-Merces-Commit")
+    }
+
+    /// Site counts per `BatchKind::PrecomputedPoseidon2` batch, in the order
+    /// `Machine::run_with_precomputation` consumes them (`Program::precomputed_batches` walks the
+    /// instruction stream). Errors if a batch isn't width-4 Poseidon2 - a width change must not be
+    /// silently mis-sized.
+    pub fn site_counts(program: &Program) -> eyre::Result<Vec<usize>> {
+        program
+            .precomputed_batches()?
+            .into_iter()
+            .map(|batch| match batch.kind {
+                GadgetKind::Poseidon2 { t } if t.get() == COMMIT_T => Ok(batch.sites),
+                other => eyre::bail!(
+                    "expected every host-precomputed batch to be Poseidon2(t={COMMIT_T}), found {other:?}"
+                ),
+            })
+            .collect()
+    }
+
+    /// `4 * sites` entries - `[Secret(value), Secret(index), Secret(r), Public(DS)]` per site,
+    /// values drawn from `rng`. `share` turns a cleartext value into whatever this driver's share
+    /// type is - `|v| v` for the plain path, "split with a shared seeded rng and keep my index"
+    /// for rep3 (see `merces-net.rs`'s own input-sharing trick).
+    pub fn commit_states<S>(
+        sites: usize,
+        rng: &mut impl Rng,
+        mut share: impl FnMut(Fr) -> S,
+    ) -> Vec<InputValue<S>> {
+        let ds = commit_domain_separator();
+        (0..sites)
+            .flat_map(|_| {
+                let value = Fr::rand(rng);
+                let index = Fr::rand(rng);
+                let r = Fr::rand(rng);
+                [
+                    InputValue::Secret(share(value)),
+                    InputValue::Secret(share(index)),
+                    InputValue::Secret(share(r)),
+                    InputValue::Public(ds),
+                ]
+            })
+            .collect()
+    }
+
+    /// One party's view of [`commit_states`]-shaped inputs built from pre-shared `[share; 3]`
+    /// triples, three per site in `[value, index, r]` order.
+    pub fn commit_states_for_party(
+        triples: &[[Rep3PrimeFieldShare<Fr>; 3]],
+        party: usize,
+    ) -> Vec<InputValue<Rep3PrimeFieldShare<Fr>>> {
+        let ds = commit_domain_separator();
+        triples
+            .chunks_exact(3)
+            .flat_map(|site| {
+                let [value, index, r] = std::array::from_fn(|j| InputValue::Secret(site[j][party]));
+                [value, index, r, InputValue::Public(ds)]
+            })
+            .collect()
+    }
+
+    /// Chops one flat, site-major trace vector into per-batch `push_batch` calls, in
+    /// `site_counts` order.
+    pub fn queue<S>(counts: &[usize], traces: Vec<SiteTrace<S>>) -> eyre::Result<GadgetPrecomputation<S>> {
+        eyre::ensure!(
+            traces.len() == counts.iter().sum::<usize>(),
+            "{} precomputed traces but the program's batches need {}",
+            traces.len(),
+            counts.iter().sum::<usize>()
+        );
+        let mut traces = traces.into_iter();
+        let mut queue = GadgetPrecomputation::new();
+        for &count in counts {
+            queue.push_batch(traces.by_ref().take(count).collect());
+        }
+        Ok(queue)
+    }
+
+    /// Plain-driver precomputation: `poseidon2::plain_trace` over seeded-random commit states,
+    /// queued in `program`'s batch order. Needed even for the plain baseline - once a circuit's
+    /// commit sites are host-precomputed, `Machine::run` (without a precomputation queue) errors
+    /// on them.
+    pub fn plain(program: &Program, rng: &mut impl Rng) -> eyre::Result<GadgetPrecomputation<Fr>> {
+        let counts = site_counts(program)?;
+        let sites: usize = counts.iter().sum();
+        // `plain_trace`/`Poseidon2Service` both reject a zero-element call outright (there is no
+        // width to check it against) - a circuit with no host-precomputed sites just gets an
+        // empty queue, which `run_with_precomputation` treats exactly like `Machine::run`.
+        if sites == 0 {
+            return Ok(GadgetPrecomputation::new());
+        }
+        let states = commit_states(sites, rng, |v| v);
+        let traces = poseidon2::plain_trace(COMMIT_T, &states)?;
+        queue(&counts, traces)
+    }
+
+    /// Rep3-driver precomputation: one [`poseidon2::Poseidon2Service`] over every commit site
+    /// (3 preprocessing rounds regardless of site count), one `trace` call, then `open_vec` of
+    /// each site's commitment - merces' `Engine::commit_batch` opens the commitments too, so that
+    /// round belongs to this phase's cost. Returns the traces flat, site-major; chop them into a
+    /// [`GadgetPrecomputation`] with [`queue`] once `counts` is known.
+    ///
+    /// Not gated on `feature = "local"` (unlike `fixtures::rep3`) so `merces-net`'s
+    /// `--no-default-features --features tls` build can call it too.
+    pub fn rep3<N: mpc_net::Network>(
+        sites: usize,
+        states: &[InputValue<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>],
+        net: &N,
+        rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
+    ) -> eyre::Result<Vec<SiteTrace<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>>> {
+        // See `plain`'s matching guard: a circuit with no host-precomputed sites must not call
+        // into a zero-element Poseidon2 trace, which rejects that outright.
+        if sites == 0 {
+            return Ok(Vec::new());
+        }
+        let mut service = poseidon2::Poseidon2Service::new(COMMIT_T, sites, net, rep3_state)?;
+        let traces = service.trace(COMMIT_T, states, net, rep3_state)?;
+        service.finish()?;
+        let outputs: Vec<_> = traces.iter().map(|trace| trace.output[0]).collect();
+        // The engine opens the commitments as part of this phase - not needed by the witness
+        // extension that follows (the circuit's own `TACEO_REVEAL` opens them again in-circuit),
+        // but skipping it here would understate the phase's real network cost.
+        let _commitments = mpc_core::protocols::rep3::arithmetic::open_vec(&outputs, net)?;
+        Ok(traces)
+    }
 }
 
 /// The 3-party in-process rep3 harness shared by tests, benches and examples: secret-share the
@@ -321,9 +503,7 @@ pub struct Scenario {
     json: &'static str,
 }
 
-/// All real protocol scenarios, baked in from `inputs/*.json`. The two server mains get four
-/// scenarios each; `transfer_client_compressed` gets one, for the day its main compiles (see
-/// `tests/merces.rs::client_main_is_still_unsupported`).
+/// All real protocol scenarios, baked in from `inputs/*.json`, four per server main.
 pub const MERCES_SCENARIOS: &[Scenario] = &[
     Scenario {
         main: "transfer_arity4_batch1",
@@ -383,13 +563,6 @@ pub const MERCES_SCENARIOS: &[Scenario] = &[
         batch: 8,
         note: "one slot's RangeCheckWithOutputFlag output is 0",
         json: include_str!("../../../inputs/transfer_arity4_batch8_invalid_slot.json"),
-    },
-    Scenario {
-        main: "transfer_client_compressed",
-        name: "default",
-        batch: 1,
-        note: "the client main - still unsupported, see client_main_is_still_unsupported",
-        json: include_str!("../../../inputs/transfer_client_compressed.json"),
     },
 ];
 

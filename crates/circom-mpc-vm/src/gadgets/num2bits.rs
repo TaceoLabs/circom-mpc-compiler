@@ -1,5 +1,5 @@
 //! `Num2Bits(n)`: bit-decomposes one field element into `n` bits, least-significant first -
-//! `out[i] = (in >> i) & 1` (`circuits/libs/bitify.circom`). No intermediates: `n` outputs, and
+//! `out[i] = (in >> i) & 1` (`circuits/node_modules/circomlib/circuits/bitify.circom`). No intermediates: `n` outputs, and
 //! nothing else - see `ir::GadgetKind::Num2Bits`.
 
 use ark_bn254::Fr;

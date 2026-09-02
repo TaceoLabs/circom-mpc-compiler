@@ -192,6 +192,7 @@ pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::G
         &mut compiled_graphs,
         &constant_table,
         &signal_spans,
+        config.precomputed_gadgets,
     );
     let main_template_graph = main_graph_compiler.parse()?;
 

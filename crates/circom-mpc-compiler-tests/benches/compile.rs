@@ -48,7 +48,7 @@ fn config(case: &Case) -> CompilerConfig {
     let mut config = CompilerConfig::default();
     config
         .link_library
-        .push(format!("{}/circuits/libs/", manifest_dir()).into());
+        .push(format!("{}/circuits/node_modules/", manifest_dir()).into());
     if case.merces {
         config.version = "2.2.2".to_owned();
         config

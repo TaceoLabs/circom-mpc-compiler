@@ -1,5 +1,5 @@
 pragma circom 2.0.0;
 
-include "libs/comparators.circom";
+include "circomlib/circuits/comparators.circom";
 
 component main = IsZero();

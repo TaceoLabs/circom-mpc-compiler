@@ -22,7 +22,7 @@ pub fn circuit_path(name: &str) -> String {
 }
 
 pub fn libs_path() -> std::path::PathBuf {
-    format!("{}/circuits/libs/", manifest_dir()).into()
+    format!("{}/circuits/node_modules/", manifest_dir()).into()
 }
 
 pub fn read_field_element(s: &str) -> ark_bn254::Fr {

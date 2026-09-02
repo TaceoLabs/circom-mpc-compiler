@@ -14,7 +14,6 @@
 use std::time::{Duration, Instant};
 
 use ark_bn254::{Bn254, Fr};
-use ark_serialize::{CanonicalDeserialize, Compress, Validate};
 use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::codegen;
 use circom_mpc_compiler_tests::fixtures;
@@ -23,7 +22,6 @@ use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::split_witness;
 use circom_mpc_vm::{Machine, Program};
-use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements};
@@ -68,30 +66,6 @@ impl PartyMetrics {
     }
 }
 
-/// Reads a zkey for proving, in whichever of the two formats this repo uses: `.arks.zkey` is the
-/// merces ceremony key (ark-serialized, uncompressed - see `tests/merces.rs`'s `ceremony_zkey`),
-/// anything else is a plain snarkjs zkey (`tests/proving.rs`'s format, e.g.
-/// `kats/proving/multiplier3.zkey`).
-fn read_zkey(path: &str) -> (ConstraintMatrices<Fr>, ProvingKey<Bn254>) {
-    if path.ends_with(".arks.zkey") {
-        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-        // `Validate::No`: validating hundreds of MB of group elements costs far more than the proof
-        // itself, and a bad zkey shows up immediately as a proof that fails to verify.
-        circom_types::groth16::ArkZkey::<Bn254>::deserialize_with_mode(
-            bytes.as_slice(),
-            Compress::No,
-            Validate::No,
-        )
-        .unwrap_or_else(|e| panic!("parsing {path}: {e}"))
-        .into_inner()
-    } else {
-        let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
-        circom_types::groth16::Zkey::<Bn254>::from_reader(file, CheckElement::No)
-            .unwrap_or_else(|e| panic!("parsing {path}: {e}"))
-            .into()
-    }
-}
-
 /// Where to look for a zkey when none was given on the command line: the merces ceremony key for a
 /// server main, otherwise nothing - there is no default zkey for an arbitrary circuit.
 fn default_zkey_path(root: &str, main: &str, is_merces_main: bool) -> Option<String> {
@@ -120,6 +94,13 @@ fn main() -> eyre::Result<()> {
     if !is_merces_main {
         config.mpc_public_inputs.clear();
     }
+    // This example proves and verifies a real proof on real values (scenario inputs, or
+    // sequential placeholders for an arbitrary circuit) - unlike `merces-net`/`benches/merces.rs`,
+    // which only need cost to be value-independent. A host-precomputed commit site's trace must
+    // then be the real Poseidon2 hash of the real wire values, which this example does not
+    // reconstruct (see `tests/merces.rs`'s same reasoning) - compile the commit sites as ordinary
+    // driver-serviced Poseidon2 instead.
+    config.precomputed_gadgets = false;
 
     let path = if is_merces_main {
         format!("{root}/circuits/merces/main/{arg}.circom")
@@ -190,7 +171,7 @@ fn main() -> eyre::Result<()> {
     let zkey = zkey_path.as_deref().and_then(|p| {
         std::fs::metadata(p)
             .is_ok()
-            .then(|| read_zkey(p))
+            .then(|| fixtures::zkey::read(p).unwrap_or_else(|e| panic!("{e}")))
             .or_else(|| {
                 println!("note: no zkey at {p} - skipping prove+verify.");
                 None
@@ -314,6 +295,7 @@ fn run_rep3(
                         .iter()
                         .fold((0, 0), |(s, r), (_, (sent, recv))| (s + sent, r + recv));
                     net.reset();
+
                     let t = Instant::now();
                     let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
                     let preprocessing_time = t.elapsed();

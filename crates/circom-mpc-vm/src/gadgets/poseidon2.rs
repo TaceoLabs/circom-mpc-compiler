@@ -1,4 +1,4 @@
-//! Poseidon2 permutation traces for `circuits/libs/taceo/poseidon2.circom`, computed from **that
+//! Poseidon2 permutation traces for `circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom`, computed from **that
 //! template's own signal layout**.
 //!
 //! The layout rule that is easy to get wrong: circom lays out each component as
@@ -610,7 +610,7 @@ fn walk<O: Ops>(
 fn check_width(t: usize, states: usize) -> eyre::Result<usize> {
     eyre::ensure!(
         SUPPORTED_WIDTHS.contains(&t),
-        "unsupported Poseidon2 width t={t} - circuits/libs/taceo/poseidon2.circom only defines \
+        "unsupported Poseidon2 width t={t} - circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom only defines \
          {SUPPORTED_WIDTHS:?}"
     );
     eyre::ensure!(
@@ -764,7 +764,7 @@ where
 pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
     eyre::ensure!(
         SUPPORTED_WIDTHS.contains(&t),
-        "unsupported Poseidon2 width t={t} - circuits/libs/taceo/poseidon2.circom only defines \
+        "unsupported Poseidon2 width t={t} - circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom only defines \
          {SUPPORTED_WIDTHS:?}"
     );
     let full = t
@@ -1335,7 +1335,7 @@ mod tests {
     fn tables_match_the_circom_source() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../circuits/libs/taceo/poseidon2_constants.circom"
+            "/../../circuits/node_modules/@taceo/circom-lib/circuits/poseidon2_constants.circom"
         ))
         .expect("the vendored constants circuit must be readable");
         for t in SUPPORTED_WIDTHS {

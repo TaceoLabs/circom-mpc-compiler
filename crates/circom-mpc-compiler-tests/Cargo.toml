@@ -42,10 +42,14 @@ required-features = ["local"]
 [dependencies]
 ark-bn254.workspace = true
 ark-ff.workspace = true
+ark-serialize = { workspace = true, optional = true }
 circom-mpc-compiler = { path = "../circom-mpc-compiler" }
 circom-mpc-program = { path = "../circom-mpc-program" }
 circom-mpc-vm = { path = "../circom-mpc-vm", default-features = false }
+circom-types = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
+co-circom-types = { workspace = true, optional = true }
+co-groth16 = { workspace = true, optional = true, features = ["verifier"] }
 eyre.workspace = true
 mpc-core.workspace = true
 mpc-net.workspace = true
@@ -58,15 +62,14 @@ toml = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-ark-serialize.workspace = true
-circom-types.workspace = true
-co-circom-types.workspace = true
-co-groth16 = { workspace = true, features = ["verifier"] }
 criterion.workspace = true
 
 [features]
 default = ["local"]
-local = ["circom-mpc-vm/local", "mpc-net/local"]
+# The co-groth16 proving stack - needed by `merces-net` (a `[[bin]]`, so it cannot use
+# dev-dependencies), and pulled in by both `local` and `tls` below.
+prove = ["dep:ark-serialize", "dep:circom-types", "dep:co-circom-types", "dep:co-groth16"]
+local = ["circom-mpc-vm/local", "mpc-net/local", "prove"]
 quic = ["circom-mpc-vm/quic", "mpc-net/quic"]
 tcp = ["circom-mpc-vm/tcp", "mpc-net/tcp"]
 tcp-session = ["circom-mpc-vm/tcp-session", "mpc-net/tcp-session"]
@@ -78,4 +81,5 @@ tls = [
   "dep:serde",
   "dep:toml",
   "mpc-net/tls",
+  "prove",
 ]

@@ -45,12 +45,16 @@ the proof.
 
 ## Development
 
+`circuits/` pulls its circom dependencies (`@taceo/circom-lib`, `circomlib`) via pnpm into a
+gitignored `node_modules`; run `pnpm -C circuits install` once before `cargo test`.
+
 ```
 cargo test                              # prove/verify correctness tests (checked against circom itself)
 cargo run --release -p circom-mpc-compiler-tests --example merces
                                         # full pipeline on a real production circuit, proof included
-scripts/run-merces-net.sh --runs 5      # rep3 witness extension over a genuine 3-process TLS network
-                                         # (needs configs/ + data/ supplied - see the script)
+scripts/run-merces-net.sh --runs 5      # precompute, witness extension and (optionally) proving,
+                                         # over a genuine 3-process TLS network - needs configs/ +
+                                         # data/ supplied, see the script
 ```
 
 ## CLI
@@ -61,7 +65,7 @@ file to a `circom-mpc-program::Program` file:
 ```
 cargo run --release -p circom-mpc-compiler --features cli -- \
     circuits/merces/main/transfer_arity4_batch1.circom \
-    -l circuits/libs/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
+    -l circuits/node_modules/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
 ```
 
 `cargo install --path crates/circom-mpc-compiler --features cli` installs it. `--config <toml>`

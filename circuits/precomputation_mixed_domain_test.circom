@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "taceo/precomputations.circom";
+include "@taceo/circom-lib/circuits/precomputations.circom";
 
 // A host-precomputed site whose inputs mix Public and Shared: `a` is public (e.g. a domain
 // separator), `b`/`c` are secret. At least one Shared input is still required (see

@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "comparators.circom";
+include "circomlib/circuits/comparators.circom";
 
 // Two gadget sites of the *same kind* that cannot be serviced together: the second one's
 // input depends on the first one's output, through a secret multiplication each way. This is the

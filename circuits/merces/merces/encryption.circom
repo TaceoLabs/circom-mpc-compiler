@@ -1,7 +1,7 @@
 pragma circom 2.2.2;
 
-include "taceo/babyjubjub.circom";
-include "taceo/poseidon2.circom";
+include "@taceo/circom-lib/circuits/babyjubjub.circom";
+include "@taceo/circom-lib/circuits/poseidon2.circom";
 
 template DeriveSymKeyBits() {
     signal input mySkBits[251];
@@ -13,9 +13,8 @@ template DeriveSymKeyBits() {
     // BabyJubJubScalarMulBits (EscalarMulAny) assumes a well-formed
     // subgroup point; an unchecked `pk` can break the Montgomery arithmetic or
     // leak small-subgroup information about the derived key. The CALLER must
-    // guarantee `pk` is a valid BabyJubJub subgroup point (e.g. via the registry
-    // membership proof) before calling this template.
-    BabyJubJubPoint() { twisted_edwards_in_subgroup } pkP;
+    // guarantee `pk` is a valid BabyJubJub subgroup point before calling this template.
+    BabyJubJubPoint() { twistedEdwardsInSubgroup } pkP;
     pkP.x <== pk[0];
     pkP.y <== pk[1];
     component symKey = BabyJubJubScalarMulBits();

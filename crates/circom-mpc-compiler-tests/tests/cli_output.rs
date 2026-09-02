@@ -11,7 +11,7 @@ fn round_trips_through_a_file() {
     let mut config = CompilerConfig::default();
     config
         .link_library
-        .push(format!("{root}/../../circuits/libs/").into());
+        .push(format!("{root}/../../circuits/node_modules/").into());
     let original = CoCircomCompiler::compile(
         format!("{root}/../../circuits/multiplier2.circom"),
         config,

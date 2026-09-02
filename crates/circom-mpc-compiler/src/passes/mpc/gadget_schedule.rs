@@ -58,7 +58,13 @@ pub(crate) fn plan_gadget_batches(graph: &Graph, domains: &[Domain]) -> Vec<Batc
         let node = site_node[site_id];
         let stage = stages[site_id];
         let domain = domains[node];
-        let key = (site.kind, stage, domain, site.precomputed);
+        // A wrapped Poseidon2 site that turns out fully public has nothing for the host to
+        // precompute (its inputs never depend on any party's secret data) - fall through to an
+        // ordinary driver-serviced site instead of the host-precomputed path. This costs nothing
+        // extra: an all-public gadget batch already runs with no network round (every input is a
+        // trivial share - see `poseidon2::mask_budget`), so the two paths are equally free here.
+        let precomputed = site.precomputed && domain == Domain::Shared;
+        let key = (site.kind, stage, domain, precomputed);
 
         let append_to = active.get(&key).copied().filter(|&idx| {
             let plan = &plans[idx];
@@ -77,7 +83,7 @@ pub(crate) fn plan_gadget_batches(graph: &Graph, domains: &[Domain]) -> Vec<Batc
                 sites: vec![(site_id, node)],
                 anchor: node,
                 stage,
-                precomputed: site.precomputed,
+                precomputed,
                 deadline: first_reader[site_id],
             });
             active.insert(key, idx);

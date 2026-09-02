@@ -1,4 +1,4 @@
-//! Round constants for `circuits/libs/taceo/poseidon2.circom`, transcribed **verbatim** from its
+//! Round constants for `circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom`, transcribed **verbatim** from its
 //! `poseidon2_constants.circom` so a reviewer can diff the two directly. `tests::
 //! tables_match_the_circom_source` does exactly that automatically, re-extracting the hex from the
 //! circuit file at test time, so these can never silently drift from the circuit they describe.
@@ -686,7 +686,7 @@ impl RoundConstants {
             16 => (RC_FULL1_T16, RC_PARTIAL_T16, RC_FULL2_T16, DIAG_T16),
             other => eyre::bail!(
                 "Poseidon2 width t={other} is not supported - the vendored \
-                 circuits/libs/taceo/poseidon2.circom only defines constants for t in \
+                 circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom only defines constants for t in \
                  {{2, 3, 4, 8, 12, 16}}"
             ),
         };

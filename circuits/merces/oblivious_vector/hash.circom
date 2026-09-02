@@ -1,7 +1,6 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
-include "taceo/precomputations.circom";
+include "@taceo/circom-lib/circuits/mpc.circom";
 
 
 // Returns the shared domain separator for the commit templates. It is the ASCII byte sequence "TACEO-Merces-Commit" interpreted as a field element.
@@ -9,15 +8,13 @@ function commitDs() {
     return 0x544143454f2d4d65726365732d436f6d6d6974;
 }
 
-// Commitments are opened to every MPC party: `r` stays secret, so revealing `out` does not reveal
-// `value`. This is what lets everything the commitment feeds - the Merkle walk, the roots, the
-// batch statement `q` - run as public, deterministic local work instead of secret-shared MPC.
+// commit(amount, 0, r, DS). Uses state size 4 for Poseidon so that we can run all commitments in parallel to minimize depth.
 template Commit1() {
     signal input value;
     signal input r;
     signal output out;
 
-    var hash[4] = Poseidon2(4)([value, 0, r, commitDs()]);
+    var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([value, 0, r, commitDs()]);
     signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
     out <== revealed[0];
 }
@@ -29,7 +26,7 @@ template Commit2() {
     signal input r;
     signal output out;
 
-    var hash[4] = Poseidon2(4)([balance, index, r, commitDs()]);
+    var hash[4] = TACEO_PRECOMPUTATION_Poseidon2(4)([balance, index, r, commitDs()]);
     signal revealed[1] <== TACEO_REVEAL(1)([hash[0]]);
     out <== revealed[0];
 }

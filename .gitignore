@@ -25,9 +25,8 @@ target/
 # (scripts/gen-merces-artifacts.sh) - large, and reproducible from that script.
 /artifacts
 
-# The merces ceremony proving keys (13-178 MB each) - real protocol inputs live in
-# inputs/*.json (committed), but these are too large to commit and aren't reproducible by any
-# script here; tests/merces.rs's proving tests skip with a message when this is absent.
+# The merces proving keys (20-700 MB each, `just merces-zkeys`) - too large to commit;
+# tests/merces.rs's proving tests skip with a message when this is absent.
 /inputs/zkey
 
 # Generated proving artifacts (scripts/gen-proving-artifacts.sh)
@@ -39,3 +38,6 @@ target/
 # (scripts/run-merces-net.sh)
 /configs
 /data
+
+# circom dependencies (@taceo/circom-lib, circomlib), pulled via `pnpm -C circuits install`
+/circuits/node_modules

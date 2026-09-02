@@ -125,6 +125,9 @@ pub(crate) struct GraphCompiler<'a> {
     /// `frontend/mod.rs::compute_signal_spans`. Only consulted for recognized gadget templates, to
     /// size their site's `num_intermediates`.
     pub(crate) gadget_spans: &'a FxHashMap<String, usize>,
+    /// `CompilerConfig::precomputed_gadgets` - whether `TACEO_PRECOMPUTATION_Poseidon2` is honored
+    /// as a host-precomputed site or compiled as an ordinary `Poseidon2` site.
+    pub(crate) precomputed_gadgets: bool,
 }
 
 impl<'a> GraphCompiler<'a> {
@@ -134,6 +137,7 @@ impl<'a> GraphCompiler<'a> {
         compiled_graphs: &'a mut FxHashMap<String, TemplateGraph>,
         constant_table: &'a [Fr],
         gadget_spans: &'a FxHashMap<String, usize>,
+        precomputed_gadgets: bool,
     ) -> Self {
         Self {
             sub_graphs: Vec::with_capacity(code.number_of_components),
@@ -143,6 +147,7 @@ impl<'a> GraphCompiler<'a> {
             compiled_graphs,
             constant_table,
             gadget_spans,
+            precomputed_gadgets,
             var_to_value: FxHashMap::default(),
         }
     }
@@ -365,8 +370,10 @@ impl<'a> GraphCompiler<'a> {
         // `vm::gadgets` - the *enclosing* template's name, since the inner gadget's own name
         // (matched just below) is unchanged either way. `self.code` is that enclosing template's
         // own `GraphCompiler`. Poseidon2 is the only gadget this compiler allows to be
-        // host-precomputed.
-        let precomputed = self.code.name == "TACEO_PRECOMPUTATION_Poseidon2";
+        // host-precomputed. `precomputed_gadgets: false` (`CompilerConfig`) disables recognizing
+        // the wrapper at all, so the site compiles as an ordinary driver-serviced Poseidon2.
+        let precomputed =
+            self.precomputed_gadgets && self.code.name == "TACEO_PRECOMPUTATION_Poseidon2";
 
         let kind = match template_code.name.as_str() {
             "Poseidon2" => {
@@ -442,6 +449,7 @@ impl<'a> GraphCompiler<'a> {
             self.compiled_graphs,
             self.constant_table,
             self.gadget_spans,
+            self.precomputed_gadgets,
         );
         let sub_cmp = sub_cmp_compiler.parse()?;
         self.compiled_graphs.insert(symbol.clone(), sub_cmp.clone());
@@ -742,7 +750,7 @@ TemplateOp::SubCmpOutput { .. } => None,
     /// Needed because this build pass deliberately doesn't fold arithmetic (that's `passes::
     /// const_fold`'s job, which runs much later), so a `var` computed from constants is a real
     /// `Op::Sub`/`Add`/`Mul` node here even though its value is fixed. Real circom does this
-    /// constantly: `circuits/libs/taceo/compression.circom`'s `Poseidon2SpongeWithDs` guards
+    /// constantly: `circuits/node_modules/@taceo/circom-lib/circuits/compression.circom`'s `Poseidon2SpongeWithDs` guards
     /// `if (remaining > T - 1)` where `remaining = N - absorbed`, all compile-time.
     ///
     /// Shares [`Self::eval_constant_node`] with address computation, which needs the identical

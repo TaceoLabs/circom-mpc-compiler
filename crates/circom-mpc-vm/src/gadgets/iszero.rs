@@ -1,4 +1,4 @@
-//! `IsZero`: `out = 1` iff `in == 0`, plus `inv` (the helper `circuits/libs/comparators.circom`
+//! `IsZero`: `out = 1` iff `in == 0`, plus `inv` (the helper `circuits/node_modules/circomlib/circuits/comparators.circom`
 //! needs to constrain it: `inv <-- in!=0 ? 1/in : 0`, `out <== -in*inv + 1`). See
 //! `ir::GadgetKind::IsZero`.
 

@@ -9,7 +9,7 @@ fn program(circuit: &str) -> Program {
     let mut config = CompilerConfig::default();
     config
         .link_library
-        .push(format!("{root}/../../circuits/libs/").into());
+        .push(format!("{root}/../../circuits/node_modules/").into());
     CoCircomCompiler::compile(format!("{root}/../../circuits/{circuit}.circom"), config).unwrap()
 }
 

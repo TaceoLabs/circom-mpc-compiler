@@ -72,7 +72,7 @@ snarkjs powersoftau prepare phase2 "$POT_DIR/pot1.ptau" "$POT_DIR/pot.ptau"
 for name in "${CIRCUITS[@]}"; do
     echo
     echo "=== $name ==="
-    "$CIRCOM" "$ROOT/circuits/$name.circom" -l "$ROOT/circuits/libs" --r1cs --O2 -o "$OUT"
+    "$CIRCOM" "$ROOT/circuits/$name.circom" -l "$ROOT/circuits/node_modules" --r1cs --O2 -o "$OUT"
     snarkjs r1cs info "$OUT/$name.r1cs" | tee "$OUT/$name-r1cs-info.txt" >/dev/null
 
     if ! snarkjs groth16 setup "$OUT/$name.r1cs" "$POT_DIR/pot.ptau" "$OUT/$name.zkey"; then

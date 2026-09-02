@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
+include "circomlib/circuits/bitify.circom";
 
 // A malformed `TACEO_PRECOMPUTATION_Poseidon2` that actually wraps `Num2Bits` - the frontend must
 // reject this rather than silently treating it as a host-precomputed `Num2Bits` site (which can't

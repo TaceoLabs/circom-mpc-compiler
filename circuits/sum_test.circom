@@ -1,7 +1,7 @@
 pragma circom 2.0.0;
 
-include "libs/bitify.circom";
-include "libs/binsum.circom";
+include "circomlib/circuits/bitify.circom";
+include "circomlib/circuits/binsum.circom";
 
 template A() {
     signal input a; //private

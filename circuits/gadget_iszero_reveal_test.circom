@@ -1,7 +1,7 @@
 pragma circom 2.2.2;
 
-include "comparators.circom";
-include "taceo/precomputations.circom";
+include "circomlib/circuits/comparators.circom";
+include "@taceo/circom-lib/circuits/mpc.circom";
 
 template Main() {
     signal input in[2];

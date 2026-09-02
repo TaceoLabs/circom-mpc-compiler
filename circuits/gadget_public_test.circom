@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "comparators.circom";
+include "circomlib/circuits/comparators.circom";
 
 template PublicGadget() {
     signal input a;

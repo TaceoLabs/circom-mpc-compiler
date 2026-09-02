@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release -p circom-mpc-compiler --features cli -- \
 //!     circuits/merces/main/transfer_arity4_batch1.circom \
-//!     -l circuits/libs/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
+//!     -l circuits/node_modules/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
 //! ```
 
 use std::fs::File;

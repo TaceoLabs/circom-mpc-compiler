@@ -1,12 +1,10 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
-include "aliascheck.circom";
-include "comparators.circom";
+include "circomlib/circuits/bitify.circom";
 include "oblivious_vector/hash.circom";
 include "dependencies/merkle_root_4.circom";
-include "taceo/compression.circom";
-include "taceo/precomputations.circom";
+include "@taceo/circom-lib/circuits/compression.circom";
+include "@taceo/circom-lib/circuits/mpc.circom";
 
 template RangeCheckWithOutputFlag(BITSIZE) {
     assert(BITSIZE <= 254);
@@ -14,11 +12,8 @@ template RangeCheckWithOutputFlag(BITSIZE) {
     signal input in;
     signal output valid;
 
-    // Num2Bits_strict, accelerated
-    component n2b = Num2Bits(254);
+    component n2b = Num2Bits_strict();
     in ==> n2b.in;
-
-    AliasCheck()(n2b.out);
 
     // Sum up all bits above BITSIZE
     // Works since bits are enforced to be 0 or 1 already.
@@ -29,9 +24,9 @@ template RangeCheckWithOutputFlag(BITSIZE) {
     }
 
     // Declassified: `valid` is one of the ten fields of the batch statement `q` compressed at the
-    // end of `TransferBatchedCompressedArity4` (see `compression.circom`), so it is revealed there
-    // regardless - doing it here lets it feed the rest of that compression as public, deterministic
-    // work instead of round-tripping through MPC.
+    // end of `TransferBatchedCompressedArity4`, so it is revealed there regardless - doing it here
+    // lets it feed the rest of that compression as public, deterministic work instead of
+    // round-tripping through MPC.
     signal isZeroOut <== IsZero()(sum);
     signal revealed[1] <== TACEO_REVEAL(1)([isZeroOut]);
     valid <== revealed[0];
@@ -157,6 +152,9 @@ template DepositWithdrawTransferArity4(MAX_DEPTH, BALANCE_BITSIZE) {
     signal secondTerm <== (1 - isDeposit) * senderWithdraw.oldRoot;
     signal thirdTerm <== isWithdraw * senderWithdraw.newRoot;
     signal fourthTerm <== (1 - isWithdraw) * receiverDeposit.newRoot;
+
+    // If it is a deposit, valid must be true
+    isDeposit * (1-valid) === 0;
 
     // If it is a deposit, we ignore the withdraw part of the proof and enforce that the deposit was done on the old root
     oldRoot <== firstTerm + secondTerm;

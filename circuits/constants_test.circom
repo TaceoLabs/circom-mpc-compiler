@@ -1,6 +1,6 @@
 pragma circom 2.0.0;
 
-include "libs/sha256/constants.circom";
+include "circomlib/circuits/sha256/constants.circom";
 
 template A() {
     signal input in;

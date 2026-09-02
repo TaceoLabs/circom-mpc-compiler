@@ -1,6 +1,6 @@
 pragma circom 2.2.2;
 
-include "bitify.circom";
+include "circomlib/circuits/bitify.circom";
 
 // Wrapped so the gadget is a subcomponent: the compiler only cuts gadget sites at
 // component-instantiation sites, never for `main` itself.

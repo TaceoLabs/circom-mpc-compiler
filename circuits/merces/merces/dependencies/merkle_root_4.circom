@@ -2,8 +2,8 @@ pragma circom 2.2.2;
 
 // This file is copied from https://github.com/zk-kit/zk-kit.circom/blob/main/packages/binary-merkle-root/src/binary-merkle-root.circom and adapted to use Poseidon2 instead of Poseidon and use it in compression mode and not in sponge mode.
 
-include "taceo/poseidon2.circom";
-include "comparators.circom";
+include "@taceo/circom-lib/circuits/poseidon2.circom";
+include "circomlib/circuits/comparators.circom";
 
 // This circuit is designed to calculate the root of a arity-4 Merkle
 // tree given a leaf, its depth, and the necessary sibling

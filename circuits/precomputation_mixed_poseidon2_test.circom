@@ -1,7 +1,7 @@
 pragma circom 2.2.2;
 
-include "taceo/precomputations.circom";
-include "taceo/poseidon2.circom";
+include "@taceo/circom-lib/circuits/precomputations.circom";
+include "@taceo/circom-lib/circuits/poseidon2.circom";
 
 // One host-precomputed and one accelerated (driver-serviced) Poseidon2 site, independent of each
 // other so both land in the same network stage - they must still end up in two different batches,

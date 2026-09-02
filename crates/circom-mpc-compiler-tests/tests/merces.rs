@@ -7,8 +7,6 @@
 //! mis-ordered gadget batch (its `reshare` is the identity) while three real parties
 //! either deadlock or diverge. With `inputs/zkey/<main>.arks.zkey` present (gitignored, too large
 //! to commit), a scenario additionally produces and verifies a real co-groth16 proof.
-//!
-//! `transfer_client_compressed` still does not compile; see [`client_main_is_still_unsupported`].
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -35,9 +33,25 @@ fn manifest_dir() -> &'static str {
 /// codegen depends on the scenario's input values.
 fn compiled(main: &str) -> &'static Program {
     fn build(main: &str) -> Program {
-        let graph = CoCircomCompiler::parse(merces_main_path(main), merces_config())
-            .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
-        codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"))
+        let main = main.to_owned();
+        // The JSON scenario fixtures don't carry precomputed commitment hashes (merces computes
+        // them itself, in Rust, rather than serializing them) - compile the commit sites as
+        // ordinary driver-serviced Poseidon2 so a scenario's witness extension actually hashes
+        // the real wire values instead of consuming a caller-supplied trace.
+        let mut config = merces_config();
+        config.precomputed_gadgets = false;
+        // circom's constraint generation recurses per expression node, which overflows the 2 MiB
+        // test-thread stack even on batch1 - parse on a thread sized like a main thread.
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let graph = CoCircomCompiler::parse(merces_main_path(&main), config)
+                    .unwrap_or_else(|e| panic!("{main} must compile: {e}"));
+                codegen::compile(&graph).unwrap_or_else(|e| panic!("{main}: codegen: {e}"))
+            })
+            .unwrap()
+            .join()
+            .unwrap()
     }
     static BATCH1: OnceLock<Program> = OnceLock::new();
     static BATCH8: OnceLock<Program> = OnceLock::new();
@@ -145,34 +159,6 @@ fn batching_collapses_many_sites_into_few_driver_calls() {
             "{main}: {sites} sites collapsed into only {shared_batches} MPC-driver batches - \
              batching regressed"
         );
-    }
-}
-
-/// `transfer_client_compressed` remains unsupported, and must fail with a *typed* error rather than a
-/// panic. Its blockers are deeper than the server mains': a bare `IsZero` in `escalarmulany.circom`,
-/// bare `Num2Bits` calls reached through `BabyJubJubIsInFr`, and genuine non-constant field `Div` in
-/// `montgomery.circom` - i.e. the whole deliberately-removed operator surface, not something a
-/// config knob routes around.
-#[test]
-fn client_main_is_still_unsupported() {
-    match CoCircomCompiler::parse(
-        merces_main_path("transfer_client_compressed"),
-        merces_config(),
-    ) {
-        Ok(_) => panic!(
-            "transfer_client_compressed compiled - if the operator gaps have closed, promote it to a \
-             real end-to-end test alongside the server mains instead of deleting this assertion"
-        ),
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("unsupported operator")
-                    || msg.contains("unsupported instruction")
-                    || msg.contains("unsupported mapped location")
-                    || msg.contains("is only supported on compile-time constants"),
-                "must fail with a typed Unsupported error, not something else: {msg}"
-            );
-        }
     }
 }
 

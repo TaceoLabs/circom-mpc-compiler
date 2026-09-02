@@ -185,10 +185,14 @@ fn leftover_precomputation_after_the_run_is_rejected() {
 }
 
 #[test]
-fn an_all_public_precomputed_site_is_rejected_at_compile_time() {
-    let err = CoCircomCompiler::compile(circuit_path("precomputation_all_public_test"), config())
-        .unwrap_err();
-    assert!(err.to_string().contains("all-Public"), "{err}");
+fn an_all_public_precomputed_site_falls_back_to_an_ordinary_gadget() {
+    // Nothing for the host to precompute, so the wrapper is ignored rather than rejected - the
+    // site compiles exactly as if it had called `Poseidon2` directly.
+    let program =
+        CoCircomCompiler::compile(circuit_path("precomputation_all_public_test"), config())
+            .unwrap();
+    assert_eq!(program.statistics().precomputed_batches, 0);
+    assert!(program.precomputed_batches().unwrap().is_empty());
 }
 
 #[test]

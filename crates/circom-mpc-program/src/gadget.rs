@@ -94,7 +94,7 @@ impl GadgetKind {
     #[must_use]
     pub fn expected_results(self) -> usize {
         match self {
-            // Mirrors the template structure of `circuits/libs/taceo/poseidon2.circom`:
+            // Mirrors the template structure of `circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom`:
             //   Poseidon2(t) = [out[t]][in[t]][state[(9+pr)][t]]
             //                  + ExternalMatMulT(t) + 8 x FullRound(t) + pr x PartialRound(t)
             // and result slots are every signal except the site's own `t` inputs. Kept here rather
@@ -147,7 +147,7 @@ impl GadgetKind {
             // No outputs. AliasCheck's subtree is its CompConstant subcomponent: 254 input-signal
             // copies + 1 output = 255, + 127 `parts` + 1 `sout`, + CompConstant's child
             // Num2Bits(135) (1 input + 135 bits = 136). Cross-checked directly against
-            // `circuits/libs/{aliascheck,compconstant}.circom`.
+            // `circuits/node_modules/circomlib/circuits/{aliascheck,compconstant}.circom`.
             GadgetKind::AliasCheck => 255 + 127 + 1 + 136,
         }
     }

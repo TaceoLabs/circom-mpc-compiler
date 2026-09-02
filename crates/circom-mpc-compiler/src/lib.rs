@@ -39,10 +39,21 @@ pub struct CompilerConfig {
     /// the SNARK statement split, which the zkey's `num_instance_variables` decides.
     #[serde(default)]
     pub mpc_public_inputs: Vec<String>,
+    /// Whether a `TACEO_PRECOMPUTATION_Poseidon2` wrapper is honored as a host-precomputed site.
+    /// `false` compiles it as an ordinary driver-serviced `Poseidon2` site instead - the two are
+    /// R1CS-identical, so a zkey built from one still matches the other. Set this to `false` to
+    /// prove against inputs whose commitment hashes were never computed by the host (e.g. the
+    /// merces JSON scenario fixtures, which don't carry them).
+    #[serde(default = "default_precomputed_gadgets")]
+    pub precomputed_gadgets: bool,
 }
 
 fn default_version() -> String {
     "2.2.2".to_owned()
+}
+
+fn default_precomputed_gadgets() -> bool {
+    true
 }
 
 impl Default for CompilerConfig {
@@ -54,6 +65,7 @@ impl Default for CompilerConfig {
             inspect: false,
             opt_level: OptLevel::default(),
             mpc_public_inputs: vec![],
+            precomputed_gadgets: default_precomputed_gadgets(),
         }
     }
 }
