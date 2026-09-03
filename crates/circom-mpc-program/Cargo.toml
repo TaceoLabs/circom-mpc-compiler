@@ -1,7 +1,13 @@
 [package]
-name = "circom-mpc-program"
+name = "taceo-circom-mpc-program"
 version = "0.1.0"
-edition = "2024"
+description = "Compiled program representation and binary format for circom MPC witness extension"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 ark-bn254.workspace = true

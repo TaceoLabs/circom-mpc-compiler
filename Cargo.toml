@@ -2,6 +2,14 @@
 resolver = "3"
 members = ["crates/*"]
 
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+homepage = "https://taceo.io/"
+repository = "https://github.com/TaceoLabs/circom-mpc-compiler"
+license = "MIT OR Apache-2.0"
+publish = false
+
 [workspace.dependencies]
 ark-bn254 = "0.6"
 ark-ff = "0.6"

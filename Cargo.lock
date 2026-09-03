@@ -862,37 +862,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "circom-mpc-compiler"
-version = "0.1.0"
-dependencies = [
- "ark-bn254",
- "ark-ff 0.6.0",
- "circom-mpc-program",
- "clap",
- "compiler",
- "constraint_generation",
- "eyre",
- "num-bigint 0.4.6",
- "num-traits",
- "parser",
- "program_structure",
- "rustc-hash",
- "serde",
- "toml",
- "tracing",
- "tracing-subscriber",
- "type_analysis",
-]
-
-[[package]]
 name = "circom-mpc-compiler-tests"
 version = "0.1.0"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",
- "circom-mpc-compiler",
- "circom-mpc-program",
- "circom-mpc-vm",
  "co-circom-types",
  "co-groth16",
  "criterion",
@@ -901,32 +875,10 @@ dependencies = [
  "mpc-net",
  "rand 0.8.8",
  "serde_json",
+ "taceo-circom-mpc-compiler",
+ "taceo-circom-mpc-program",
+ "taceo-circom-mpc-vm",
  "taceo-circom-types",
-]
-
-[[package]]
-name = "circom-mpc-program"
-version = "0.1.0"
-dependencies = [
- "ark-bn254",
- "ark-ff 0.6.0",
- "ark-serialize 0.6.0",
- "eyre",
-]
-
-[[package]]
-name = "circom-mpc-vm"
-version = "0.1.0"
-dependencies = [
- "ark-bn254",
- "ark-ff 0.6.0",
- "circom-mpc-program",
- "eyre",
- "mpc-core",
- "mpc-net",
- "num-bigint 0.4.6",
- "num-traits",
- "rand 0.8.8",
 ]
 
 [[package]]
@@ -3702,6 +3654,54 @@ dependencies = [
  "ark-serialize 0.6.0",
  "num-bigint 0.4.6",
  "serde",
+]
+
+[[package]]
+name = "taceo-circom-mpc-compiler"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.6.0",
+ "clap",
+ "compiler",
+ "constraint_generation",
+ "eyre",
+ "num-bigint 0.4.6",
+ "num-traits",
+ "parser",
+ "program_structure",
+ "rustc-hash",
+ "serde",
+ "taceo-circom-mpc-program",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "type_analysis",
+]
+
+[[package]]
+name = "taceo-circom-mpc-program"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.6.0",
+ "ark-serialize 0.6.0",
+ "eyre",
+]
+
+[[package]]
+name = "taceo-circom-mpc-vm"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.6.0",
+ "eyre",
+ "mpc-core",
+ "mpc-net",
+ "num-bigint 0.4.6",
+ "num-traits",
+ "rand 0.8.8",
+ "taceo-circom-mpc-program",
 ]
 
 [[package]]

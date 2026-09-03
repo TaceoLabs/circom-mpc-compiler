@@ -53,7 +53,7 @@ cargo test    # prove/verify correctness tests (checked against circom itself)
 file to a `circom-mpc-program::Program` file:
 
 ```
-cargo run --release -p circom-mpc-compiler --features cli -- \
+cargo run --release -p taceo-circom-mpc-compiler --features cli -- \
     circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
 ```
 

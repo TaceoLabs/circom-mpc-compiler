@@ -1,7 +1,16 @@
 [package]
-name = "circom-mpc-compiler"
+name = "taceo-circom-mpc-compiler"
 version = "0.1.0"
-edition = "2024"
+description = "Compiles circom circuits into a circom-mpc-program witness-extension procedure"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "circom_mpc_compiler"
 
 [[bin]]
 name = "circom-mpc-compile"
@@ -13,7 +22,7 @@ ark-bn254.workspace = true
 ark-ff.workspace = true
 circom-compiler.workspace = true
 circom-constraint_generation.workspace = true
-circom-mpc-program = { path = "../circom-mpc-program" }
+circom-mpc-program = { package = "taceo-circom-mpc-program", path = "../circom-mpc-program", version = "0.1" }
 circom-parser.workspace = true
 circom-program_structure.workspace = true
 circom-type_analysis.workspace = true
