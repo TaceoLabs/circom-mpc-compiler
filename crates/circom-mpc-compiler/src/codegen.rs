@@ -13,7 +13,7 @@ use circom_mpc_program::{
     SlotCounts, WitnessSource,
 };
 
-use crate::ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId};
+use crate::ir::{GadgetKind, GadgetSite, Graph, Node, Op, RoundId, ValueId};
 use crate::passes::mpc::domain::{Domain, compute_domains, signal_domain};
 use crate::passes::mpc::gadget_schedule::{BatchPlan, plan_gadget_batches};
 
@@ -117,33 +117,133 @@ enum RuntimePlan {
     IsZeroReveal(usize),
 }
 
+/// The read-only tables the fusion scan needs: `consumers[v]` is how many nodes read value `v`,
+/// `site_plan[s]` is the index of the [`BatchPlan`] that owns gadget site `s` (`usize::MAX` if
+/// none does).
+struct FusionScan<'a> {
+    nodes: &'a [Node],
+    sites: &'a [GadgetSite],
+    domains: &'a [Domain],
+    consumers: Vec<usize>,
+    site_plan: Vec<usize>,
+}
+
+impl<'a> FusionScan<'a> {
+    fn new(graph: &'a Graph, domains: &'a [Domain], plans: &[BatchPlan]) -> Self {
+        let nodes = graph.nodes();
+        let sites = graph.gadget_sites();
+        let mut consumers = vec![0usize; nodes.len()];
+        for node in nodes {
+            for input in &node.inputs {
+                consumers[input.index()] += 1;
+            }
+        }
+        let mut site_plan = vec![usize::MAX; sites.len()];
+        for (plan_idx, plan) in plans.iter().enumerate() {
+            for &(site_id, _) in &plan.sites {
+                site_plan[site_id] = plan_idx;
+            }
+        }
+        Self {
+            nodes,
+            sites,
+            domains,
+            consumers,
+            site_plan,
+        }
+    }
+
+    /// The zero test whose sole revealed result is `reveal_node`, if this Reveal site is fusable.
+    fn pair_for(&self, reveal_site: usize, reveal_node: usize) -> Option<ZeroTestRevealPair> {
+        let &zero_test_result = self.nodes[reveal_node].inputs.first()?;
+        if self.nodes[reveal_node].inputs.len() != 1
+            || !matches!(self.nodes[zero_test_result.index()].op, Op::GadgetResult(0))
+            || self.consumers[zero_test_result.index()] != 1
+        {
+            return None;
+        }
+        let zero_test_node = self.nodes[zero_test_result.index()].inputs[0].index();
+        let Op::Gadget(zero_test_site_id) = self.nodes[zero_test_node].op else {
+            return None;
+        };
+        let zero_test_site = zero_test_site_id.index();
+        if self.sites[zero_test_site].kind != GadgetKind::IsZero
+            || self.domains[zero_test_node] != Domain::Shared
+            || self.nodes[zero_test_node].inputs.len() != 1
+            || self.other_result_has_reader(zero_test_node)
+        {
+            return None;
+        }
+        Some(ZeroTestRevealPair {
+            zero_test_site,
+            zero_test_node,
+            reveal_site,
+        })
+    }
+
+    /// The fused service runs at the Reveal batch's anchor instead of the original zero-test
+    /// anchor. Slot 0 is safe to bypass because its sole computational reader is that Reveal; the
+    /// `inv` helper result must be witness-only, otherwise an earlier reader could observe its
+    /// slot before the fused service fills it.
+    fn other_result_has_reader(&self, zero_test_node: usize) -> bool {
+        self.nodes.iter().enumerate().any(|(result_idx, result)| {
+            matches!(result.op, Op::GadgetResult(slot) if slot != 0)
+                && result
+                    .inputs
+                    .first()
+                    .is_some_and(|input| input.index() == zero_test_node)
+                && self.consumers[result_idx] != 0
+        })
+    }
+
+    /// Every site of `reveal_plan` paired with its zero test, plus the single source plan all
+    /// those zero tests belong to. `None` if the batch is empty, if any site fails [`Self::pair_for`],
+    /// or if the zero tests are spread over more than one plan.
+    fn pairs_for_plan(&self, reveal_plan: &BatchPlan) -> Option<(usize, Vec<ZeroTestRevealPair>)> {
+        if reveal_plan.sites.is_empty() {
+            return None;
+        }
+        let mut pairs = Vec::with_capacity(reveal_plan.sites.len());
+        let mut source_plan_idx = None;
+        for &(reveal_site, reveal_node) in &reveal_plan.sites {
+            let pair = self.pair_for(reveal_site, reveal_node)?;
+            let this_source_plan = self.site_plan[pair.zero_test_site];
+            if this_source_plan == usize::MAX
+                || source_plan_idx.is_some_and(|idx| idx != this_source_plan)
+            {
+                return None;
+            }
+            source_plan_idx = Some(this_source_plan);
+            pairs.push(pair);
+        }
+        Some((source_plan_idx?, pairs))
+    }
+}
+
+/// Whether `source_plan` is exactly the `IsZero` batch covered by `pairs` - same domain, same
+/// kind, and a one-to-one match between its sites and the pairs' zero tests.
+fn source_plan_fully_covered(source_plan: &BatchPlan, pairs: &[ZeroTestRevealPair]) -> bool {
+    source_plan.domain == Domain::Shared
+        && source_plan.kind == GadgetKind::IsZero
+        && source_plan.sites.len() == pairs.len()
+        && source_plan.sites.iter().all(|&(site_id, _)| {
+            pairs
+                .iter()
+                .filter(|pair| pair.zero_test_site == site_id)
+                .count()
+                == 1
+        })
+}
+
 /// Finds whole scheduler batches that can be replaced by the circuit-preserving Rep3 shortcut.
 /// Staying at whole-batch granularity is intentionally conservative: a mixed Reveal batch or an
 /// `IsZero` batch with even one non-revealed result continues through the ordinary gadget paths.
-#[allow(
-    clippy::too_many_lines,
-    reason = "a single sequential fusion-candidate scan; splitting it would not improve clarity"
-)]
 fn plan_zero_test_reveal_fusions(
     graph: &Graph,
     domains: &[Domain],
     plans: &[BatchPlan],
 ) -> Vec<ZeroTestRevealPlan> {
-    let nodes = graph.nodes();
-    let sites = graph.gadget_sites();
-    let mut consumers = vec![0usize; nodes.len()];
-    for node in nodes {
-        for input in &node.inputs {
-            consumers[input.index()] += 1;
-        }
-    }
-    let mut site_plan = vec![usize::MAX; sites.len()];
-    for (plan_idx, plan) in plans.iter().enumerate() {
-        for &(site_id, _) in &plan.sites {
-            site_plan[site_id] = plan_idx;
-        }
-    }
-
+    let scan = FusionScan::new(graph, domains, plans);
     let mut claimed_source = vec![false; plans.len()];
     let mut fusions = Vec::new();
     for (reveal_plan_idx, reveal_plan) in plans.iter().enumerate() {
@@ -151,81 +251,11 @@ fn plan_zero_test_reveal_fusions(
         {
             continue;
         }
-
-        let mut pairs = Vec::with_capacity(reveal_plan.sites.len());
-        let mut source_plan_idx = None;
-        let mut valid = !reveal_plan.sites.is_empty();
-        for &(reveal_site, reveal_node) in &reveal_plan.sites {
-            let Some(&zero_test_result) = nodes[reveal_node].inputs.first() else {
-                valid = false;
-                break;
-            };
-            if nodes[reveal_node].inputs.len() != 1
-                || !matches!(nodes[zero_test_result.index()].op, Op::GadgetResult(0))
-                || consumers[zero_test_result.index()] != 1
-            {
-                valid = false;
-                break;
-            }
-            let zero_test_node = nodes[zero_test_result.index()].inputs[0].index();
-            let Op::Gadget(zero_test_site_id) = nodes[zero_test_node].op else {
-                valid = false;
-                break;
-            };
-            let zero_test_site = zero_test_site_id.index();
-            if sites[zero_test_site].kind != GadgetKind::IsZero {
-                valid = false;
-                break;
-            }
-            // The fused service runs at the Reveal batch's anchor instead of the original
-            // zero-test anchor. Slot 0 is safe to bypass because its sole computational reader is
-            // this Reveal; the `inv` helper result must be witness-only, otherwise an earlier
-            // reader could observe its slot before the fused service fills it.
-            let other_result_has_reader = nodes.iter().enumerate().any(|(result_idx, result)| {
-                matches!(result.op, Op::GadgetResult(slot) if slot != 0)
-                    && result
-                        .inputs
-                        .first()
-                        .is_some_and(|input| input.index() == zero_test_node)
-                    && consumers[result_idx] != 0
-            });
-            if domains[zero_test_node] != Domain::Shared
-                || nodes[zero_test_node].inputs.len() != 1
-                || other_result_has_reader
-            {
-                valid = false;
-                break;
-            }
-            let this_source_plan = site_plan[zero_test_site];
-            if this_source_plan == usize::MAX
-                || source_plan_idx.is_some_and(|idx| idx != this_source_plan)
-            {
-                valid = false;
-                break;
-            }
-            source_plan_idx = Some(this_source_plan);
-            pairs.push(ZeroTestRevealPair {
-                zero_test_site,
-                zero_test_node,
-                reveal_site,
-            });
-        }
-        let Some(source_plan_idx) = source_plan_idx else {
+        let Some((source_plan_idx, pairs)) = scan.pairs_for_plan(reveal_plan) else {
             continue;
         };
-        let source_plan = &plans[source_plan_idx];
-        if !valid
-            || claimed_source[source_plan_idx]
-            || source_plan.domain != Domain::Shared
-            || source_plan.kind != GadgetKind::IsZero
-            || source_plan.sites.len() != pairs.len()
-            || !source_plan.sites.iter().all(|&(site_id, _)| {
-                pairs
-                    .iter()
-                    .filter(|pair| pair.zero_test_site == site_id)
-                    .count()
-                    == 1
-            })
+        if claimed_source[source_plan_idx]
+            || !source_plan_fully_covered(&plans[source_plan_idx], &pairs)
         {
             continue;
         }
