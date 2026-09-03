@@ -465,7 +465,7 @@ impl Machine {
                 Bank::Public => driver.promote(public[input.slot]),
                 Bank::Shared => shared[input.slot].clone(),
                 Bank::Local => unreachable!(
-                    "Graph::verify and codegen both reject an un-reshared MulLocal feeding a site"
+                    "codegen rejects an un-reshared MulLocal feeding a site"
                 ),
             })
             .collect();

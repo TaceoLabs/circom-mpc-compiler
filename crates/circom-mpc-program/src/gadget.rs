@@ -86,9 +86,9 @@ pub enum GadgetKind {
 }
 
 impl GadgetKind {
-    /// How many result slots (`num_outputs + num_intermediates`) this gadget produces. Every kind
-    /// has a closed form independent of its own implementation - the compiler's `Graph::verify`
-    /// and `frontend/inline.rs` cross-check it against the circom-derived count from
+    /// How many result slots (outputs plus intermediates) this gadget produces. Every kind has a
+    /// closed form independent of its own implementation - the compiler's `frontend/inline.rs`
+    /// cross-checks it against the circom-derived count from
     /// `frontend/mod.rs::compute_signal_spans`, so a trace-layout mistake is a compile-time error
     /// instead of a silently wrong witness.
     #[must_use]

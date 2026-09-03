@@ -99,7 +99,7 @@ pub(crate) struct GadgetInstance {
     pub(crate) num_outputs: usize,
     pub(crate) num_intermediates: usize,
     /// Whether this instance is wrapped in `TACEO_PRECOMPUTATION_Poseidon2` - see
-    /// `GadgetSite::precomputed`.
+    /// `ir::GadgetSite::precomputed`.
     pub(crate) precomputed: bool,
 }
 

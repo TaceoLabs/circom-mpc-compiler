@@ -1,4 +1,4 @@
-//! Placement analysis for gadget batches, shared by codegen and `Graph::mpc_summary`.
+//! Placement analysis for gadget batches, used by codegen.
 //! Sites normally coalesce by `(kind, network stage, domain, precomputed)`. A valid but
 //! non-level-sorted graph may place an early result consumer before a later independent site; in
 //! that case the active batch is closed and a new one is started instead of rejecting the

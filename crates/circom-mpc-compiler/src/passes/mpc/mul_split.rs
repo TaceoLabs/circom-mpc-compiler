@@ -6,7 +6,7 @@
 //! called once per secret product (`local_mul` then `reshare`). `round_schedule`, the next pass in
 //! the pipeline, batches these singleton rounds into fewer, wider ones.
 
-use crate::ir::{Graph, Node, Op, RewriteAction, RoundDesc, RoundId, ValueId};
+use crate::ir::{Graph, Node, Op, RewriteAction, RoundId, ValueId};
 
 use super::domain::{compute_domains, Domain};
 
@@ -29,7 +29,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         })
         .collect();
 
-    let mut rounds: Vec<RoundDesc> = Vec::new();
+    let mut num_rounds = 0;
     let changed = graph.rewrite(|id, node, emitted| {
         if !should_split[id.index()] {
             return RewriteAction::Keep;
@@ -37,8 +37,8 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         // `emitted.len()` is the new-space id the next emitted node will get.
         let mul_local_id = ValueId::new(emitted.len());
         let round_new_id = ValueId::new(emitted.len() + 1);
-        let round_id = RoundId::new(rounds.len());
-        rounds.push(RoundDesc { len: 1 });
+        let round_id = RoundId::new(num_rounds);
+        num_rounds += 1;
         RewriteAction::EmitMany(vec![
             Node::new(Op::MulLocal, node.inputs.clone()),
             Node::new(Op::Round(round_id), vec![mul_local_id]),
@@ -46,7 +46,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
         ])
     });
 
-    graph.set_rounds(rounds);
+    graph.set_num_rounds(num_rounds);
     Ok(changed)
 }
 
@@ -54,22 +54,19 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
 mod tests {
     use ark_bn254::Fr;
 
-    use crate::ir::{Node, Op, SignalIdx, ValueId};
+    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
 
     use super::*;
 
     fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
-        Graph::from_parts(
+        Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), output)],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            2,
-            1,
-            3,
-        )
+            outputs: vec![(SignalIdx::new(0), output)],
+            num_inputs: 2,
+            num_outputs: 1,
+            num_signals: 3,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -87,8 +84,8 @@ mod tests {
         assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::MulLocal));
         assert!(matches!(graph.nodes()[ValueId::new(3).index()].op, Op::Round(_)));
         assert!(matches!(graph.nodes()[ValueId::new(4).index()].op, Op::RoundResult(0)));
-        assert_eq!(graph.rounds().len(), 1);
-        assert_eq!(graph.rounds()[0].len, 1);
+        assert_eq!(graph.num_rounds(), 1);
+        assert_eq!(graph.round_slots(), vec![1]);
     }
 
     #[test]
@@ -104,6 +101,6 @@ mod tests {
         assert!(!changed);
         assert_eq!(graph.len(), 3);
         assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::Mul));
-        assert!(graph.rounds().is_empty());
+        assert_eq!(graph.num_rounds(), 0);
     }
 }

@@ -6,7 +6,7 @@
 
 use ark_bn254::Fr;
 
-pub use circom_mpc_program::GadgetKind;
+pub(crate) use circom_mpc_program::GadgetKind;
 
 /// Identifies a node in a [`Graph`] and, equivalently, the single value it produces.
 ///
@@ -68,31 +68,15 @@ impl RoundId {
     }
 }
 
-/// One batched MPC network round (a reshare): every [`Op::MulLocal`] value that feeds this round's
-/// [`Op::Round`] node reshares in the same message (`len` slots, one [`Op::RoundResult`] each).
-#[derive(Debug, Clone)]
-pub(crate) struct RoundDesc {
-    pub(crate) len: usize,
-}
-
 /// One recognized-gadget component instance: the shape the runtime must supply a trace for.
 #[derive(Debug, Clone)]
-pub struct GadgetSite {
+pub(crate) struct GadgetSite {
     /// Which gadget this site runs, and (for the parameterized ones) its width.
-    pub kind: GadgetKind,
-    /// The gadget template's concrete header (parameterized name), e.g. `"Poseidon2_3"` -
-    /// diagnostics only.
-    pub header: String,
-    /// Number of input signals the site's component reads.
-    pub num_inputs: usize,
-    /// Number of output signals the site's component produces.
-    pub num_outputs: usize,
-    /// Number of witness-live intermediate signals in the site's subtree beyond its outputs.
-    pub num_intermediates: usize,
+    pub(crate) kind: GadgetKind,
     /// Whether this site is wrapped in `TACEO_PRECOMPUTATION_Poseidon2`: its trace comes from the
     /// host, not from `vm::gadgets`. Only ever true for a [`GadgetKind::Poseidon2`] kind -
-    /// `Graph::verify` rejects any other combination.
-    pub precomputed: bool,
+    /// `frontend::build` rejects any other combination.
+    pub(crate) precomputed: bool,
 }
 
 /// One operation of the value graph. Every variant produces exactly one value.
@@ -115,9 +99,8 @@ pub(crate) enum Op {
     Mul,
     /// Invokes a gadget site (see [`GadgetSite`]) - a std-lib gadget (`Num2Bits`,
     /// `IsZero`, `AliasCheck`, or an unwrapped `Poseidon2`) serviced by `vm::gadgets` rather than
-    /// compiled. Arity equals the referenced site's `num_inputs`, which is validated when the
-    /// graph invariants are checked. This node's own value is never read directly, only through
-    /// [`Op::GadgetResult`] nodes that reference it.
+    /// compiled. Arity equals the wrapped component's input count. This node's own value is never
+    /// read directly, only through [`Op::GadgetResult`] nodes that reference it.
     Gadget(GadgetId),
     /// Reads one result slot of the [`Op::Gadget`] node that is this node's sole input. Slot
     /// `0..num_outputs` are the wrapped component's outputs; `num_outputs..` are its subtree's
@@ -127,10 +110,9 @@ pub(crate) enum Op {
     /// message (rep3's `local_mul_vec`). Not a valid share on its own - only a rep3 additive-3
     /// sharing (still sound to add and scale) until reshared via the [`Op::Round`] it feeds.
     MulLocal,
-    /// One batched network round: arity equals the round's recorded length, which is validated when
-    /// the graph invariants are checked, with one input per [`Op::MulLocal`] value being reshared
-    /// together. This node's own value is never read directly, only through the
-    /// [`Op::RoundResult`] nodes that reference it.
+    /// One batched network round: one input per [`Op::MulLocal`] value being reshared together.
+    /// This node's own value is never read directly, only through the [`Op::RoundResult`] nodes
+    /// that reference it.
     Round(RoundId),
     /// Reads one slot of the [`Op::Round`] node that is this node's sole input - the reshared
     /// (`Shared`-domain) result of that slot's local product.
@@ -139,8 +121,8 @@ pub(crate) enum Op {
 
 impl Op {
     /// The number of operands this op reads, where that is context-free. `None` for
-    /// [`Op::Gadget`] (arity is its site's `num_inputs`) and [`Op::Round`] (its round's `len`);
-    /// only [`Graph::verify`] can check those, since it alone has the tables.
+    /// [`Op::Gadget`] (arity is its wrapped component's input count) and [`Op::Round`] (arity is
+    /// the number of values reshared together).
     pub(crate) fn fixed_arity(&self) -> Option<usize> {
         match self {
             Op::Input(_) | Op::Constant(_) => Some(0),
@@ -160,11 +142,7 @@ impl Op {
     pub(crate) fn is_pure(&self) -> bool {
         !matches!(
             self,
-            Op::Gadget(_)
-                | Op::GadgetResult(_)
-                | Op::MulLocal
-                | Op::Round(_)
-                | Op::RoundResult(_)
+            Op::Gadget(_) | Op::GadgetResult(_) | Op::MulLocal | Op::Round(_) | Op::RoundResult(_)
         )
     }
 }
@@ -230,12 +208,9 @@ pub struct Graph {
     /// unwrapped `Poseidon2` if enabled, or a `TACEO_PRECOMPUTATION_Poseidon2` site - in the order
     /// encountered, which *is* the trace order the runtime must supply results in.
     gadget_sites: Vec<GadgetSite>,
-    /// Every batched MPC network round, indexed by [`RoundId`]. Empty until `passes::mpc` lowers
-    /// the graph.
-    rounds: Vec<RoundDesc>,
-    /// Whether MPC lowering has run. [`Graph::verify`] rejects MPC ops in a not-yet-lowered graph;
-    /// pass unit tests build plain graphs by hand without running the whole pipeline.
-    lowered: bool,
+    /// How many batched MPC network rounds the graph has - one per [`RoundId`]. Zero until
+    /// `passes::mpc` lowers the graph.
+    num_rounds: usize,
     /// One entry per final witness position, giving the circuit signal index that lands there.
     pub(crate) signal_to_witness: Vec<usize>,
     /// The circuit's declared inputs, in declaration order.
@@ -255,38 +230,57 @@ pub struct Graph {
     num_signals: usize,
 }
 
-impl Graph {
-    /// Builds a fresh, not-yet-lowered ([`Stage::Plain`], no rounds) graph - the frontend's output,
-    /// and what pass-level unit tests build by hand to exercise a single pass in isolation.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a plain positional constructor for tests and the frontend; grouping the fields into a struct would only add ceremony at every call site"
-    )]
-    pub(crate) fn from_parts(
-        nodes: Vec<Node>,
-        outputs: Vec<(SignalIdx, ValueId)>,
-        gadget_sites: Vec<GadgetSite>,
-        signal_to_witness: Vec<usize>,
-        input_list: InputList,
-        public_inputs: Vec<String>,
-        num_inputs: usize,
-        num_outputs: usize,
-        num_signals: usize,
-    ) -> Self {
+/// The pieces a fresh, not-yet-lowered [`Graph`] is built from. Defaults to an empty graph, so
+/// call sites only set the fields they care about.
+#[derive(Default)]
+pub(crate) struct GraphParts {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) outputs: Vec<(SignalIdx, ValueId)>,
+    pub(crate) gadget_sites: Vec<GadgetSite>,
+    pub(crate) signal_to_witness: Vec<usize>,
+    pub(crate) input_list: InputList,
+    pub(crate) public_inputs: Vec<String>,
+    pub(crate) mpc_public_inputs: Vec<String>,
+    pub(crate) num_inputs: usize,
+    pub(crate) num_outputs: usize,
+    pub(crate) num_signals: usize,
+}
+
+impl From<GraphParts> for Graph {
+    fn from(parts: GraphParts) -> Self {
+        let GraphParts {
+            nodes,
+            outputs,
+            gadget_sites,
+            signal_to_witness,
+            input_list,
+            public_inputs,
+            num_inputs,
+            num_outputs,
+            num_signals,
+            mpc_public_inputs,
+        } = parts;
         Self {
             nodes,
             outputs,
             gadget_sites,
-            rounds: Vec::new(),
-            lowered: false,
+            num_rounds: 0,
             signal_to_witness,
             input_list,
             public_inputs,
-            mpc_public_inputs: Vec::new(),
+            mpc_public_inputs,
             num_inputs,
             num_outputs,
             num_signals,
         }
+    }
+}
+
+impl Graph {
+    /// Builds a fresh, not-yet-lowered (no rounds) graph - the frontend's output, and what
+    /// pass-level unit tests build by hand to exercise a single pass in isolation.
+    pub(crate) fn from_parts(parts: GraphParts) -> Self {
+        Self::from(parts)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -299,8 +293,7 @@ impl Graph {
 
     /// Every gadget site in this graph, in inlining order - the order the runtime must
     /// supply traces in.
-    #[must_use]
-    pub fn gadget_sites(&self) -> &[GadgetSite] {
+    pub(crate) fn gadget_sites(&self) -> &[GadgetSite] {
         &self.gadget_sites
     }
 
@@ -351,21 +344,26 @@ impl Graph {
         self.outputs.len() != before
     }
 
-    /// Every batched MPC network round, indexed by [`RoundId`]. Empty before `passes::mpc` runs.
-    pub(crate) fn rounds(&self) -> &[RoundDesc] {
-        &self.rounds
+    /// How many batched MPC network rounds the graph has. Zero before `passes::mpc` runs.
+    pub(crate) fn num_rounds(&self) -> usize {
+        self.num_rounds
     }
 
-    /// Installs a fresh round table, replacing whatever was there (`mul_split` installs the
-    /// one-round-per-product table, `round_schedule` replaces it with the batched one).
-    pub(crate) fn set_rounds(&mut self, rounds: Vec<RoundDesc>) {
-        self.rounds = rounds;
+    /// Records the round count, replacing whatever was there (`mul_split` counts one round per
+    /// product, `round_schedule` replaces that with the batched count).
+    pub(crate) fn set_num_rounds(&mut self, num_rounds: usize) {
+        self.num_rounds = num_rounds;
     }
 
-    /// Marks the graph as MPC-lowered. Called once by the `PassManager`, right before its
-    /// lowering-stage passes run.
-    pub(crate) fn mark_lowered(&mut self) {
-        self.lowered = true;
+    /// How many values each [`Op::Round`] node reshares, in graph order - what the MPC lowering
+    /// tests assert on.
+    #[cfg(test)]
+    pub(crate) fn round_slots(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .filter(|node| matches!(node.op, Op::Round(_)))
+            .map(|node| node.inputs.len())
+            .collect()
     }
 
     /// Replaces the whole node list at once, remapping `outputs` through `remap` (`None` for a
@@ -391,8 +389,7 @@ impl Graph {
         // site whose results are all witness-dead has zero references at this point). Codegen
         // resolves each site's destination slots from the fixed, in-order `gadget_sites`
         // table, so silently dropping a "dead" site would desynchronize every later same-kind
-        // site's slot range - and `Graph::verify` requires exactly one `Op::Gadget` node per
-        // site regardless.
+        // site's slot range.
         for (i, node) in self.nodes.iter().enumerate() {
             if matches!(node.op, Op::Gadget(_)) {
                 keep[i] = true;
@@ -433,174 +430,6 @@ impl Graph {
         );
         self.nodes = new_nodes;
         remap
-    }
-
-    /// Checks the graph's structural invariants:
-    /// - every node's inputs reference strictly earlier nodes (topological order),
-    /// - every node has exactly as many inputs as its op's arity,
-    /// - every `GadgetResult`/`RoundResult` references a real slot of a real producer,
-    /// - every gadget site has exactly one [`Op::Gadget`] node,
-    /// - no [`Op::Gadget`] reads an un-reshared [`Op::MulLocal`] value,
-    /// - MPC-lowering ops appear only once the graph is lowered,
-    /// - every output references a node that exists.
-    ///
-    /// Called once after the frontend builds the graph and, in debug builds, between every pass.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "a single sequential validation pass over every graph invariant; splitting it would not improve clarity"
-    )]
-    pub(crate) fn verify(&self) -> eyre::Result<()> {
-        for (i, node) in self.nodes.iter().enumerate() {
-            match &node.op {
-                Op::Gadget(site_id) => {
-                    let site = self.gadget_sites.get(site_id.index()).ok_or_else(|| {
-                        eyre::eyre!(
-                            "node {i} references gadget site {} which does not exist",
-                            site_id.index()
-                        )
-                    })?;
-                    if node.inputs.len() != site.num_inputs {
-                        eyre::bail!(
-                            "node {i} (Gadget({})) has {} inputs, expected {} (site num_inputs)",
-                            site_id.index(),
-                            node.inputs.len(),
-                            site.num_inputs
-                        );
-                    }
-                }
-                Op::Round(round_id) => {
-                    let round = self.rounds.get(round_id.index()).ok_or_else(|| {
-                        eyre::eyre!(
-                            "node {i} references round {} which does not exist",
-                            round_id.index()
-                        )
-                    })?;
-                    if node.inputs.len() != round.len {
-                        eyre::bail!(
-                            "node {i} (Round({})) has {} inputs, expected {} (round len)",
-                            round_id.index(),
-                            node.inputs.len(),
-                            round.len
-                        );
-                    }
-                    // Every slot's mask comes from the local product that feeds it - a round with
-                    // no slots would have nothing to reshare.
-                    if round.len == 0 {
-                        eyre::bail!("round {} has no slots", round_id.index());
-                    }
-                }
-                op => {
-                    let arity = op.fixed_arity().expect("non-table ops have a fixed arity");
-                    if node.inputs.len() != arity {
-                        eyre::bail!(
-                            "node {i} ({:?}) has {} inputs, expected {arity}",
-                            node.op,
-                            node.inputs.len(),
-                        );
-                    }
-                }
-            }
-            if let Op::GadgetResult(slot) = &node.op {
-                let referenced = &self.nodes[node.inputs[0].index()];
-                let Op::Gadget(site_id) = &referenced.op else {
-                    eyre::bail!(
-                        "node {i} (GadgetResult) does not reference an Gadget node"
-                    );
-                };
-                let site = &self.gadget_sites[site_id.index()];
-                let total_results = site.num_outputs + site.num_intermediates;
-                if *slot as usize >= total_results {
-                    eyre::bail!(
-                        "node {i} (GadgetResult({slot})) references out-of-range slot \
-                         (site has {total_results} results)"
-                    );
-                }
-            }
-            // A gadget gadget needs a genuine share. `Op::MulLocal` is the only producer of
-            // a `Local` (un-reshared additive-3) value, so this is a purely syntactic check - no
-            // domain analysis needed - and it is the structural counterpart of the same rejection
-            // `vm::codegen` makes when resolving a site's operand banks.
-            if let Op::Gadget(site_id) = &node.op {
-                for input in &node.inputs {
-                    if matches!(self.nodes[input.index()].op, Op::MulLocal) {
-                        eyre::bail!(
-                            "node {i} (Gadget({})) reads value {} which is an un-reshared \
-                             MulLocal - a gadget gadget needs a genuine share",
-                            site_id.index(),
-                            input.index()
-                        );
-                    }
-                }
-            }
-            if let Op::RoundResult(slot) = &node.op {
-                let referenced = &self.nodes[node.inputs[0].index()];
-                let Op::Round(round_id) = &referenced.op else {
-                    eyre::bail!("node {i} (RoundResult) does not reference a Round node");
-                };
-                let round = &self.rounds[round_id.index()];
-                if *slot as usize >= round.len {
-                    eyre::bail!(
-                        "node {i} (RoundResult({slot})) references out-of-range slot \
-                         (round has {} slots)",
-                        round.len
-                    );
-                }
-            }
-            if !self.lowered && matches!(node.op, Op::MulLocal | Op::Round(_) | Op::RoundResult(_))
-            {
-                eyre::bail!(
-                    "node {i} ({:?}) is an MPC-lowering op but the graph is not lowered",
-                    node.op
-                );
-            }
-            for input in &node.inputs {
-                if input.index() >= i {
-                    eyre::bail!(
-                        "node {i} ({:?}) references value {} which is not defined earlier",
-                        node.op,
-                        input.index()
-                    );
-                }
-            }
-        }
-        // Exactly one `Op::Gadget` node per site. Several things already assume this without
-        // checking it: `vm::codegen` groups sites into batches and reserves one contiguous result
-        // range per site, and `gc` roots every `Gadget` node so a "dead" site can't shift a
-        // later same-kind site's slot range. Two nodes for one site would silently service it twice
-        // and desynchronize both.
-        let mut nodes_per_site = vec![0usize; self.gadget_sites.len()];
-        for node in &self.nodes {
-            if let Op::Gadget(site_id) = &node.op {
-                nodes_per_site[site_id.index()] += 1;
-            }
-        }
-        for (site, count) in nodes_per_site.iter().enumerate() {
-            if *count != 1 {
-                eyre::bail!(
-                    "gadget site {site} is referenced by {count} Op::Gadget nodes, \
-                     expected exactly 1"
-                );
-            }
-        }
-        for (signal, value) in &self.outputs {
-            if value.index() >= self.nodes.len() {
-                eyre::bail!(
-                    "output signal {} references non-existent value {}",
-                    signal.index(),
-                    value.index()
-                );
-            }
-        }
-        for (i, site) in self.gadget_sites.iter().enumerate() {
-            if site.precomputed && !matches!(site.kind, GadgetKind::Poseidon2 { .. }) {
-                eyre::bail!(
-                    "gadget site {i} ({:?}) is marked precomputed but only Poseidon2 can be \
-                     host-precomputed",
-                    site.kind
-                );
-            }
-        }
-        Ok(())
     }
 
     /// Rewrites the graph node-by-node, in original order, driving each pass's transformation
@@ -700,153 +529,15 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let outputs = vec![(SignalIdx::new(0), ValueId::new(2))];
-        Graph::from_parts(nodes, outputs, vec![], vec![0, 1], vec![], vec![], 1, 1, 2)
-    }
-
-    #[test]
-    fn verify_accepts_well_formed_graph() {
-        sample_graph()
-            .verify()
-            .expect("sample_graph is well-formed");
-    }
-
-    fn iszero_site() -> GadgetSite {
-        GadgetSite {
-            kind: GadgetKind::IsZero,
-            header: "IsZero_0".to_owned(),
+        Graph::from_parts(GraphParts {
+            nodes,
+            outputs,
+            signal_to_witness: vec![0, 1],
             num_inputs: 1,
             num_outputs: 1,
-            num_intermediates: 1,
-            precomputed: false,
-        }
-    }
-
-    /// Two `Op::Gadget` nodes for one site would service it twice and desynchronize every later
-    /// same-kind site's reserved result range in `vm::codegen`.
-    #[test]
-    fn verify_rejects_duplicate_precompute_nodes_for_one_site() {
-        let nodes = vec![
-            Node::new(Op::Input(SignalIdx::new(1)), vec![]),
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ),
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ),
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]),
-        ];
-        let outputs = vec![(SignalIdx::new(0), ValueId::new(3))];
-        let graph = Graph::from_parts(
-            nodes,
-            outputs,
-            vec![iszero_site()],
-            vec![],
-            vec![],
-            vec![],
-            1,
-            1,
-            2,
-        );
-        let err = graph
-            .verify()
-            .expect_err("graph is ill-formed")
-            .to_string();
-        assert!(
-            err.contains("referenced by 2 Op::Gadget nodes"),
-            "unexpected error: {err}"
-        );
-    }
-
-    /// A site with no `Op::Gadget` node at all is equally broken - `level::site_stages` and
-    /// codegen's grouping both index by `GadgetId` and would have nothing to place.
-    #[test]
-    fn verify_rejects_a_site_with_no_precompute_node() {
-        let nodes = vec![Node::new(Op::Input(SignalIdx::new(1)), vec![])];
-        let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph = Graph::from_parts(
-            nodes,
-            outputs,
-            vec![iszero_site()],
-            vec![],
-            vec![],
-            vec![],
-            1,
-            1,
-            2,
-        );
-        let err = graph
-            .verify()
-            .expect_err("graph is ill-formed")
-            .to_string();
-        assert!(
-            err.contains("referenced by 0 Op::Gadget nodes"),
-            "unexpected error: {err}"
-        );
-    }
-
-    /// A gadget needs a genuine share, not an un-reshared local product.
-    #[test]
-    fn verify_rejects_a_precompute_reading_an_unreshared_mul_local() {
-        let nodes = vec![
-            Node::new(Op::Input(SignalIdx::new(1)), vec![]),
-            Node::new(Op::Input(SignalIdx::new(2)), vec![]),
-            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(2)],
-            ),
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]),
-        ];
-        let outputs = vec![(SignalIdx::new(0), ValueId::new(4))];
-        let mut graph = Graph::from_parts(
-            nodes,
-            outputs,
-            vec![iszero_site()],
-            vec![],
-            vec![],
-            vec![],
-            2,
-            1,
-            3,
-        );
-        // MulLocal is only legal once lowering has started.
-        graph.mark_lowered();
-        let err = graph
-            .verify()
-            .expect_err("graph is ill-formed")
-            .to_string();
-        assert!(
-            err.contains("un-reshared MulLocal"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn verify_rejects_forward_reference() {
-        let nodes = vec![
-            Node::new(Op::Add, vec![ValueId::new(1), ValueId::new(0)]),
-            Node::new(Op::Constant(Fr::from(1u64)), vec![]),
-        ];
-        let outputs = vec![(SignalIdx::new(0), ValueId::new(0))];
-        let graph = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
-        assert!(graph.verify().is_err());
-    }
-
-    #[test]
-    fn verify_rejects_arity_mismatch() {
-        let nodes = vec![Node::new(Op::Constant(Fr::from(1u64)), vec![])];
-        // hand-build a node bypassing Node::new's debug_assert, to exercise the arity check
-        let bad = Node {
-            op: Op::Add,
-            inputs: vec![ValueId::new(0)],
-        };
-        let mut nodes = nodes;
-        nodes.push(bad);
-        let outputs = vec![(SignalIdx::new(0), ValueId::new(1))];
-        let graph = Graph::from_parts(nodes, outputs, vec![], vec![], vec![], vec![], 0, 1, 1);
-        assert!(graph.verify().is_err());
+            num_signals: 2,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -864,6 +555,5 @@ mod tests {
         let (_, out_value) = graph.outputs()[0];
         assert!(out_value.index() < graph.len());
         assert!(matches!(graph.nodes()[out_value.index()].op, Op::Add));
-        graph.verify().expect("gc must leave the graph well-formed");
     }
 }

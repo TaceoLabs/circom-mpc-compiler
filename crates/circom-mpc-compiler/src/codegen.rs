@@ -1,6 +1,6 @@
 //! `Graph` -> `Program`: not a `Pass` (it changes representation, not the IR), called by
 //! `circom_mpc_compiler::compile` once `PassManager` has finished lowering. A single forward walk
-//! over `graph.nodes()` (already topologically ordered - `Graph::verify`) doing three things at
+//! over `graph.nodes()` (already topologically ordered) doing three things at
 //! once: classifying each value's `Domain` (reusing `passes::mpc::domain`, the same analysis
 //! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
 //! emission.
@@ -8,14 +8,14 @@
 use ark_bn254::Fr;
 
 use circom_mpc_program::{
-    BatchIdx, GadgetBatch, Bank, BatchKind, InputBinding, InputIdx, InputSignal, Instruction,
+    Bank, BatchIdx, BatchKind, GadgetBatch, InputBinding, InputIdx, InputSignal, Instruction,
     Opcode, Program, ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot,
     SlotCounts, WitnessSource,
 };
 
 use crate::ir::{GadgetKind, Graph, Op, ValueId};
-use crate::passes::mpc::gadget_schedule::{BatchPlan, plan_gadget_batches};
 use crate::passes::mpc::domain::{Domain, compute_domains, signal_domain};
+use crate::passes::mpc::gadget_schedule::{BatchPlan, plan_gadget_batches};
 
 /// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a
 /// new one, `free` returns a slot to the pool. This is the whole allocator - liveness (computed
@@ -147,8 +147,7 @@ fn plan_zero_test_reveal_fusions(
     let mut claimed_source = vec![false; plans.len()];
     let mut fusions = Vec::new();
     for (reveal_plan_idx, reveal_plan) in plans.iter().enumerate() {
-        if reveal_plan.domain != Domain::Shared
-            || reveal_plan.kind != (GadgetKind::Reveal { n: 1 })
+        if reveal_plan.domain != Domain::Shared || reveal_plan.kind != (GadgetKind::Reveal { n: 1 })
         {
             continue;
         }
@@ -307,11 +306,7 @@ fn select_opcode(op: &Op, da: Domain, db: Domain) -> eyre::Result<(Opcode, Bank,
 /// `TACEO_PRECOMPUTATION_Poseidon2` site to an ordinary one before calling this, since the host has
 /// nothing to precompute for it; `precomputed && domain != Shared` reaching here is their bug, not
 /// the circuit's.
-fn gadget_result_bank(
-    kind: GadgetKind,
-    domain: Domain,
-    precomputed: bool,
-) -> eyre::Result<Bank> {
+fn gadget_result_bank(kind: GadgetKind, domain: Domain, precomputed: bool) -> eyre::Result<Bank> {
     if domain == Domain::Local {
         eyre::bail!(
             "codegen: a gadget site reads a Local (un-reshared MulLocal) value - it must \
@@ -352,7 +347,7 @@ fn gadget_result_bank(
     clippy::too_many_lines,
     reason = "a single forward walk over the graph doing domain classification, slot allocation, and instruction emission at once; splitting it would not improve clarity"
 )]
-pub fn compile(graph: &Graph) -> eyre::Result<Program> {
+pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
     let nodes = graph.nodes();
     let domain = compute_domains(graph);
     let mut last_use = compute_last_use(graph);
@@ -437,7 +432,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
         }
     }
 
-    // Every site's *surviving* result slots: `passes::dead_signals` (run before `gc`) has already
+    // Every site's *surviving* result slots: `passes::dead_code` (run before `gc`) has already
     // dropped the `outputs` binding for every witness-dead result, and `gc` then deleted the
     // now-unreferenced `Op::GadgetResult` nodes - so a site's reserved region only needs to be
     // as wide as what's left, not its full `num_outputs + num_intermediates` capacity. On a
@@ -451,7 +446,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     for (i, node) in nodes.iter().enumerate() {
         if let Op::GadgetResult(k) = &node.op {
             let Op::Gadget(site_id) = &nodes[node.inputs[0].index()].op else {
-                unreachable!("Graph::verify guarantees GadgetResult's input is Gadget");
+                unreachable!("a GadgetResult's input is always its Gadget node");
             };
             live_slots[site_id.index()].push(*k);
             live_nodes[site_id.index()].push(i);
@@ -460,7 +455,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     debug_assert!(
         live_slots.iter().all(|s| s.windows(2).all(|w| w[0] < w[1])),
         "a site's surviving GadgetResult nodes must stay in ascending slot order - gc and \
-         dead_signals never reorder nodes, only drop them - since the flat, site-contiguous \
+         dead_code never reorder nodes, only drop them - since the flat, site-contiguous \
          request list below depends on it"
     );
 
@@ -563,7 +558,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
             len: 0,
             result_start: 0
         };
-        graph.rounds().len()
+        graph.num_rounds()
     ];
     let mut round_operands: Vec<Slot> = Vec::new();
     let mut round_results: Vec<Slot> = Vec::new();
@@ -727,9 +722,7 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
             }
             Op::GadgetResult(_) => {
                 let Op::Gadget(site_id) = &nodes[node.inputs[0].index()].op else {
-                    unreachable!(
-                        "Graph::verify guarantees GadgetResult's input is Gadget"
-                    );
+                    unreachable!("a GadgetResult's input is always its Gadget node");
                 };
                 let base = site_result_base[site_id.index()];
                 let phys = result_phys[i].expect(
@@ -876,17 +869,15 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                         ),
                     });
                 }
-                result_offsets.push(
-                    u32::try_from(result_requests.len()).expect("too many gadget results"),
-                );
+                result_offsets
+                    .push(u32::try_from(result_requests.len()).expect("too many gadget results"));
             }
             GadgetBatch {
                 kind: if plan.precomputed {
                     let GadgetKind::Poseidon2 { t } = plan.kind else {
                         unreachable!(
                             "a precomputed plan is always Poseidon2 - the frontend never marks \
-                             any other kind precomputed (build.rs) and Graph::verify rejects one \
-                             that slips through, got {:?}",
+                             any other kind precomputed (build.rs), got {:?}",
                             plan.kind
                         );
                     };
@@ -983,7 +974,7 @@ mod tests {
     use ark_bn254::Fr;
 
     use super::*;
-    use crate::ir::{GadgetId, GadgetKind, GadgetSite, Node, SignalIdx};
+    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, SignalIdx};
 
     #[test]
     fn slot_reuse_keeps_peak_width_below_node_count() {
@@ -1005,18 +996,15 @@ mod tests {
             Node::new(Op::Constant(Fr::from(5u64)), vec![]), // 7
             Node::new(Op::Add, vec![ValueId::new(6), ValueId::new(7)]), // 8 (output)
         ];
-        let graph = Graph::from_parts(
+        let graph = Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), ValueId::new(8))],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            0,
-            1,
-            2,
-        );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+            outputs: vec![(SignalIdx::new(0), ValueId::new(8))],
+            num_outputs: 1,
+            num_signals: 2,
+            ..Default::default()
+        });
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert!(
             (program.slots().public as usize) < graph.len(),
             "peak public-bank width ({}) should be well below the node count ({})",
@@ -1037,18 +1025,14 @@ mod tests {
             Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]),
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]),
         ];
-        let mut graph = Graph::from_parts(
+        let graph = Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), ValueId::new(3))],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            2,
-            1,
-            4,
-        );
-        graph.mark_lowered();
+            outputs: vec![(SignalIdx::new(0), ValueId::new(3))],
+            num_inputs: 2,
+            num_outputs: 1,
+            num_signals: 4,
+            ..Default::default()
+        });
         let err = compile(&graph)
             .expect_err("compile should reject a Local value reaching anything but Reshare");
         assert!(err.to_string().contains("Local"), "{err}");
@@ -1059,10 +1043,6 @@ mod tests {
     fn iszero_site() -> GadgetSite {
         GadgetSite {
             kind: GadgetKind::IsZero,
-            header: "IsZero_0".to_owned(),
-            num_inputs: 1,
-            num_outputs: 1,
-            num_intermediates: 1,
             precomputed: false,
         }
     }
@@ -1070,33 +1050,25 @@ mod tests {
     fn reveal_site(n: usize) -> GadgetSite {
         GadgetSite {
             kind: GadgetKind::Reveal { n },
-            header: format!("TACEO_REVEAL_{n}"),
-            num_inputs: n,
-            num_outputs: n,
-            num_intermediates: 0,
             precomputed: false,
         }
     }
 
-    fn lowered_graph(
+    fn graph_with_sites(
         nodes: Vec<Node>,
         outputs: Vec<(SignalIdx, ValueId)>,
         sites: Vec<GadgetSite>,
         num_inputs: usize,
     ) -> Graph {
-        let mut graph = Graph::from_parts(
+        Graph::from_parts(GraphParts {
             nodes,
             outputs,
-            sites,
-            vec![],
-            vec![],
-            vec![],
+            gadget_sites: sites,
             num_inputs,
-            1,
-            num_inputs + 4,
-        );
-        graph.mark_lowered();
-        graph
+            num_outputs: 1,
+            num_signals: num_inputs + 4,
+            ..Default::default()
+        })
     }
 
     /// The batching contract: N independent same-kind sites are **one** driver call, not N.
@@ -1105,25 +1077,20 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 2
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2
             Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(1)],
-            ), // 4
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 4
             Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(5)]), // 6
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(6))],
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 1);
         assert_eq!(program.gadget_batches()[0].sites, 2);
         assert_eq!(
@@ -1140,19 +1107,13 @@ mod tests {
     fn sole_shared_iszero_output_revealed_once_is_fused_at_codegen() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1: IsZero
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1: IsZero
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2: out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(1)]), // 3: inv
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(2)],
-            ), // 4: Reveal
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 4: Reveal
             Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5: revealed
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(5)),
@@ -1162,14 +1123,19 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
         assert_eq!(batch.kind, BatchKind::IsZeroReveal);
         assert_eq!(batch.sites, 1);
         assert_eq!(
-            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            batch
+                .result_requests
+                .iter()
+                .map(|r| r.get())
+                .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         assert_eq!(
@@ -1187,30 +1153,18 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 2: IsZero(x)
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: IsZero(x)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3: x.out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(2)]), // 4: x.inv
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(1)],
-            ), // 5: IsZero(y)
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 5: IsZero(y)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6: y.out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(5)]), // 7: y.inv
-            Node::new(
-                Op::Gadget(GadgetId::new(2)),
-                vec![ValueId::new(3)],
-            ), // 8: Reveal(x.out)
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(3)]), // 8: Reveal(x.out)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
-            Node::new(
-                Op::Gadget(GadgetId::new(3)),
-                vec![ValueId::new(6)],
-            ), // 10: Reveal(y.out)
+            Node::new(Op::Gadget(GadgetId::new(3)), vec![ValueId::new(6)]), // 10: Reveal(y.out)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(10)]), // 11
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(9)),
@@ -1221,7 +1175,8 @@ mod tests {
             vec![iszero_site(), iszero_site(), reveal_site(1), reveal_site(1)],
             2,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
@@ -1229,7 +1184,11 @@ mod tests {
         assert_eq!(batch.sites, 2);
         assert_eq!(batch.result_offsets, vec![0, 3, 6]);
         assert_eq!(
-            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            batch
+                .result_requests
+                .iter()
+                .map(|r| r.get())
+                .collect::<Vec<_>>(),
             vec![0, 1, 2, 0, 1, 2]
         );
     }
@@ -1239,25 +1198,16 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 2: IsZero(x)
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: IsZero(x)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3: x.out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(2)]), // 4: x.inv
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(1)],
-            ), // 5: IsZero(y)
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 5: IsZero(y)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6: y.out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(5)]), // 7: y.inv
-            Node::new(
-                Op::Gadget(GadgetId::new(2)),
-                vec![ValueId::new(3)],
-            ), // 8: Reveal(x.out)
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(3)]), // 8: Reveal(x.out)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(9)),
@@ -1268,7 +1218,8 @@ mod tests {
             vec![iszero_site(), iszero_site(), reveal_site(1)],
             2,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert_eq!(
@@ -1288,19 +1239,13 @@ mod tests {
     fn reveal_consuming_iszero_inverse_is_not_fused() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1: IsZero
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1: IsZero
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2: out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(1)]), // 3: inv
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(3)],
-            ), // 4: Reveal(inv)
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(3)]), // 4: Reveal(inv)
             Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5: revealed inv
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(5)),
@@ -1310,7 +1255,8 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1325,20 +1271,14 @@ mod tests {
     fn iszero_with_an_extra_computational_consumer_is_not_fused() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2: out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(1)]), // 3: inv
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]), // 4: extra reader
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(2)],
-            ), // 5
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 5
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(6)),
@@ -1348,7 +1288,8 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1363,20 +1304,14 @@ mod tests {
     fn iszero_inverse_with_a_computational_consumer_is_not_fused() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2: out
             Node::new(Op::GadgetResult(1), vec![ValueId::new(1)]), // 3: inv
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: inv reader
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(2)],
-            ), // 5
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 5
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(6)),
@@ -1385,7 +1320,8 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1400,19 +1336,13 @@ mod tests {
     fn public_iszero_reveal_path_is_not_fused() {
         let nodes = vec![
             Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0: public x
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
             Node::new(Op::GadgetResult(1), vec![ValueId::new(1)]), // 3
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(2)],
-            ), // 4
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 4
             Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![
                 (SignalIdx::new(0), ValueId::new(5)),
@@ -1421,7 +1351,8 @@ mod tests {
             vec![iszero_site(), reveal_site(1)],
             0,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
@@ -1440,26 +1371,21 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 2: A
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: A
             Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: reads A
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(1)],
-            ), // 5: B
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 5: B
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(6)]), // 7
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(7))],
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(
             program
@@ -1476,27 +1402,22 @@ mod tests {
     fn chained_same_kind_sites_become_two_batches_in_stage_order() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
             // Reading site 0's result forces site 1 into a later stage.
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(0)]), // 3
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(3)],
-            ), // 4
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(3)]), // 4
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]),      // 5
             Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(0)]), // 6
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(6))],
             vec![iszero_site(), iszero_site()],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
         assert_eq!(program.gadget_batches().len(), 2);
         assert!(program.gadget_batches().iter().all(|b| b.sites == 1));
 
@@ -1551,33 +1472,24 @@ mod tests {
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
             // A computed value whose only graph reader is site 0's Gadget node.
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]), // 2
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(2)],
-            ), // 3
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]),      // 4
             // Site 1 is defined later, so the shared batch is anchored past node 3 - the window in
             // which node 2's slot must not be recycled.
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(0)]), // 5
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(5)],
-            ), // 6
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(5)]), // 6
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(6)]),      // 7
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(7)]), // 8
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(8))],
             vec![iszero_site(), iszero_site()],
             2,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
-        assert_eq!(
-            program.gadget_batches().len(),
-            1,
-            "both sites are stage 0"
-        );
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
+        assert_eq!(program.gadget_batches().len(), 1, "both sites are stage 0");
         let batch = &program.gadget_batches()[0];
         let batch_pos = program
             .instructions()
@@ -1591,9 +1503,9 @@ mod tests {
             assert_eq!(input.bank, Bank::Shared);
             let clobbers = program.instructions()[..batch_pos]
                 .iter()
-                .filter(|instr| {
-                    matches!(instr, Instruction::Arith { dst, .. } if *dst == input.slot)
-                })
+                .filter(
+                    |instr| matches!(instr, Instruction::Arith { dst, .. } if *dst == input.slot),
+                )
                 .count();
             assert!(
                 clobbers <= 1,
@@ -1610,63 +1522,59 @@ mod tests {
     fn public_constant_site_input_is_recorded_as_a_public_bank_slot() {
         let nodes = vec![
             Node::new(Op::Constant(Fr::from(7u64)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(2))],
             vec![iszero_site()],
             0,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
         let batch = &program.gadget_batches()[0];
         assert_eq!(batch.input_slots.len(), 1);
         assert_eq!(batch.input_slots[0].bank, Bank::Public);
     }
 
     /// Sparse result slots (some logical slots' `GadgetResult` node pruned by
-    /// `passes::dead_signals` before codegen ever runs) must compact to exactly the surviving
+    /// `passes::dead_code` before codegen ever runs) must compact to exactly the surviving
     /// count, not the site's full reserved capacity - and each survivor must land at its position
     /// *within the survivors*, not at its original logical index.
     #[test]
     fn sparse_result_slots_are_compacted_in_order() {
         // A capacity-3 site (1 output + 2 intermediates) where only logical slots 0 and 2 survive -
-        // slot 1's `GadgetResult` node simply never exists, exactly as `dead_signals` + `gc`
+        // slot 1's `GadgetResult` node simply never exists, exactly as `dead_code` + `gc`
         // would leave it.
         let site = GadgetSite {
             kind: GadgetKind::IsZero,
-            header: "IsZero_0".to_owned(),
-            num_inputs: 1,
-            num_outputs: 1,
-            num_intermediates: 2,
             precomputed: false,
         };
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2: survives
             Node::new(Op::GadgetResult(2), vec![ValueId::new(1)]), // 3: survives
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(3)]), // 4
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(4))],
             vec![site],
             1,
         );
-        let program = compile(&graph).expect("compile should succeed for this well-formed test graph");
+        let program =
+            compile(&graph).expect("compile should succeed for this well-formed test graph");
 
         assert_eq!(program.gadget_batches().len(), 1);
         let batch = &program.gadget_batches()[0];
         assert_eq!(
-            batch.result_requests.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            batch
+                .result_requests
+                .iter()
+                .map(|r| r.get())
+                .collect::<Vec<_>>(),
             vec![0, 2],
             "requests logical slots 0 and 2 only"
         );
@@ -1695,13 +1603,10 @@ mod tests {
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1
             Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]), // 2
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(2)],
-            ), // 3
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(2)]), // 3
             Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
         ];
-        let graph = lowered_graph(
+        let graph = graph_with_sites(
             nodes,
             vec![(SignalIdx::new(0), ValueId::new(4))],
             vec![iszero_site()],

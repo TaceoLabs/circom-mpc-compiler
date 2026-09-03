@@ -228,14 +228,7 @@ fn inline_gadget(
     );
 
     let site_id = GadgetId::new(gadget_sites.len());
-    gadget_sites.push(GadgetSite {
-        kind,
-        header,
-        num_inputs,
-        num_outputs,
-        num_intermediates,
-        precomputed,
-    });
+    gadget_sites.push(GadgetSite { kind, precomputed });
 
     // The site's inputs, in port order. `TemplateOp::SubCmpInput`'s `port` (and `sub_cmp_inputs`'
     // keys) are the wrapped component's own *local signal index*, which - like every template's -
@@ -248,9 +241,7 @@ fn inline_gadget(
         .map(|k| {
             let local_signal = num_outputs + k;
             let value = *sub_cmp_inputs.get(&local_signal).unwrap_or_else(|| {
-                panic!(
-                    "gadget component input signal {local_signal} read before it was provided"
-                )
+                panic!("gadget component input signal {local_signal} read before it was provided")
             });
             outputs.push((SignalIdx::new(signal_offset + local_signal), value));
             value
@@ -264,10 +255,7 @@ fn inline_gadget(
     for slot in 0..(num_outputs + num_intermediates) {
         let result_id = ValueId::new(nodes.len());
         let slot_u32 = u32::try_from(slot).expect("gadget site has more than u32::MAX slots");
-        nodes.push(ir::Node::new(
-            Op::GadgetResult(slot_u32),
-            vec![gadget_id],
-        ));
+        nodes.push(ir::Node::new(Op::GadgetResult(slot_u32), vec![gadget_id]));
         let signal = if slot < num_outputs {
             port_outputs.insert(slot, result_id);
             signal_offset + slot

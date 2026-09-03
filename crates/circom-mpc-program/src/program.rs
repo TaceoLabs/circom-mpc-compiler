@@ -128,8 +128,8 @@ pub struct RoundEntry {
 /// always a share: a circuit may pass a literal, as in
 /// `Poseidon2(4)([value, 0, r, domainSeparator()])` - two of those four fold to
 /// `Op::Constant`, i.e. `Bank::Public`. `Machine::run` promotes a `Public` slot into a share before
-/// handing the batch to the driver. `Bank::Local` never appears - both `Graph::verify` and codegen
-/// reject an un-reshared `MulLocal` reaching a site.
+/// handing the batch to the driver. `Bank::Local` never appears - codegen rejects an un-reshared
+/// `MulLocal` reaching a site.
 ///
 /// Shaped like [`WitnessSource::Slot`], the other place a `(bank, slot)` pair crosses into a side
 /// table rather than an instruction.

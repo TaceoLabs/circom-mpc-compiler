@@ -28,7 +28,7 @@ use crate::ir;
 
 use build::GraphCompiler;
 
-use crate::ir::InputList;
+use crate::ir::{GraphParts, InputList};
 
 /// A template header's total flat signal count: its own declared signals plus every signal of
 /// every subcomponent it transitively instantiates - the contiguous span circom's runtime layout
@@ -126,8 +126,7 @@ fn build_circuit(
     ))
 }
 
-/// Parses `file` all the way down to a flat, verified (but not yet garbage-collected)
-/// [`ir::Graph`]. The caller (`circom_mpc_compiler::parse`) runs `gc`/`verify` on the result.
+/// Parses `file` all the way down to a flat (but not yet garbage-collected) [`ir::Graph`].
 pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::Graph> {
     let program_archive = get_program_archive(file, config)?;
     let public_inputs = program_archive.public_inputs.clone();
@@ -209,17 +208,16 @@ pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::G
         &FxHashMap::default(),
     );
 
-    let mut graph = ir::Graph::from_parts(
+    Ok(ir::Graph::from_parts(GraphParts {
         nodes,
         outputs,
         gadget_sites,
-        circuit.c_producer.witness_to_signal_list,
+        signal_to_witness: circuit.c_producer.witness_to_signal_list,
         input_list,
         public_inputs,
-        main_inputs,
-        main_outputs,
-        circuit.c_producer.total_number_of_signals,
-    );
-    graph.mpc_public_inputs = mpc_public_inputs;
-    Ok(graph)
+        num_inputs: main_inputs,
+        num_outputs: main_outputs,
+        num_signals: circuit.c_producer.total_number_of_signals,
+        mpc_public_inputs,
+    }))
 }

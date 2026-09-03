@@ -55,18 +55,13 @@ impl PassManager {
         }
     }
 
-    /// Runs the classical passes to a fixpoint, then the MPC lowering pipeline once. `graph` must
-    /// already have passed [`Graph::verify`]; this re-verifies after every pass in debug builds so
-    /// a pass that broke an invariant fails loudly and immediately.
+    /// Runs the classical passes to a fixpoint, then the MPC lowering pipeline once.
     pub(crate) fn run(&mut self, graph: &mut Graph) -> eyre::Result<()> {
         for _ in 0..self.max_iterations {
             let mut changed = false;
             for (name, pass) in &self.optimize {
                 let before = graph.len();
                 let pass_changed = pass(graph)?;
-                if cfg!(debug_assertions) {
-                    graph.verify()?;
-                }
                 tracing::debug!(
                     "pass {name}: {before} -> {} nodes ({})",
                     graph.len(),
@@ -79,16 +74,9 @@ impl PassManager {
             }
         }
 
-        // Marked before the lowering passes run, not after: the first of them (mul_split) already
-        // introduces MPC ops, and the debug-build `verify()` below must not mistake that for a
-        // plain graph carrying ops it shouldn't have.
-        graph.mark_lowered();
         for (name, pass) in &self.lower {
             let before = graph.len();
             pass(graph)?;
-            if cfg!(debug_assertions) {
-                graph.verify()?;
-            }
             tracing::debug!("lowering pass {name}: {before} -> {} nodes", graph.len());
         }
         Ok(())

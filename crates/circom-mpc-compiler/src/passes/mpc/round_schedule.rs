@@ -9,7 +9,7 @@
 //! forward pass cannot express. [`Graph::gc`] sets the precedent for reaching past `rewrite` when
 //! it doesn't fit the shape of the transformation.
 
-use crate::ir::{Graph, Node, Op, RoundDesc, RoundId, ValueId};
+use crate::ir::{Graph, Node, Op, RoundId, ValueId};
 
 use super::domain::compute_domains;
 
@@ -66,7 +66,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     let old_len = nodes.len();
     let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
     let mut new_nodes: Vec<Node> = Vec::with_capacity(old_len);
-    let mut new_rounds: Vec<RoundDesc> = Vec::new();
+    let mut num_rounds = 0;
 
     for (level_nodes, level_rounds) in nodes_by_depth.iter().zip(&rounds_by_depth) {
         for &i in level_nodes {
@@ -80,10 +80,8 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
             new_nodes.push(Node::new(node.op.clone(), remapped_inputs));
         }
         if !level_rounds.is_empty() {
-            let round_id = RoundId::new(new_rounds.len());
-            new_rounds.push(RoundDesc {
-                len: level_rounds.len(),
-            });
+            let round_id = RoundId::new(num_rounds);
+            num_rounds += 1;
             let round_inputs = level_rounds
                 .iter()
                 .map(|(mul_local, _)| {
@@ -101,14 +99,14 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     }
 
     graph.rebuild_nodes(new_nodes, &remap);
-    graph.set_rounds(new_rounds);
+    graph.set_num_rounds(num_rounds);
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::ir::{
-        GadgetId, GadgetKind, GadgetSite, Node, Op, SignalIdx, ValueId,
+        GadgetId, GadgetKind, GadgetSite, GraphParts, Node, Op, SignalIdx, ValueId,
     };
 
     use super::*;
@@ -118,17 +116,15 @@ mod tests {
     }
 
     fn graph_with_sites(nodes: Vec<Node>, output: ValueId, sites: Vec<GadgetSite>) -> Graph {
-        Graph::from_parts(
+        Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), output)],
-            sites,
-            vec![],
-            vec![],
-            vec![],
-            3,
-            1,
-            4,
-        )
+            outputs: vec![(SignalIdx::new(0), output)],
+            gadget_sites: sites,
+            num_inputs: 3,
+            num_outputs: 1,
+            num_signals: 4,
+            ..Default::default()
+        })
     }
 
     // A chain of 3 secret products already split by mul_split: depth 0, 1, 2 - one round each,
@@ -146,8 +142,7 @@ mod tests {
         super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
-        assert_eq!(graph.rounds().len(), 2);
-        assert!(graph.rounds().iter().all(|r| r.len == 1));
+        assert_eq!(graph.round_slots(), vec![1, 1]);
     }
 
     // Two independent secret products at the same depth must merge into a single round.
@@ -165,8 +160,7 @@ mod tests {
         super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
-        assert_eq!(graph.rounds().len(), 1);
-        assert_eq!(graph.rounds()[0].len, 2);
+        assert_eq!(graph.round_slots(), vec![2]);
     }
 
     /// A gadget site whose inputs are *computed* rather than bare `Op::Input`s must be
@@ -194,10 +188,6 @@ mod tests {
             ValueId::new(5),
             vec![GadgetSite {
                 kind: GadgetKind::IsZero,
-                header: "IsZero_0".to_owned(),
-                num_inputs: 1,
-                num_outputs: 1,
-                num_intermediates: 1,
                 precomputed: false,
             }],
         );
@@ -205,8 +195,7 @@ mod tests {
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         // Two products separated by a site service: they can never share a round.
-        assert_eq!(graph.rounds().len(), 2);
-        assert!(graph.rounds().iter().all(|r| r.len == 1));
+        assert_eq!(graph.round_slots(), vec![1, 1]);
     }
 
     /// Even without secret multiplications, level sorting is required to put every independent
@@ -232,12 +221,8 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(6)]), // 7: output
         ];
         let sites = (0..2)
-            .map(|site| GadgetSite {
+            .map(|_| GadgetSite {
                 kind: GadgetKind::IsZero,
-                header: format!("IsZero_{site}"),
-                num_inputs: 1,
-                num_outputs: 1,
-                num_intermediates: 1,
                 precomputed: false,
             })
             .collect();
@@ -245,7 +230,7 @@ mod tests {
 
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
-        assert!(graph.rounds().is_empty());
+        assert_eq!(graph.num_rounds(), 0);
 
         let later_site = graph
             .nodes()
@@ -263,7 +248,6 @@ mod tests {
         );
 
         // This used to fail the batch anchor/deadline check in codegen.
-        graph.mark_lowered();
         let program =
             crate::codegen::compile(&graph).expect("compile should succeed for this test graph");
         assert_eq!(program.gadget_batches().len(), 1);
@@ -293,9 +277,6 @@ mod tests {
         let mut graph = graph_of(nodes, value);
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
-        assert_eq!(graph.rounds().len(), DEPTH);
-        for round in graph.rounds() {
-            assert_eq!(round.len, 1);
-        }
+        assert_eq!(graph.round_slots(), vec![1; DEPTH]);
     }
 }

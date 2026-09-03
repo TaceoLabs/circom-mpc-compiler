@@ -32,7 +32,7 @@ use super::domain::Domain;
 /// The network level of every value in `graph`, indexed by [`crate::ir::ValueId`]. `domains` is
 /// the graph's [`super::domain::compute_domains`] result.
 ///
-/// Relies only on the topological-order invariant ([`Graph::verify`]): every node's inputs have
+/// Relies only on the graph's topological order: every node's inputs have
 /// smaller indices, so one forward pass suffices. Every rule is `max(inputs)` or `max(inputs) + 1`,
 /// so the result is non-decreasing along every edge. `round_schedule` preserves source order within
 /// a level, keeping same-level public gadget dependencies topological.
@@ -95,7 +95,7 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
 /// Sites sharing a stage are mutually independent (see the module doc), so
 /// `(kind, stage, domain)` is a sound batch key: everything in one batch can be serviced together.
 ///
-/// Panics if a site has no `Op::Gadget` node, which [`Graph::verify`] rules out.
+/// Panics if a site has no `Op::Gadget` node - the frontend emits exactly one per site.
 pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
     let level = network_levels(graph, domains);
     let mut stages = vec![None; graph.gadget_sites().len()];
@@ -109,7 +109,7 @@ pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
         .enumerate()
         .map(|(site, stage)| {
             stage.unwrap_or_else(|| {
-                panic!("gadget site {site} has no Op::Gadget node - Graph::verify should have rejected this")
+                panic!("gadget site {site} has no Op::Gadget node")
             })
         })
         .collect()
@@ -121,33 +121,25 @@ mod tests {
 
     use super::super::domain::compute_domains;
     use super::*;
-    use crate::ir::{GadgetId, GadgetKind, GadgetSite, Node, SignalIdx, ValueId};
+    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, SignalIdx, ValueId};
 
-    fn site(kind: GadgetKind, num_inputs: usize, num_outputs: usize) -> GadgetSite {
+    fn site(kind: GadgetKind) -> GadgetSite {
         GadgetSite {
             kind,
-            header: "Gadget_0".to_owned(),
-            num_inputs,
-            num_outputs,
-            num_intermediates: 0,
             precomputed: false,
         }
     }
 
     fn graph_of(nodes: Vec<Node>, output: ValueId, sites: Vec<GadgetSite>) -> Graph {
-        let mut graph = Graph::from_parts(
+        Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), output)],
-            sites,
-            vec![],
-            vec![],
-            vec![],
-            3,
-            1,
-            4,
-        );
-        graph.mark_lowered();
-        graph
+            outputs: vec![(SignalIdx::new(0), output)],
+            gadget_sites: sites,
+            num_inputs: 3,
+            num_outputs: 1,
+            num_signals: 4,
+            ..Default::default()
+        })
     }
 
     /// A site's results sit one level above its inputs, never the same level.
@@ -164,7 +156,7 @@ mod tests {
         let graph = graph_of(
             nodes,
             ValueId::new(2),
-            vec![site(GadgetKind::IsZero, 1, 1)],
+            vec![site(GadgetKind::IsZero)],
         );
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),
@@ -200,9 +192,9 @@ mod tests {
             nodes,
             ValueId::new(6),
             vec![
-                site(GadgetKind::Num2Bits { n: 1 }, 1, 1),
-                site(GadgetKind::AliasCheck, 1, 1),
-                site(GadgetKind::IsZero, 1, 1),
+                site(GadgetKind::Num2Bits { n: 1 }),
+                site(GadgetKind::AliasCheck),
+                site(GadgetKind::IsZero),
             ],
         );
         assert_eq!(
@@ -233,8 +225,8 @@ mod tests {
             nodes,
             ValueId::new(5),
             vec![
-                site(GadgetKind::IsZero, 1, 1),
-                site(GadgetKind::IsZero, 1, 1),
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
             ],
         );
         assert_eq!(site_stages(&graph, &compute_domains(&graph)), vec![0, 0]);
@@ -267,9 +259,9 @@ mod tests {
             nodes,
             ValueId::new(9),
             vec![
-                site(GadgetKind::IsZero, 1, 1),
-                site(GadgetKind::IsZero, 1, 1),
-                site(GadgetKind::IsZero, 1, 1),
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
             ],
         );
 
@@ -292,7 +284,7 @@ mod tests {
     /// A round costs a level exactly as a batch service does, and linear ops cost nothing.
     #[test]
     fn rounds_and_linear_ops_charge_as_expected() {
-        use crate::ir::{RoundDesc, RoundId};
+        use crate::ir::RoundId;
 
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
@@ -303,7 +295,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(0)]), // 5
         ];
         let mut graph = graph_of(nodes, ValueId::new(5), vec![]);
-        graph.set_rounds(vec![RoundDesc { len: 1 }]);
+        graph.set_num_rounds(1);
         // MulLocal is free; crossing the round costs one; the trailing Add is free.
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),

@@ -66,22 +66,19 @@ fn fold_node(node: &Node, emitted: &[Node]) -> RewriteAction {
 mod tests {
     use ark_bn254::Fr;
 
-    use crate::ir::{Node, Op, SignalIdx, ValueId};
+    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
 
     use super::*;
 
     fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
-        Graph::from_parts(
+        Graph::from_parts(GraphParts {
             nodes,
-            vec![(SignalIdx::new(0), output)],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            1,
-            1,
-            2,
-        )
+            outputs: vec![(SignalIdx::new(0), output)],
+            num_inputs: 1,
+            num_outputs: 1,
+            num_signals: 2,
+            ..Default::default()
+        })
     }
 
     #[test]

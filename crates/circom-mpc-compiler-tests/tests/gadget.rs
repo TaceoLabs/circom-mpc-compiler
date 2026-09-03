@@ -1,8 +1,7 @@
-//! Verifies gadget-gadget recognition: `Poseidon2`, `Num2Bits`, `IsZero` and `AliasCheck` are
-//! each cut into exactly one `ir::GadgetSite` with the expected shape, matched by their own
-//! circom name regardless of what (if anything) wraps them - except (for
-//! `unsupported_gadget_test`'s `Doubler`) an unrecognized name, which is not
-//! recognized at all.
+//! Verifies gadget recognition: `Poseidon2`, `Num2Bits`, `IsZero` and `AliasCheck` are each cut
+//! into exactly one gadget site, matched by their own circom name regardless of what (if anything)
+//! wraps them - except (for `unsupported_gadget_test`'s `Doubler`) an unrecognized name, which is
+//! not recognized at all.
 
 use ark_bn254::Fr;
 use circom_mpc_compiler::CompilerConfig;
@@ -20,9 +19,7 @@ fn config() -> CompilerConfig {
 }
 
 /// The gadget-wrapper circuits: `main` wraps exactly one recognized gadget each, matched by its
-/// own circom name regardless of the wrapper. See `circom_mpc_compiler`'s in-crate
-/// `extract_yields_one_site_per_wrapper` / `signal_span_matches_independent_total` for the
-/// per-site shape assertions this list can't express (those need the private `ir::GadgetSite`).
+/// own circom name regardless of the wrapper.
 fn wrappers() -> Vec<&'static str> {
     vec![
         "gadget_poseidon2_test",
