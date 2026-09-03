@@ -29,7 +29,7 @@ mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c
 mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.5.0" }
 num-bigint = { version = "0.4.6" }
 num-traits = { version = "0.2.18", default-features = false }
-rand = { version = "0.8.8" }
+rand = { version = "0.10.2" }
 rustc-hash = "2"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
