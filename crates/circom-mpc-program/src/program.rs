@@ -359,8 +359,15 @@ pub struct ProgramStatistics {
     pub local_slots: u32,
     /// Number of batched MPC rounds.
     pub multiplication_rounds: usize,
-    /// Total operands reshared across all rounds.
+    /// Total operands reshared across all rounds - also the number of secret x secret
+    /// multiplications, since each lowers to exactly one round slot.
     pub multiplication_elements: usize,
+    /// Fewest operands in any single round, or `None` if there are no rounds.
+    pub min_slots_per_round: Option<usize>,
+    /// Most operands in any single round, or `None` if there are no rounds.
+    pub max_slots_per_round: Option<usize>,
+    /// Number of multiplications with at least one public operand, free of any network round.
+    pub public_multiplications: usize,
     /// Number of gadget batches.
     pub gadget_batches: usize,
     /// Total gadget sites across all batches.
@@ -501,6 +508,21 @@ impl Program {
             local_slots: self.slots.local,
             multiplication_rounds: self.rounds.len(),
             multiplication_elements: self.rounds.iter().map(|round| round.len as usize).sum(),
+            min_slots_per_round: self.rounds.iter().map(|round| round.len as usize).min(),
+            max_slots_per_round: self.rounds.iter().map(|round| round.len as usize).max(),
+            public_multiplications: self
+                .instructions
+                .iter()
+                .filter(|instr| {
+                    matches!(
+                        instr,
+                        Instruction::Arith {
+                            op: Opcode::MulPP | Opcode::MulSP,
+                            ..
+                        }
+                    )
+                })
+                .count(),
             gadget_batches: self.gadget_batches.len(),
             gadget_sites: self
                 .gadget_batches

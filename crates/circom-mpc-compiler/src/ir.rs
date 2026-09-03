@@ -75,39 +75,6 @@ pub(crate) struct RoundDesc {
     pub(crate) len: usize,
 }
 
-/// The effect of MPC lowering, as reported by [`Graph::mpc_summary`]. Diagnostic - logged under
-/// `tracing` and asserted in `tests/mpc_lowering.rs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MpcSummary {
-    /// Number of batched MPC rounds.
-    pub rounds: usize,
-    /// Total operands reshared across all rounds.
-    pub reshare_elements: usize,
-    /// Fewest operands in any single round, or `None` if there are no rounds.
-    pub min_slots_per_round: Option<usize>,
-    /// Most operands in any single round, or `None` if there are no rounds.
-    pub max_slots_per_round: Option<usize>,
-    /// Number of secret x secret multiplications, each lowered to an `Op::MulLocal` + round pair.
-    pub local_muls: usize,
-    /// Number of remaining `Op::Mul` nodes - multiplications with at least one public operand,
-    /// free of any network round.
-    pub public_muls: usize,
-    /// Total gadget sites in the graph.
-    pub gadget_sites: usize,
-    /// How many batch services those sites actually cost - normally one per
-    /// `(kind, stage, domain)` group, with an additional split when an early consumer closes a
-    /// batch's placement window. Public services run locally; shared services call the MPC driver.
-    /// `gadget_batches < gadget_sites` makes the batching claim falsifiable rather than
-    /// asserted.
-    pub gadget_batches: usize,
-    /// Batch services that require an MPC driver call rather than local public evaluation.
-    pub shared_gadget_batches: usize,
-    /// Batch services whose trace comes from the host (`TACEO_PRECOMPUTATION_Poseidon2`) rather
-    /// than `vm::gadgets` - a subset of `shared_gadget_batches` (a host-precomputed site is
-    /// always `Shared`-domain).
-    pub precomputed_batches: usize,
-}
-
 /// One recognized-gadget component instance: the shape the runtime must supply a trace for.
 #[derive(Debug, Clone)]
 pub struct GadgetSite {
@@ -410,47 +377,6 @@ impl Graph {
         for (_, value) in &mut self.outputs {
             *value =
                 remap[value.index()].expect("rebuild_nodes dropped a node an output depends on");
-        }
-    }
-
-    /// Reports the effect of MPC lowering: rounds, total reshare elements (one field element per
-    /// round slot), min/mean/max slots per round, free local multiplications, free public
-    /// multiplications, and gadget sites. Not a rewrite - this is what makes the round
-    /// batching claims falsifiable instead of asserted; see `tests/mpc_lowering.rs`.
-    #[must_use]
-    pub fn mpc_summary(&self) -> MpcSummary {
-        let slot_counts: Vec<usize> = self.rounds.iter().map(|r| r.len).collect();
-        let reshare_elements: usize = slot_counts.iter().sum();
-        let local_muls = self
-            .nodes
-            .iter()
-            .filter(|n| matches!(n.op, Op::MulLocal))
-            .count();
-        let public_muls = self
-            .nodes
-            .iter()
-            .filter(|n| matches!(n.op, Op::Mul))
-            .count();
-        let domains = crate::passes::mpc::domain::compute_domains(self);
-        let batches =
-            crate::passes::mpc::gadget_schedule::plan_gadget_batches(self, &domains);
-        let gadget_batches = batches.len();
-        let shared_gadget_batches = batches
-            .iter()
-            .filter(|batch| batch.domain == crate::passes::mpc::domain::Domain::Shared)
-            .count();
-        let precomputed_batches = batches.iter().filter(|batch| batch.precomputed).count();
-        MpcSummary {
-            rounds: self.rounds.len(),
-            reshare_elements,
-            min_slots_per_round: slot_counts.iter().copied().min(),
-            max_slots_per_round: slot_counts.iter().copied().max(),
-            local_muls,
-            public_muls,
-            gadget_sites: self.gadget_sites.len(),
-            gadget_batches,
-            shared_gadget_batches,
-            precomputed_batches,
         }
     }
 

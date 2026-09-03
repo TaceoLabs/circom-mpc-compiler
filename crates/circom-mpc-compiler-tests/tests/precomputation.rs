@@ -6,8 +6,8 @@
 
 use ark_bn254::Fr;
 
-use circom_mpc_compiler::ir::GadgetKind;
 use circom_mpc_compiler::CompilerConfig;
+use circom_mpc_program::GadgetKind;
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::gadgets::poseidon2;
 use circom_mpc_vm::program::BatchKind;

@@ -673,7 +673,7 @@ impl<'a> GraphCompiler<'a> {
     fn handle_value_bucket(&mut self, value_bucket: &ValueBucket) -> ValueId {
         match value_bucket.parse_as {
             ValueType::BigInt => self.push_constant(value_bucket.value),
-            ValueType::U32 => unreachable!("this should never happen!!!! (I guess )"),
+            ValueType::U32 => unreachable!("ValueBucket parse as U32"),
         }
     }
 

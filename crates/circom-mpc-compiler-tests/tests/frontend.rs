@@ -17,7 +17,7 @@ fn config() -> CompilerConfig {
 }
 
 fn expect_unsupported(circuit: &str) -> String {
-    match circom_mpc_compiler::parse(circuit_path(circuit), &config()) {
+    match circom_mpc_compiler::compile(circuit_path(circuit), &config()) {
         Ok(_) => panic!(
             "{circuit} compiled unexpectedly - if this is a genuine new capability, move it to a \
              witness-comparison test in tests/circom_ir.rs instead of deleting this assertion"
@@ -60,30 +60,37 @@ fn non_constant_bitwise_operator_is_a_typed_error() {
     );
 }
 
-/// `Graph::input_list` must be 0-based over the circuit's inputs, not in circom's witness numbering
-/// (where the first input sits at `1 + num_outputs`, after the reserved constant and main's outputs).
-/// Comparing the two numberings directly would misclassify a declared-public input as `Shared`
-/// with one main output, or a secret input as public with more than one - which `Machine::run`
-/// rejects.
+/// `Program::input_signals` offsets must be 0-based over the circuit's inputs, not in circom's
+/// witness numbering (where the first input sits at `1 + num_outputs`, after the reserved constant
+/// and main's outputs). Comparing the two numberings directly would misclassify a declared-public
+/// input as `Shared` with one main output, or a secret input as public with more than one - which
+/// `Machine::run` rejects.
 #[test]
 fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
-    let graph = circom_mpc_compiler::parse(circuit_path("multiplier2_public"), &config())
+    let program = circom_mpc_compiler::compile(circuit_path("multiplier2_public"), &config())
         .expect("multiplier2_public compiles");
-    assert_eq!(graph.public_inputs(), vec!["a".to_owned()]);
-    let mut offsets: Vec<(String, usize, usize)> = graph.input_list().clone();
-    offsets.sort_by_key(|(_, start, _)| *start);
+
+    let mut signals: Vec<(String, usize, usize)> = program
+        .input_signals()
+        .iter()
+        .map(|sig| (sig.name.clone(), sig.offset, sig.size))
+        .collect();
+    signals.sort_by_key(|(_, offset, _)| *offset);
     assert_eq!(
-        offsets,
+        signals,
         vec![("a".to_owned(), 0, 1), ("b".to_owned(), 1, 1)],
         "input offsets must be 0-based over inputs"
     );
 
-    // And the classification that depends on them.
-    let program = circom_mpc_compiler::compile(circuit_path("multiplier2_public"), &config())
-        .expect("multiplier2_public compiles");
     assert_eq!(
         program.input_domains(),
         vec![Bank::Public, Bank::Shared],
         "`a` is declared public, `b` is not"
     );
+    let public_names: Vec<String> = signals
+        .iter()
+        .filter(|(_, offset, _)| program.input_domains()[*offset] == Bank::Public)
+        .map(|(name, ..)| name.clone())
+        .collect();
+    assert_eq!(public_names, vec!["a".to_owned()]);
 }

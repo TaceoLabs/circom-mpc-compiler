@@ -1,6 +1,6 @@
 //! `Machine::run` under `PlainDriver` versus real 3-party `Rep3Driver` over an in-process
 //! `LocalNetwork`: the gap between the two series is what MPC actually costs for a given circuit,
-//! and the `Graph::mpc_summary` line printed per circuit is what makes a number interpretable - a
+//! and the `Program::statistics` line printed per circuit is what makes a number interpretable - a
 //! circuit's floor is its round count, not its instruction count. In-process, so rep3 numbers
 //! measure protocol work and round structure, not network latency. `rep3_total` is total cost:
 //! every measured iteration includes `Rep3State` setup, fresh Poseidon2 preprocessing, and online
@@ -9,7 +9,6 @@
 use ark_bn254::Fr;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler_tests::fixtures::rep3::{run_witness_with_shares, share_inputs};
 use circom_mpc_vm::driver::plain::PlainDriver;
@@ -47,23 +46,20 @@ fn config() -> CompilerConfig {
 /// it. Compilation is deliberately outside the measured closure.
 fn prepare(case: &Case) -> (Program, Vec<Fr>) {
     let path = format!("{}/circuits/{}.circom", manifest_dir(), case.name);
-    let graph =
-        circom_mpc_compiler::parse(path, &config()).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-    let summary = graph.mpc_summary();
-    let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+    let program = circom_mpc_compiler::compile(path, &config())
+        .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+    let stats = program.statistics();
     // Arbitrary but non-zero, so nothing degenerates into a trivial product.
-    let values: Vec<Fr> = (0..graph.num_inputs())
-        .map(|i| Fr::from(i as u64 + 1))
-        .collect();
+    let values: Vec<Fr> = (0..stats.inputs).map(|i| Fr::from(i as u64 + 1)).collect();
     println!(
         "{:26} rounds={:3} reshare_elements={:6} max_slots={:5} sites={:4} batches={:3} instrs={:6}",
         case.name,
-        summary.rounds,
-        summary.reshare_elements,
-        summary.max_slots_per_round.unwrap_or(0),
-        summary.gadget_sites,
-        summary.gadget_batches,
-        program.statistics().instructions,
+        stats.multiplication_rounds,
+        stats.multiplication_elements,
+        stats.max_slots_per_round.unwrap_or(0),
+        stats.gadget_sites,
+        stats.gadget_batches,
+        stats.instructions,
     );
     (program, values)
 }

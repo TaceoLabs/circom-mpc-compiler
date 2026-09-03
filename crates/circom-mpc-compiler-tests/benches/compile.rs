@@ -1,16 +1,10 @@
-//! Compile-time benches: `circom_mpc_compiler::parse` (circom frontend + this crate's lowering and
-//! passes) and `vm::codegen::compile` (IR -> bytecode), timed **separately** so a regression lands on
-//! whichever one caused it.
+//! Compile-time bench: `circom_mpc_compiler::compile` end to end (circom frontend, this crate's
+//! passes, and codegen), and what each optimization level costs.
 //!
 //! Plain by nature - compilation never touches a driver or a network.
-//!
-//! `parse` dominates by orders of magnitude on real circuits, most of it upstream circom work this
-//! crate does not control, which is precisely why the two are split: a pass-infrastructure regression
-//! would be invisible inside a single combined number.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use circom_mpc_compiler::codegen;
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
 
 fn manifest_dir() -> &'static str {
@@ -41,24 +35,12 @@ fn config() -> CompilerConfig {
 fn bench(c: &mut Criterion) {
     let cases = cases();
 
-    // `parse` = frontend + inlining + the whole PassManager pipeline.
-    let mut group = c.benchmark_group("parse");
+    let mut group = c.benchmark_group("compile");
     for case in &cases {
         group.bench_with_input(BenchmarkId::from_parameter(case.name), &(), |b, ()| {
             b.iter(|| {
-                circom_mpc_compiler::parse(case.path.clone(), &config()).unwrap();
+                circom_mpc_compiler::compile(case.path.clone(), &config()).unwrap();
             });
-        });
-    }
-    group.finish();
-
-    // `codegen` alone, on an already-parsed graph - the part this crate fully owns.
-    let mut group = c.benchmark_group("codegen");
-    for case in &cases {
-        let graph = circom_mpc_compiler::parse(case.path.clone(), &config())
-            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
-        group.bench_with_input(BenchmarkId::from_parameter(case.name), &(), |b, ()| {
-            b.iter(|| codegen::compile(&graph).unwrap());
         });
     }
     group.finish();
@@ -77,7 +59,7 @@ fn bench(c: &mut Criterion) {
                 b.iter(|| {
                     let mut cfg = config();
                     cfg.opt_level = opt;
-                    circom_mpc_compiler::parse(case.path.clone(), &cfg).unwrap();
+                    circom_mpc_compiler::compile(case.path.clone(), &cfg).unwrap();
                 });
             },
         );
