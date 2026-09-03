@@ -10,12 +10,8 @@ use ark_ff::{One, Zero};
 
 use crate::ir::{Graph, Node, Op, RewriteAction, ValueId};
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
-)]
-pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
-    Ok(graph.rewrite(|_id, node, emitted| fold_node(node, emitted)))
+pub(super) fn run(graph: &mut Graph) -> bool {
+    graph.rewrite(|_id, node, emitted| fold_node(node, emitted))
 }
 
 /// Returns `Some(c)` iff `v`'s producer (already emitted, so present in `emitted`) is a resolved
@@ -90,7 +86,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 1);
@@ -108,7 +104,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         graph.gc();
         // only the Input node should survive - the Add collapsed into an alias for it
@@ -128,7 +124,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(!changed);
         assert_eq!(graph.len(), 3);
     }

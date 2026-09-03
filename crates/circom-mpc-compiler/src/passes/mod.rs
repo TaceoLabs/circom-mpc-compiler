@@ -28,7 +28,7 @@ pub enum OptLevel {
 }
 
 /// One pass: runs once over the graph, returns whether it changed anything.
-type PassFn = fn(&mut Graph) -> eyre::Result<bool>;
+type PassFn = fn(&mut Graph) -> bool;
 
 /// Drives the classical passes to a fixpoint (bounded, so an oscillating pass cannot hang the
 /// compiler), then runs the MPC lowering pipeline once, unconditionally - lowering is the
@@ -56,12 +56,12 @@ impl PassManager {
     }
 
     /// Runs the classical passes to a fixpoint, then the MPC lowering pipeline once.
-    pub(crate) fn run(&mut self, graph: &mut Graph) -> eyre::Result<()> {
+    pub(crate) fn run(&mut self, graph: &mut Graph) {
         for _ in 0..self.max_iterations {
             let mut changed = false;
             for (name, pass) in &self.optimize {
                 let before = graph.len();
-                let pass_changed = pass(graph)?;
+                let pass_changed = pass(graph);
                 tracing::debug!(
                     "pass {name}: {before} -> {} nodes ({})",
                     graph.len(),
@@ -76,9 +76,8 @@ impl PassManager {
 
         for (name, pass) in &self.lower {
             let before = graph.len();
-            pass(graph)?;
+            pass(graph);
             tracing::debug!("lowering pass {name}: {before} -> {} nodes", graph.len());
         }
-        Ok(())
     }
 }

@@ -13,14 +13,10 @@ use crate::ir::{Graph, Node, Op, RoundId, ValueId};
 
 use super::domain::compute_domains;
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
-)]
-pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
+pub(crate) fn run(graph: &mut Graph) -> bool {
     let nodes = graph.nodes();
     if nodes.is_empty() {
-        return Ok(false);
+        return false;
     }
 
     // Network level per (old-space) value. Crossing a shared gadget site advances the
@@ -60,7 +56,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     let has_rounds = rounds_by_depth.iter().any(|rounds| !rounds.is_empty());
     let already_level_sorted = depth.windows(2).all(|pair| pair[0] <= pair[1]);
     if !has_rounds && already_level_sorted {
-        return Ok(false);
+        return false;
     }
 
     let old_len = nodes.len();
@@ -100,7 +96,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
 
     graph.rebuild_nodes(new_nodes, &remap);
     graph.set_num_rounds(num_rounds);
-    Ok(true)
+    true
 }
 
 #[cfg(test)]
@@ -137,9 +133,8 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(3), ValueId::new(2)]), // 4: (a*b)*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(4));
-        super::super::mul_split::run(&mut graph)
-            .expect("mul_split should not fail on this test graph");
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        super::super::mul_split::run(&mut graph);
+        let changed = run(&mut graph);
         assert!(changed);
         assert_eq!(graph.round_slots(), vec![1, 1]);
     }
@@ -156,9 +151,8 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(4)]), // 5: a*b + b*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(5));
-        super::super::mul_split::run(&mut graph)
-            .expect("mul_split should not fail on this test graph");
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        super::super::mul_split::run(&mut graph);
+        let changed = run(&mut graph);
         assert!(changed);
         assert_eq!(graph.round_slots(), vec![2]);
     }
@@ -188,9 +182,8 @@ mod tests {
                 precomputed: false,
             }],
         );
-        super::super::mul_split::run(&mut graph)
-            .expect("mul_split should not fail on this test graph");
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        super::super::mul_split::run(&mut graph);
+        let changed = run(&mut graph);
         assert!(changed);
         // Two products separated by a site service: they can never share a round.
         assert_eq!(graph.round_slots(), vec![1, 1]);
@@ -220,7 +213,7 @@ mod tests {
             .collect();
         let mut graph = graph_with_sites(nodes, ValueId::new(7), sites);
 
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         assert_eq!(graph.num_rounds(), 0);
 
@@ -267,7 +260,7 @@ mod tests {
         }
 
         let mut graph = graph_of(nodes, value);
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         assert_eq!(graph.round_slots(), vec![1; DEPTH]);
     }

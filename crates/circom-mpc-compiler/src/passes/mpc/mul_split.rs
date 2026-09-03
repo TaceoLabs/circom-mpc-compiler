@@ -10,11 +10,7 @@ use crate::ir::{Graph, Node, Op, RewriteAction, RoundId, ValueId};
 
 use super::domain::{Domain, compute_domains};
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
-)]
-pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
+pub(crate) fn run(graph: &mut Graph) -> bool {
     // The split decision depends only on the *old* graph, so classify it up front. Inside the
     // rewrite closure only the old-space node id is stable (`Graph::rewrite` remaps inputs to
     // new-space ids), so the decision is looked up by that id.
@@ -47,7 +43,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
     });
 
     graph.set_num_rounds(num_rounds);
-    Ok(changed)
+    changed
 }
 
 #[cfg(test)]
@@ -78,7 +74,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         assert_eq!(graph.len(), 5); // Input, Input, MulLocal, Round, RoundResult
         assert!(matches!(
@@ -106,7 +102,7 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(2));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(!changed);
         assert_eq!(graph.len(), 3);
         assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::Mul));

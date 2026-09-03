@@ -13,7 +13,7 @@ use circom_mpc_program::{
     SlotCounts, WitnessSource,
 };
 
-use crate::ir::{GadgetKind, Graph, Op, ValueId};
+use crate::ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId};
 use crate::passes::mpc::domain::{Domain, compute_domains, signal_domain};
 use crate::passes::mpc::gadget_schedule::{BatchPlan, plan_gadget_batches};
 
@@ -331,28 +331,21 @@ fn gadget_result_bank(kind: GadgetKind, domain: Domain, precomputed: bool) -> ey
     })
 }
 
-/// Compiles a fully lowered graph (`PassManager::run` has already run - see
-/// `circom_mpc_compiler::compile`) into a `Program`.
-///
-/// # Panics
-///
-/// Panics if an internal invariant that an earlier pass is responsible for maintaining (e.g. slot
-/// or index bounds fitting into `u32`) is violated.
-///
-/// # Errors
-///
-/// Returns an error if `graph` isn't a validly lowered graph - e.g. a `Local`-domain value reaches
-/// an arithmetic op directly, or a secret x secret `Mul` survived MPC lowering.
-#[allow(
-    clippy::too_many_lines,
-    reason = "a single forward walk over the graph doing domain classification, slot allocation, and instruction emission at once; splitting it would not improve clarity"
-)]
-pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
+/// The batch schedule as codegen runs it: the raw plans, the `IsZero`+`Reveal` fusions found among
+/// them, the resulting runtime batch order, and which batches are serviced at each node.
+struct BatchSchedule {
+    plans: Vec<BatchPlan>,
+    fusion_plans: Vec<ZeroTestRevealPlan>,
+    runtime_plans: Vec<RuntimePlan>,
+    batches_at: Vec<Vec<usize>>,
+}
+
+/// Plans the gadget batches, folds in the fusions, and extends `last_use` so a site's inputs stay
+/// alive until its batch's anchor.
+fn plan_batches(graph: &Graph, domain: &[Domain], last_use: &mut [usize]) -> BatchSchedule {
     let nodes = graph.nodes();
-    let domain = compute_domains(graph);
-    let mut last_use = compute_last_use(graph);
-    let plans = plan_gadget_batches(graph, &domain);
-    let fusion_plans = plan_zero_test_reveal_fusions(graph, &domain, &plans);
+    let plans = plan_gadget_batches(graph, domain);
+    let fusion_plans = plan_zero_test_reveal_fusions(graph, domain, &plans);
     let mut source_fusion = vec![None; plans.len()];
     let mut reveal_fusion = vec![None; plans.len()];
     for (fusion_idx, fusion) in fusion_plans.iter().enumerate() {
@@ -396,6 +389,7 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
             }
         }
     }
+
     // Batch indices anchored at each node, emitted right after that node is processed.
     let mut batches_at: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (batch_idx, runtime) in runtime_plans.iter().enumerate() {
@@ -406,9 +400,44 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
         batches_at[anchor].push(batch_idx);
     }
 
-    // --- Phase A: reserved (non-recycled) regions ---
-    // Public bank: constants, public gadget results, then Public-domain kept Op::Input.
-    // Shared bank: shared gadget results, then Shared-domain kept Op::Input.
+    BatchSchedule {
+        plans,
+        fusion_plans,
+        runtime_plans,
+        batches_at,
+    }
+}
+
+/// Where each site's surviving results live.
+struct GadgetResultLayout {
+    /// Per site, the logical result slots that survived to codegen, ascending.
+    live_slots: Vec<Vec<u32>>,
+    /// Parallel to `live_slots`: the `GadgetResult` node backing each surviving logical slot.
+    live_nodes: Vec<Vec<usize>>,
+    /// Node-indexed physical slot for every surviving `GadgetResult`.
+    result_phys: Vec<Option<u32>>,
+    site_result_base: Vec<Loc>,
+}
+
+/// Phase A's result: the reserved (never recycled) slot regions - constants, gadget results, kept
+/// inputs - and the tables that map a surviving `GadgetResult` node to its physical slot.
+struct Reservation {
+    slot: Vec<Option<Loc>>,
+    constants: Vec<Fr>,
+    gadgets: GadgetResultLayout,
+    input_domains: Vec<Bank>,
+    input_bindings: Vec<InputBinding>,
+    input_signals: Vec<InputSignal>,
+    p_next: u32,
+    s_next: u32,
+}
+
+/// Phase A: reserves the non-recycled regions of both banks.
+///
+/// Public bank: constants, public gadget results, then Public-domain kept `Op::Input`.
+/// Shared bank: shared gadget results, then Shared-domain kept `Op::Input`.
+fn reserve_slots(graph: &Graph, domain: &[Domain]) -> eyre::Result<Reservation> {
+    let nodes = graph.nodes();
     let mut slot: Vec<Option<Loc>> = vec![None; nodes.len()];
     let mut constants: Vec<Fr> = Vec::new();
     let mut p_next: u32 = 0;
@@ -425,7 +454,42 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
         }
     }
 
-    let mut site_domains = vec![Domain::Public; graph.gadget_sites().len()];
+    let gadgets = reserve_gadget_results(graph, domain, &mut p_next, &mut s_next)?;
+    let (input_domains, input_bindings) =
+        reserve_inputs(graph, &mut slot, &mut p_next, &mut s_next)?;
+
+    let input_signals: Vec<InputSignal> = graph
+        .input_list()
+        .iter()
+        .map(|(name, offset, size)| InputSignal {
+            name: name.clone(),
+            offset: *offset,
+            size: *size,
+        })
+        .collect();
+
+    Ok(Reservation {
+        slot,
+        constants,
+        gadgets,
+        input_domains,
+        input_bindings,
+        input_signals,
+        p_next,
+        s_next,
+    })
+}
+
+/// Reserves each gadget site's surviving result slots, contiguously and in site order.
+fn reserve_gadget_results(
+    graph: &Graph,
+    domain: &[Domain],
+    p_next: &mut u32,
+    s_next: &mut u32,
+) -> eyre::Result<GadgetResultLayout> {
+    let nodes = graph.nodes();
+    let num_sites = graph.gadget_sites().len();
+    let mut site_domains = vec![Domain::Public; num_sites];
     for (i, node) in nodes.iter().enumerate() {
         if let Op::Gadget(site_id) = &node.op {
             site_domains[site_id.index()] = domain[i];
@@ -438,11 +502,8 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
     // as wide as what's left, not its full `num_outputs + num_intermediates` capacity. On a
     // circuit with a large batch of gadget sites, this is the difference between thousands of
     // Poseidon2 result slots per site and the handful actually read.
-    //
-    // `live_nodes[site]` is parallel to `live_slots[site]`: the node index of each surviving
-    // `GadgetResult`, resolved to a physical slot below once `site_result_base` is known.
-    let mut live_slots: Vec<Vec<u32>> = vec![Vec::new(); graph.gadget_sites().len()];
-    let mut live_nodes: Vec<Vec<usize>> = vec![Vec::new(); graph.gadget_sites().len()];
+    let mut live_slots: Vec<Vec<u32>> = vec![Vec::new(); num_sites];
+    let mut live_nodes: Vec<Vec<usize>> = vec![Vec::new(); num_sites];
     for (i, node) in nodes.iter().enumerate() {
         if let Op::GadgetResult(k) = &node.op {
             let Op::Gadget(site_id) = &nodes[node.inputs[0].index()].op else {
@@ -459,9 +520,8 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
          request list below depends on it"
     );
 
-    // Node-indexed physical slot for every surviving `GadgetResult`.
     let mut result_phys: Vec<Option<u32>> = vec![None; nodes.len()];
-    let mut site_result_base: Vec<Loc> = Vec::with_capacity(graph.gadget_sites().len());
+    let mut site_result_base: Vec<Loc> = Vec::with_capacity(num_sites);
     for (site_id, site) in graph.gadget_sites().iter().enumerate() {
         // Mirrors `gadget_schedule::plan_gadget_batches`'s own downgrade: a wrapped site with
         // nothing to precompute (fully public) falls through to an ordinary gadget site instead
@@ -470,8 +530,8 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
         let precomputed = site.precomputed && site_domains[site_id] == Domain::Shared;
         let bank = gadget_result_bank(site.kind, site_domains[site_id], precomputed)?;
         let base = match bank {
-            Bank::Public => p_next,
-            Bank::Shared => s_next,
+            Bank::Public => *p_next,
+            Bank::Shared => *s_next,
             Bank::Local => unreachable!("gadget_result_bank never returns Local"),
         };
         site_result_base.push(Loc { bank, index: base });
@@ -482,28 +542,33 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
             physical_count += 1;
         }
         match bank {
-            Bank::Public => p_next += physical_count,
-            Bank::Shared => s_next += physical_count,
+            Bank::Public => *p_next += physical_count,
+            Bank::Shared => *s_next += physical_count,
             Bank::Local => unreachable!("gadget_result_bank never returns Local"),
         }
     }
 
-    let input_signals: Vec<InputSignal> = graph
-        .input_list()
-        .iter()
-        .map(|(name, offset, size)| InputSignal {
-            name: name.clone(),
-            offset: *offset,
-            size: *size,
-        })
-        .collect();
+    Ok(GadgetResultLayout {
+        live_slots,
+        live_nodes,
+        result_phys,
+        site_result_base,
+    })
+}
 
+/// Reserves one slot per kept `Op::Input` node, in its input's own bank.
+fn reserve_inputs(
+    graph: &Graph,
+    slot: &mut [Option<Loc>],
+    p_next: &mut u32,
+    s_next: &mut u32,
+) -> eyre::Result<(Vec<Bank>, Vec<InputBinding>)> {
     let mut input_domains: Vec<Bank> = Vec::with_capacity(graph.num_inputs());
     let mut input_bindings: Vec<InputBinding> = Vec::new();
+    let nodes = graph.nodes();
     for input_index in 0..graph.num_inputs() {
         let sig = crate::ir::SignalIdx::new(graph.num_outputs() + input_index);
-        let d = signal_domain(graph, sig);
-        input_domains.push(match d {
+        input_domains.push(match signal_domain(graph, sig) {
             Domain::Public => Bank::Public,
             Domain::Shared => Bank::Shared,
             Domain::Local => unreachable!("signal_domain never returns Local"),
@@ -513,458 +578,576 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
         if let Op::Input(sig) = &node.op {
             let input_index = sig.index() - graph.num_outputs();
             let bank = input_domains[input_index];
-            let s = match bank {
+            let index = match bank {
                 Bank::Public => {
-                    let idx = p_next;
-                    p_next += 1;
-                    Loc {
-                        bank: Bank::Public,
-                        index: idx,
-                    }
+                    *p_next += 1;
+                    *p_next - 1
                 }
                 Bank::Shared => {
-                    let idx = s_next;
-                    s_next += 1;
-                    Loc {
-                        bank: Bank::Shared,
-                        index: idx,
-                    }
+                    *s_next += 1;
+                    *s_next - 1
                 }
                 Bank::Local => unreachable!("an input's domain is never Local"),
             };
-            slot[i] = Some(s);
+            slot[i] = Some(Loc { bank, index });
             input_bindings.push(InputBinding {
                 bank,
-                slot: Slot::new(s.index),
+                slot: Slot::new(index),
                 input_index: InputIdx::try_from(input_index)?,
             });
         }
     }
+    Ok((input_domains, input_bindings))
+}
 
-    // --- Phase B: the recyclable arena + instruction emission ---
-    let mut arena = Arena {
-        p: BankAlloc::starting_at(p_next),
-        s: BankAlloc::starting_at(s_next),
-        l: BankAlloc::starting_at(0),
-        p_reserved_end: p_next,
-        s_reserved_end: s_next,
-        last_use,
-    };
+/// Phase B's result: the instruction stream plus the per-site operand lists the batch tables are
+/// assembled from.
+struct Emission {
+    instructions: Vec<Instruction>,
+    rounds: Vec<RoundEntry>,
+    round_operands: Vec<Slot>,
+    round_results: Vec<Slot>,
+    /// One entry per `GadgetId`, filled as each `Op::Gadget` node is walked.
+    site_inputs: Vec<Vec<SiteInput>>,
+    /// One Shared zero-test input per fused site - the `IsZero` site's original input.
+    fusion_inputs: Vec<Vec<SiteInput>>,
+}
 
-    let mut instructions: Vec<Instruction> = Vec::new();
-    let mut rounds: Vec<RoundEntry> = vec![
-        RoundEntry {
-            operand_start: 0,
-            len: 0,
-            result_start: 0
+/// The state Phase B threads through the forward walk: the recyclable arena, the live node ->
+/// slot mapping, and the stream being built.
+struct Emitter {
+    arena: Arena,
+    slot: Vec<Option<Loc>>,
+    out: Emission,
+}
+
+impl Emitter {
+    fn new(graph: &Graph, reservation: &mut Reservation, last_use: Vec<usize>) -> Self {
+        let arena = Arena {
+            p: BankAlloc::starting_at(reservation.p_next),
+            s: BankAlloc::starting_at(reservation.s_next),
+            l: BankAlloc::starting_at(0),
+            p_reserved_end: reservation.p_next,
+            s_reserved_end: reservation.s_next,
+            last_use,
         };
-        graph.num_rounds()
-    ];
-    let mut round_operands: Vec<Slot> = Vec::new();
-    let mut round_results: Vec<Slot> = Vec::new();
-
-    // One entry per GadgetId, filled as each Op::Gadget node is walked.
-    let mut site_inputs: Vec<Vec<SiteInput>> = vec![Vec::new(); graph.gadget_sites().len()];
-    // The fused service consumes one Shared zero-test input per site - the IsZero site's original
-    // input.
-    let mut fusion_inputs: Vec<Vec<SiteInput>> = fusion_plans
-        .iter()
-        .map(|fusion| Vec::with_capacity(fusion.pairs.len()))
-        .collect();
-
-    let mut i = 0usize;
-    while i < nodes.len() {
-        let node = &nodes[i];
-        match &node.op {
-            Op::Constant(_) | Op::Input(_) => {
-                // Loc already assigned in Phase A.
-            }
-            Op::Add | Op::Sub | Op::Mul => {
-                let da = domain[node.inputs[0].index()];
-                let db = domain[node.inputs[1].index()];
-                let (opcode, dst_bank, swap) = select_opcode(&node.op, da, db)?;
-                let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
-                let sb = slot[node.inputs[1].index()].expect("operand not yet resolved");
-                let (a, b) = if swap {
-                    (sb.index, sa.index)
-                } else {
-                    (sa.index, sb.index)
+        let out = Emission {
+            instructions: Vec::new(),
+            rounds: vec![
+                RoundEntry {
+                    operand_start: 0,
+                    len: 0,
+                    result_start: 0
                 };
-                let dst = arena.alloc(dst_bank);
-                instructions.push(Instruction::Arith {
-                    op: opcode,
-                    dst: Slot::new(dst),
-                    a: Slot::new(a),
-                    b: Slot::new(b),
-                });
-                slot[i] = Some(Loc {
-                    bank: dst_bank,
-                    index: dst,
-                });
-                arena.free_if_dead(node.inputs[0], i, &mut slot);
-                arena.free_if_dead(node.inputs[1], i, &mut slot);
-            }
-            Op::MulLocal => {
-                let sa = slot[node.inputs[0].index()].expect("operand not yet resolved");
-                let sb = slot[node.inputs[1].index()].expect("operand not yet resolved");
-                if domain[node.inputs[0].index()] != Domain::Shared
-                    || domain[node.inputs[1].index()] != Domain::Shared
-                {
-                    eyre::bail!(
-                        "codegen: MulLocal's operands must both be Shared (rep3's local_mul_vec \
-                         needs two genuine shares) - got {:?}/{:?}",
-                        domain[node.inputs[0].index()],
-                        domain[node.inputs[1].index()]
-                    );
-                }
-                let dst = arena.alloc(Bank::Local);
-                instructions.push(Instruction::Arith {
-                    op: Opcode::MulLocal,
-                    dst: Slot::new(dst),
-                    a: Slot::new(sa.index),
-                    b: Slot::new(sb.index),
-                });
-                slot[i] = Some(Loc {
-                    bank: Bank::Local,
-                    index: dst,
-                });
-                arena.free_if_dead(node.inputs[0], i, &mut slot);
-                arena.free_if_dead(node.inputs[1], i, &mut slot);
-            }
-            Op::Round(round_id) => {
-                let operand_start =
-                    u32::try_from(round_operands.len()).expect("too many round operands");
-                for &input in &node.inputs {
-                    let s = slot[input.index()].expect("round operand not yet resolved");
-                    if s.bank != Bank::Local {
-                        eyre::bail!(
-                            "codegen: a Round's operand must be a Local (MulLocal) value, got {:?}",
-                            s.bank
-                        );
-                    }
-                    round_operands.push(Slot::new(s.index));
-                    arena.l.free(s.index, 0);
-                }
-                let len = u32::try_from(node.inputs.len())
-                    .expect("round has more slots than fit into u32");
-
-                // round_schedule guarantees a Round node is immediately followed by exactly `len`
-                // RoundResult(0..len) nodes, in slot order - see its own module doc. Codegen relies
-                // on the same guarantee its own producer already asserts, rather than re-deriving
-                // the mapping some other way.
-                let result_start =
-                    u32::try_from(round_results.len()).expect("too many round results");
-                for k in 0..node.inputs.len() {
-                    let result_idx = i + 1 + k;
-                    let expected_k =
-                        u32::try_from(k).expect("round has more slots than fit into u32");
-                    match nodes.get(result_idx).map(|n| &n.op) {
-                        Some(Op::RoundResult(slot_k)) if *slot_k == expected_k => {}
-                        other => eyre::bail!(
-                            "codegen: Round {} expected RoundResult({expected_k}) at node {result_idx}, \
-                             found {other:?} - round_schedule's adjacency invariant was violated",
-                            round_id.index()
-                        ),
-                    }
-                    let dst = arena.alloc(Bank::Shared);
-                    round_results.push(Slot::new(dst));
-                    slot[result_idx] = Some(Loc {
-                        bank: Bank::Shared,
-                        index: dst,
-                    });
-                }
-                rounds[round_id.index()] = RoundEntry {
-                    operand_start,
-                    len,
-                    result_start,
-                };
-                instructions.push(Instruction::Reshare(RoundIdx::try_from(round_id.index())?));
-                // Free every RoundResult(k) input that died the instant it was produced (rare -
-                // an unread result would already have been dropped by an earlier gc in practice,
-                // but the allocator handles it correctly regardless).
-                for k in 0..node.inputs.len() {
-                    let result_idx = i + 1 + k;
-                    arena.free_if_dead(ValueId::new(result_idx), result_idx, &mut slot);
-                }
-                i += node.inputs.len(); // skip the RoundResult nodes just handled
-            }
-            Op::RoundResult(_) => {
-                unreachable!(
-                    "every RoundResult is consumed by its Round's own arm above - codegen never \
-                     visits one on its own"
-                );
-            }
-            Op::Gadget(site_id) => {
-                // A site's inputs are ordinary operands, resolved like any other. They are *not*
-                // required to be bare `Op::Input`/`Op::Constant`: batches are serviced at their own
-                // point in the instruction stream (see `Opcode::Gadget`), so a site whose inputs
-                // are computed is fine - needed by circuits whose Poseidon2 sites chain through
-                // secret multiplications.
-                let mut inputs = Vec::with_capacity(node.inputs.len());
-                for &input in &node.inputs {
-                    let s = slot[input.index()].expect("gadget input not yet resolved");
-                    if s.bank == Bank::Local {
-                        eyre::bail!(
-                            "codegen: gadget site {} reads a Local (un-reshared MulLocal) \
-                             value - it must be reshared first; this is a lowering invariant \
-                             violation",
-                            site_id.index()
-                        );
-                    }
-                    inputs.push(SiteInput {
-                        bank: s.bank,
-                        slot: Slot::new(s.index),
-                    });
-                }
-                site_inputs[site_id.index()] = inputs;
-                // The Gadget node's own value is never read directly (only via
-                // GadgetResult) - it needs no slot.
-            }
-            Op::GadgetResult(_) => {
-                let Op::Gadget(site_id) = &nodes[node.inputs[0].index()].op else {
-                    unreachable!("a GadgetResult's input is always its Gadget node");
-                };
-                let base = site_result_base[site_id.index()];
-                let phys = result_phys[i].expect(
-                    "every GadgetResult node that survives to codegen was counted \
-                             into live_slots/live_nodes above",
-                );
-                slot[i] = Some(Loc {
-                    bank: base.bank,
-                    index: phys,
-                });
-            }
+                graph.num_rounds()
+            ],
+            round_operands: Vec::new(),
+            round_results: Vec::new(),
+            site_inputs: vec![Vec::new(); graph.gadget_sites().len()],
+            fusion_inputs: Vec::new(),
+        };
+        Self {
+            arena,
+            slot: std::mem::take(&mut reservation.slot),
+            out,
         }
-        // Every batch anchored here is serviced now: all of its sites' inputs are resolved, and
-        // `plan_gadget_batches` has checked that nothing reads its results before this point.
-        for &batch_idx in &batches_at[i] {
-            if let RuntimePlan::IsZeroReveal(fusion_idx) = runtime_plans[batch_idx] {
-                let fusion = &fusion_plans[fusion_idx];
-                debug_assert!(
-                    fusion_inputs[fusion_idx].is_empty(),
-                    "a fusion's inputs must be collected exactly once, at its first IsZero site"
-                );
-                for pair in &fusion.pairs {
-                    fusion_inputs[fusion_idx].push(site_inputs[pair.zero_test_site][0]);
-                }
-            }
-            instructions.push(Instruction::Gadget(BatchIdx::try_from(batch_idx)?));
-            // Site inputs were pinned to this anchor by the liveness extension above, so this is
-            // where they become recyclable. A fused service retains the original IsZero operand,
-            // not the intermediate result passed to Reveal.
-            match runtime_plans[batch_idx] {
-                RuntimePlan::Normal(plan_idx) => {
-                    for &(_, site_node) in &plans[plan_idx].sites {
-                        for &input in &nodes[site_node].inputs {
-                            arena.free_if_dead(input, i, &mut slot);
-                        }
-                    }
-                }
-                RuntimePlan::IsZeroReveal(fusion_idx) => {
-                    for pair in &fusion_plans[fusion_idx].pairs {
-                        for &input in &nodes[pair.zero_test_node].inputs {
-                            arena.free_if_dead(input, i, &mut slot);
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
     }
 
-    // --- Assemble the planned batches; slot lists follow each plan's own site order ---
-    let batches: Vec<GadgetBatch> = runtime_plans
-        .iter()
-        .map(|runtime| {
-            if let RuntimePlan::IsZeroReveal(fusion_idx) = *runtime {
-                let fusion = &fusion_plans[fusion_idx];
-                let input_slots = fusion_inputs[fusion_idx].clone();
-                let mut result_requests = Vec::new();
-                let mut result_offsets = Vec::with_capacity(fusion.pairs.len() + 1);
-                let mut result_targets = Vec::new();
-                result_offsets.push(0);
-                for pair in &fusion.pairs {
-                    let source_site = pair.zero_test_site;
-                    debug_assert_eq!(
-                        site_result_base[source_site].bank,
-                        Bank::Shared,
-                        "an IsZero fused into IsZeroReveal must have Shared results"
-                    );
-                    for (pos, &logical) in live_slots[source_site].iter().enumerate() {
-                        debug_assert!(logical <= 1, "IsZero has exactly two result slots");
-                        result_requests.push(ResultSlot::new(logical));
-                        result_targets.push(ResultTarget {
-                            bank: Bank::Shared,
-                            slot: Slot::new(
-                                result_phys[live_nodes[source_site][pos]]
-                                    .expect("every live source result has a physical slot"),
-                            ),
-                        });
-                    }
+    /// Phase B: the forward walk over `graph.nodes()` allocating recyclable slots and emitting
+    /// instructions, servicing each gadget batch at its anchor node.
+    fn run(
+        &mut self,
+        graph: &Graph,
+        domain: &[Domain],
+        schedule: &BatchSchedule,
+        reservation: &Reservation,
+    ) -> eyre::Result<()> {
+        let nodes = graph.nodes();
+        self.out.fusion_inputs = schedule
+            .fusion_plans
+            .iter()
+            .map(|fusion| Vec::with_capacity(fusion.pairs.len()))
+            .collect();
 
-                    let reveal_base = site_result_base[pair.reveal_site];
-                    debug_assert_eq!(
-                        reveal_base.bank,
-                        Bank::Public,
-                        "the Reveal half of an IsZeroReveal fusion must have Public results"
-                    );
-                    for (pos, &logical) in live_slots[pair.reveal_site].iter().enumerate() {
-                        debug_assert_eq!(
-                            logical, 0,
-                            "a fused Reveal(1) site has exactly one logical result slot"
-                        );
-                        result_requests.push(ResultSlot::new(2 + logical));
-                        result_targets.push(ResultTarget {
-                            bank: Bank::Public,
-                            slot: Slot::new(
-                                result_phys[live_nodes[pair.reveal_site][pos]]
-                                    .expect("every live Reveal result has a physical slot"),
-                            ),
-                        });
-                    }
-                    result_offsets.push(
-                        u32::try_from(result_requests.len()).expect("too many fused results"),
+        let mut i = 0usize;
+        while i < nodes.len() {
+            let node = &nodes[i];
+            match &node.op {
+                Op::Constant(_) | Op::Input(_) => {
+                    // Loc already assigned in Phase A.
+                }
+                Op::Add | Op::Sub | Op::Mul => self.emit_arith(nodes, i, domain)?,
+                Op::MulLocal => self.emit_mul_local(nodes, i, domain)?,
+                Op::Round(round_id) => {
+                    let round_id = *round_id;
+                    self.emit_round(nodes, i, round_id)?;
+                    i += node.inputs.len(); // skip the RoundResult nodes just handled
+                }
+                Op::RoundResult(_) => {
+                    unreachable!(
+                        "every RoundResult is consumed by its Round's own arm above - codegen \
+                         never visits one on its own"
                     );
                 }
-                return GadgetBatch {
-                    kind: BatchKind::IsZeroReveal,
-                    sites: fusion.pairs.len(),
-                    input_slots,
-                    result_requests,
-                    result_offsets,
-                    result_targets,
-                };
-            }
-
-            let RuntimePlan::Normal(plan_idx) = *runtime else {
-                unreachable!("fused runtime plan returned above")
-            };
-            let plan = &plans[plan_idx];
-            let mut input_slots = Vec::new();
-            // Site-contiguous, ascending within a site: `result_requests[lo..hi]` (via
-            // `result_offsets[site]..result_offsets[site + 1]`) is the sorted list of logical
-            // slots this site actually needs, and `result_targets[lo..hi]` their destinations - two
-            // sites in one batch may now have different live counts, which is exactly why a flat
-            // `sites * capacity` shape (recovered by division) no longer works.
-            let mut result_requests = Vec::new();
-            let mut result_offsets = Vec::with_capacity(plan.sites.len() + 1);
-            let mut result_targets = Vec::new();
-            result_offsets.push(0u32);
-            for &(site_id, _) in &plan.sites {
-                input_slots.extend_from_slice(&site_inputs[site_id]);
-                let base = site_result_base[site_id];
-                debug_assert_eq!(
-                    base.bank,
-                    gadget_result_bank(plan.kind, plan.domain, plan.precomputed)
-                        .expect("already validated while reserving site_result_base"),
-                    "a site's result bank must not change between reservation and assembly"
-                );
-                for (pos, &logical) in live_slots[site_id].iter().enumerate() {
-                    result_requests.push(ResultSlot::new(logical));
-                    result_targets.push(ResultTarget {
-                        bank: base.bank,
-                        slot: Slot::new(
-                            result_phys[live_nodes[site_id][pos]]
-                                .expect("every live gadget result has a physical slot"),
+                Op::Gadget(site_id) => self.collect_site_inputs(nodes, i, site_id.index())?,
+                Op::GadgetResult(_) => {
+                    let Op::Gadget(site_id) = &nodes[node.inputs[0].index()].op else {
+                        unreachable!("a GadgetResult's input is always its Gadget node");
+                    };
+                    self.slot[i] = Some(Loc {
+                        bank: reservation.gadgets.site_result_base[site_id.index()].bank,
+                        index: reservation.gadgets.result_phys[i].expect(
+                            "every GadgetResult node that survives to codegen was counted into \
+                             live_slots/live_nodes in Phase A",
                         ),
                     });
                 }
-                result_offsets
-                    .push(u32::try_from(result_requests.len()).expect("too many gadget results"));
             }
-            GadgetBatch {
-                kind: if plan.precomputed {
-                    let GadgetKind::Poseidon2 { t } = plan.kind else {
-                        unreachable!(
-                            "a precomputed plan is always Poseidon2 - the frontend never marks \
-                             any other kind precomputed (build.rs), got {:?}",
-                            plan.kind
-                        );
-                    };
-                    BatchKind::PrecomputedPoseidon2 { t }
-                } else {
-                    BatchKind::Gadget(plan.kind)
-                },
-                sites: plan.sites.len(),
-                input_slots,
-                result_requests,
-                result_offsets,
-                result_targets,
-            }
-        })
-        .collect();
+            self.service_batches(nodes, i, schedule)?;
+            i += 1;
+        }
+        Ok(())
+    }
 
-    // Build a compile-time signal -> source table, then immediately project it into witness order.
-    // This retains today's last-binding-wins behavior for the (normally unique) signal bindings,
-    // without carrying the oversized signal address space into runtime.
-    // Pass/codegen unit tests intentionally use hand-built graphs without a witness projection.
-    // Preserve that diagnostic-only contract without requiring their synthetic signal metadata to
-    // describe inputs that no runtime will ever project.
-    let witness_sources = if graph.signal_to_witness.is_empty() {
-        Vec::new()
-    } else {
-        let mut signal_sources = vec![None; graph.num_signals()];
-        *signal_sources.get_mut(0).ok_or_else(|| {
-            eyre::eyre!("codegen: witness-bearing graph has no constant-one signal")
-        })? = Some(WitnessSource::One);
-        for &(signal, value) in graph.outputs() {
-            let s = slot[value.index()].expect("output value not yet resolved");
-            if s.bank == Bank::Local {
+    fn emit_arith(&mut self, nodes: &[Node], i: usize, domain: &[Domain]) -> eyre::Result<()> {
+        let node = &nodes[i];
+        let da = domain[node.inputs[0].index()];
+        let db = domain[node.inputs[1].index()];
+        let (opcode, dst_bank, swap) = select_opcode(&node.op, da, db)?;
+        let sa = self.slot[node.inputs[0].index()].expect("operand not yet resolved");
+        let sb = self.slot[node.inputs[1].index()].expect("operand not yet resolved");
+        let (a, b) = if swap {
+            (sb.index, sa.index)
+        } else {
+            (sa.index, sb.index)
+        };
+        let dst = self.arena.alloc(dst_bank);
+        self.out.instructions.push(Instruction::Arith {
+            op: opcode,
+            dst: Slot::new(dst),
+            a: Slot::new(a),
+            b: Slot::new(b),
+        });
+        self.slot[i] = Some(Loc {
+            bank: dst_bank,
+            index: dst,
+        });
+        self.arena.free_if_dead(node.inputs[0], i, &mut self.slot);
+        self.arena.free_if_dead(node.inputs[1], i, &mut self.slot);
+        Ok(())
+    }
+
+    fn emit_mul_local(&mut self, nodes: &[Node], i: usize, domain: &[Domain]) -> eyre::Result<()> {
+        let node = &nodes[i];
+        let sa = self.slot[node.inputs[0].index()].expect("operand not yet resolved");
+        let sb = self.slot[node.inputs[1].index()].expect("operand not yet resolved");
+        if domain[node.inputs[0].index()] != Domain::Shared
+            || domain[node.inputs[1].index()] != Domain::Shared
+        {
+            eyre::bail!(
+                "codegen: MulLocal's operands must both be Shared (rep3's local_mul_vec needs two \
+                 genuine shares) - got {:?}/{:?}",
+                domain[node.inputs[0].index()],
+                domain[node.inputs[1].index()]
+            );
+        }
+        let dst = self.arena.alloc(Bank::Local);
+        self.out.instructions.push(Instruction::Arith {
+            op: Opcode::MulLocal,
+            dst: Slot::new(dst),
+            a: Slot::new(sa.index),
+            b: Slot::new(sb.index),
+        });
+        self.slot[i] = Some(Loc {
+            bank: Bank::Local,
+            index: dst,
+        });
+        self.arena.free_if_dead(node.inputs[0], i, &mut self.slot);
+        self.arena.free_if_dead(node.inputs[1], i, &mut self.slot);
+        Ok(())
+    }
+
+    fn emit_round(&mut self, nodes: &[Node], i: usize, round_id: RoundId) -> eyre::Result<()> {
+        let node = &nodes[i];
+        let operand_start =
+            u32::try_from(self.out.round_operands.len()).expect("too many round operands");
+        for &input in &node.inputs {
+            let s = self.slot[input.index()].expect("round operand not yet resolved");
+            if s.bank != Bank::Local {
                 eyre::bail!(
-                    "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
-                     reshared (Op::Round) first; this is a lowering invariant violation"
+                    "codegen: a Round's operand must be a Local (MulLocal) value, got {:?}",
+                    s.bank
                 );
             }
-            let signal_index = signal.index() + 1;
-            let destination = signal_sources.get_mut(signal_index).ok_or_else(|| {
-                eyre::eyre!(
-                    "codegen: output signal {signal_index} exceeds num_signals={}",
-                    graph.num_signals()
-                )
-            })?;
-            *destination = Some(WitnessSource::Slot {
+            self.out.round_operands.push(Slot::new(s.index));
+            self.arena.l.free(s.index, 0);
+        }
+        let len = u32::try_from(node.inputs.len()).expect("round has more slots than fit into u32");
+
+        // round_schedule guarantees a Round node is immediately followed by exactly `len`
+        // RoundResult(0..len) nodes, in slot order - see its own module doc. Codegen relies
+        // on the same guarantee its own producer already asserts, rather than re-deriving
+        // the mapping some other way.
+        let result_start =
+            u32::try_from(self.out.round_results.len()).expect("too many round results");
+        for k in 0..node.inputs.len() {
+            let result_idx = i + 1 + k;
+            let expected_k = u32::try_from(k).expect("round has more slots than fit into u32");
+            match nodes.get(result_idx).map(|n| &n.op) {
+                Some(Op::RoundResult(slot_k)) if *slot_k == expected_k => {}
+                other => eyre::bail!(
+                    "codegen: Round {} expected RoundResult({expected_k}) at node {result_idx}, \
+                     found {other:?} - round_schedule's adjacency invariant was violated",
+                    round_id.index()
+                ),
+            }
+            let dst = self.arena.alloc(Bank::Shared);
+            self.out.round_results.push(Slot::new(dst));
+            self.slot[result_idx] = Some(Loc {
+                bank: Bank::Shared,
+                index: dst,
+            });
+        }
+        self.out.rounds[round_id.index()] = RoundEntry {
+            operand_start,
+            len,
+            result_start,
+        };
+        self.out
+            .instructions
+            .push(Instruction::Reshare(RoundIdx::try_from(round_id.index())?));
+        // Free every RoundResult(k) input that died the instant it was produced (rare - an unread
+        // result would already have been dropped by an earlier gc in practice, but the allocator
+        // handles it correctly regardless).
+        for k in 0..node.inputs.len() {
+            let result_idx = i + 1 + k;
+            self.arena
+                .free_if_dead(ValueId::new(result_idx), result_idx, &mut self.slot);
+        }
+        Ok(())
+    }
+
+    /// A site's inputs are ordinary operands, resolved like any other. They are *not* required to
+    /// be bare `Op::Input`/`Op::Constant`: batches are serviced at their own point in the
+    /// instruction stream (see `Opcode::Gadget`), so a site whose inputs are computed is fine -
+    /// needed by circuits whose Poseidon2 sites chain through secret multiplications. The Gadget
+    /// node's own value is never read directly (only via `GadgetResult`), so it needs no slot.
+    fn collect_site_inputs(
+        &mut self,
+        nodes: &[Node],
+        i: usize,
+        site_id: usize,
+    ) -> eyre::Result<()> {
+        let node = &nodes[i];
+        let mut inputs = Vec::with_capacity(node.inputs.len());
+        for &input in &node.inputs {
+            let s = self.slot[input.index()].expect("gadget input not yet resolved");
+            if s.bank == Bank::Local {
+                eyre::bail!(
+                    "codegen: gadget site {site_id} reads a Local (un-reshared MulLocal) value - \
+                     it must be reshared first; this is a lowering invariant violation"
+                );
+            }
+            inputs.push(SiteInput {
                 bank: s.bank,
                 slot: Slot::new(s.index),
             });
         }
-        for input_index in 0..graph.num_inputs() {
-            let signal = graph.num_outputs() + input_index + 1;
-            let destination = signal_sources.get_mut(signal).ok_or_else(|| {
-                eyre::eyre!(
-                    "codegen: input signal {signal} exceeds num_signals={}",
-                    graph.num_signals()
-                )
-            })?;
-            *destination = Some(WitnessSource::Input(InputIdx::try_from(input_index)?));
+        self.out.site_inputs[site_id] = inputs;
+        Ok(())
+    }
+
+    /// Every batch anchored at `i` is serviced now: all of its sites' inputs are resolved, and
+    /// `plan_gadget_batches` has checked that nothing reads its results before this point.
+    fn service_batches(
+        &mut self,
+        nodes: &[Node],
+        i: usize,
+        schedule: &BatchSchedule,
+    ) -> eyre::Result<()> {
+        for &batch_idx in &schedule.batches_at[i] {
+            if let RuntimePlan::IsZeroReveal(fusion_idx) = schedule.runtime_plans[batch_idx] {
+                let fusion = &schedule.fusion_plans[fusion_idx];
+                debug_assert!(
+                    self.out.fusion_inputs[fusion_idx].is_empty(),
+                    "a fusion's inputs must be collected exactly once, at its first IsZero site"
+                );
+                for pair in &fusion.pairs {
+                    let input = self.out.site_inputs[pair.zero_test_site][0];
+                    self.out.fusion_inputs[fusion_idx].push(input);
+                }
+            }
+            self.out
+                .instructions
+                .push(Instruction::Gadget(BatchIdx::try_from(batch_idx)?));
+            // Site inputs were pinned to this anchor by the liveness extension in `plan_batches`,
+            // so this is where they become recyclable. A fused service retains the original IsZero
+            // operand, not the intermediate result passed to Reveal.
+            match schedule.runtime_plans[batch_idx] {
+                RuntimePlan::Normal(plan_idx) => {
+                    for &(_, site_node) in &schedule.plans[plan_idx].sites {
+                        for &input in &nodes[site_node].inputs {
+                            self.arena.free_if_dead(input, i, &mut self.slot);
+                        }
+                    }
+                }
+                RuntimePlan::IsZeroReveal(fusion_idx) => {
+                    for pair in &schedule.fusion_plans[fusion_idx].pairs {
+                        for &input in &nodes[pair.zero_test_node].inputs {
+                            self.arena.free_if_dead(input, i, &mut self.slot);
+                        }
+                    }
+                }
+            }
         }
-        graph
-            .signal_to_witness
+        Ok(())
+    }
+}
+
+/// Assembles the planned batches into their runtime tables; slot lists follow each plan's own site
+/// order.
+fn assemble_batches(
+    schedule: &BatchSchedule,
+    reservation: &Reservation,
+    emission: &Emission,
+) -> Vec<GadgetBatch> {
+    schedule
+        .runtime_plans
+        .iter()
+        .map(|runtime| match *runtime {
+            RuntimePlan::IsZeroReveal(fusion_idx) => {
+                assemble_fused_batch(schedule, reservation, emission, fusion_idx)
+            }
+            RuntimePlan::Normal(plan_idx) => {
+                assemble_normal_batch(schedule, reservation, emission, plan_idx)
+            }
+        })
+        .collect()
+}
+
+fn assemble_fused_batch(
+    schedule: &BatchSchedule,
+    reservation: &Reservation,
+    emission: &Emission,
+    fusion_idx: usize,
+) -> GadgetBatch {
+    let fusion = &schedule.fusion_plans[fusion_idx];
+    let mut result_requests = Vec::new();
+    let mut result_offsets = Vec::with_capacity(fusion.pairs.len() + 1);
+    let mut result_targets = Vec::new();
+    result_offsets.push(0);
+    for pair in &fusion.pairs {
+        let source_site = pair.zero_test_site;
+        debug_assert_eq!(
+            reservation.gadgets.site_result_base[source_site].bank,
+            Bank::Shared,
+            "an IsZero fused into IsZeroReveal must have Shared results"
+        );
+        for (pos, &logical) in reservation.gadgets.live_slots[source_site]
             .iter()
-            .map(|&signal| {
-                signal_sources
-                    .get(signal)
-                    .and_then(|source| *source)
-                    .unwrap_or(WitnessSource::Zero)
-            })
-            .collect()
-    };
+            .enumerate()
+        {
+            debug_assert!(logical <= 1, "IsZero has exactly two result slots");
+            result_requests.push(ResultSlot::new(logical));
+            result_targets.push(ResultTarget {
+                bank: Bank::Shared,
+                slot: Slot::new(
+                    reservation.gadgets.result_phys
+                        [reservation.gadgets.live_nodes[source_site][pos]]
+                        .expect("every live source result has a physical slot"),
+                ),
+            });
+        }
+
+        debug_assert_eq!(
+            reservation.gadgets.site_result_base[pair.reveal_site].bank,
+            Bank::Public,
+            "the Reveal half of an IsZeroReveal fusion must have Public results"
+        );
+        for (pos, &logical) in reservation.gadgets.live_slots[pair.reveal_site]
+            .iter()
+            .enumerate()
+        {
+            debug_assert_eq!(
+                logical, 0,
+                "a fused Reveal(1) site has exactly one logical result slot"
+            );
+            result_requests.push(ResultSlot::new(2 + logical));
+            result_targets.push(ResultTarget {
+                bank: Bank::Public,
+                slot: Slot::new(
+                    reservation.gadgets.result_phys
+                        [reservation.gadgets.live_nodes[pair.reveal_site][pos]]
+                        .expect("every live Reveal result has a physical slot"),
+                ),
+            });
+        }
+        result_offsets.push(u32::try_from(result_requests.len()).expect("too many fused results"));
+    }
+    GadgetBatch {
+        kind: BatchKind::IsZeroReveal,
+        sites: fusion.pairs.len(),
+        input_slots: emission.fusion_inputs[fusion_idx].clone(),
+        result_requests,
+        result_offsets,
+        result_targets,
+    }
+}
+
+fn assemble_normal_batch(
+    schedule: &BatchSchedule,
+    reservation: &Reservation,
+    emission: &Emission,
+    plan_idx: usize,
+) -> GadgetBatch {
+    let plan = &schedule.plans[plan_idx];
+    let mut input_slots = Vec::new();
+    // Site-contiguous, ascending within a site: `result_requests[lo..hi]` (via
+    // `result_offsets[site]..result_offsets[site + 1]`) is the sorted list of logical
+    // slots this site actually needs, and `result_targets[lo..hi]` their destinations - two
+    // sites in one batch may now have different live counts, which is exactly why a flat
+    // `sites * capacity` shape (recovered by division) no longer works.
+    let mut result_requests = Vec::new();
+    let mut result_offsets = Vec::with_capacity(plan.sites.len() + 1);
+    let mut result_targets = Vec::new();
+    result_offsets.push(0u32);
+    for &(site_id, _) in &plan.sites {
+        input_slots.extend_from_slice(&emission.site_inputs[site_id]);
+        let base = reservation.gadgets.site_result_base[site_id];
+        debug_assert_eq!(
+            base.bank,
+            gadget_result_bank(plan.kind, plan.domain, plan.precomputed)
+                .expect("already validated while reserving site_result_base"),
+            "a site's result bank must not change between reservation and assembly"
+        );
+        for (pos, &logical) in reservation.gadgets.live_slots[site_id].iter().enumerate() {
+            result_requests.push(ResultSlot::new(logical));
+            result_targets.push(ResultTarget {
+                bank: base.bank,
+                slot: Slot::new(
+                    reservation.gadgets.result_phys[reservation.gadgets.live_nodes[site_id][pos]]
+                        .expect("every live gadget result has a physical slot"),
+                ),
+            });
+        }
+        result_offsets.push(u32::try_from(result_requests.len()).expect("too many gadget results"));
+    }
+    GadgetBatch {
+        kind: if plan.precomputed {
+            let GadgetKind::Poseidon2 { t } = plan.kind else {
+                unreachable!(
+                    "a precomputed plan is always Poseidon2 - the frontend never marks any other \
+                     kind precomputed (build.rs), got {:?}",
+                    plan.kind
+                );
+            };
+            BatchKind::PrecomputedPoseidon2 { t }
+        } else {
+            BatchKind::Gadget(plan.kind)
+        },
+        sites: plan.sites.len(),
+        input_slots,
+        result_requests,
+        result_offsets,
+        result_targets,
+    }
+}
+
+/// Builds a compile-time signal -> source table, then immediately projects it into witness order.
+/// This retains today's last-binding-wins behavior for the (normally unique) signal bindings,
+/// without carrying the oversized signal address space into runtime.
+///
+/// Pass/codegen unit tests intentionally use hand-built graphs without a witness projection.
+/// That diagnostic-only contract is preserved (empty result) without requiring their synthetic
+/// signal metadata to describe inputs that no runtime will ever project.
+fn build_witness_sources(graph: &Graph, slot: &[Option<Loc>]) -> eyre::Result<Vec<WitnessSource>> {
+    if graph.signal_to_witness.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut signal_sources = vec![None; graph.num_signals()];
+    *signal_sources.get_mut(0).ok_or_else(|| {
+        eyre::eyre!("codegen: witness-bearing graph has no constant-one signal")
+    })? = Some(WitnessSource::One);
+    for &(signal, value) in graph.outputs() {
+        let s = slot[value.index()].expect("output value not yet resolved");
+        if s.bank == Bank::Local {
+            eyre::bail!(
+                "codegen: a Local (MulLocal) value reached a circuit output directly - it must be \
+                 reshared (Op::Round) first; this is a lowering invariant violation"
+            );
+        }
+        let signal_index = signal.index() + 1;
+        let destination = signal_sources.get_mut(signal_index).ok_or_else(|| {
+            eyre::eyre!(
+                "codegen: output signal {signal_index} exceeds num_signals={}",
+                graph.num_signals()
+            )
+        })?;
+        *destination = Some(WitnessSource::Slot {
+            bank: s.bank,
+            slot: Slot::new(s.index),
+        });
+    }
+    for input_index in 0..graph.num_inputs() {
+        let signal = graph.num_outputs() + input_index + 1;
+        let destination = signal_sources.get_mut(signal).ok_or_else(|| {
+            eyre::eyre!(
+                "codegen: input signal {signal} exceeds num_signals={}",
+                graph.num_signals()
+            )
+        })?;
+        *destination = Some(WitnessSource::Input(InputIdx::try_from(input_index)?));
+    }
+    Ok(graph
+        .signal_to_witness
+        .iter()
+        .map(|&signal| {
+            signal_sources
+                .get(signal)
+                .and_then(|source| *source)
+                .unwrap_or(WitnessSource::Zero)
+        })
+        .collect())
+}
+
+/// Compiles a fully lowered graph (`PassManager::run` has already run - see
+/// `circom_mpc_compiler::compile`) into a `Program`.
+///
+/// # Panics
+///
+/// Panics if an internal invariant that an earlier pass is responsible for maintaining (e.g. slot
+/// or index bounds fitting into `u32`) is violated.
+///
+/// # Errors
+///
+/// Returns an error if `graph` isn't a validly lowered graph - e.g. a `Local`-domain value reaches
+/// an arithmetic op directly, or a secret x secret `Mul` survived MPC lowering.
+pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
+    let domain = compute_domains(graph);
+    let mut last_use = compute_last_use(graph);
+    let schedule = plan_batches(graph, &domain, &mut last_use);
+    let mut reservation = reserve_slots(graph, &domain)?;
+    let mut emitter = Emitter::new(graph, &mut reservation, last_use);
+    emitter.run(graph, &domain, &schedule, &reservation)?;
+    let batches = assemble_batches(&schedule, &reservation, &emitter.out);
+    let witness_sources = build_witness_sources(graph, &emitter.slot)?;
 
     Ok(Program::new(ProgramParts {
-        instructions,
-        constants,
-        input_domains,
-        inputs: input_bindings,
-        input_signals,
-        rounds,
-        round_operands,
-        round_results,
+        instructions: emitter.out.instructions,
+        constants: reservation.constants,
+        input_domains: reservation.input_domains,
+        inputs: reservation.input_bindings,
+        input_signals: reservation.input_signals,
+        rounds: emitter.out.rounds,
+        round_operands: emitter.out.round_operands,
+        round_results: emitter.out.round_results,
         gadget_batches: batches,
         witness_sources,
         num_inputs: graph.num_inputs(),
         slots: SlotCounts {
-            public: arena.p.next,
-            shared: arena.s.next,
-            local: arena.l.next,
+            public: emitter.arena.p.next,
+            shared: emitter.arena.s.next,
+            local: emitter.arena.l.next,
         },
     }))
 }

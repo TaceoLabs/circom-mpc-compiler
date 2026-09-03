@@ -11,13 +11,9 @@ use rustc_hash::FxHashMap;
 
 use crate::ir::{Graph, Op, RewriteAction, ValueId};
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match the shared PassFn signature every pass in the pipeline implements, even though this pass never fails today"
-)]
-pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
+pub(super) fn run(graph: &mut Graph) -> bool {
     let mut seen: FxHashMap<(Op, Vec<ValueId>), ValueId> = FxHashMap::default();
-    Ok(graph.rewrite(|_id, node, emitted| {
+    graph.rewrite(|_id, node, emitted| {
         if !node.op.is_pure() {
             return RewriteAction::Keep;
         }
@@ -31,7 +27,7 @@ pub(super) fn run(graph: &mut Graph) -> eyre::Result<bool> {
             seen.insert(key, ValueId::new(emitted.len()));
             RewriteAction::Keep
         }
-    }))
+    })
 }
 
 /// The key inputs used for hash-consing: sorted for commutative ops, so operand order doesn't
@@ -74,7 +70,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(0), ValueId::new(1)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 3); // two inputs + one Add survive
@@ -90,7 +86,7 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(1), ValueId::new(0)]),
         ];
         let mut graph = graph_of(nodes, ValueId::new(3));
-        let changed = run(&mut graph).expect("run should not fail on this test graph");
+        let changed = run(&mut graph);
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 3);

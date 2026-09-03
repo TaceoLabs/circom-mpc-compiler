@@ -80,7 +80,7 @@ where
     let opt_level = config.opt_level;
     let mut graph = frontend::build_graph(PathBuf::from(file).display().to_string(), config)?;
     tracing::debug!("graph before passes:\n{:?}", graph);
-    passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
+    passes::PassManager::for_opt_level(opt_level).run(&mut graph);
     Ok(graph)
 }
 
