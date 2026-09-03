@@ -13,22 +13,22 @@ circom-program_structure = { package = "program_structure", git = "https://githu
 circom-type_analysis = { package = "type_analysis", git = "https://github.com/TaceoLabs/circom", rev = "53c1ccd0c74f12665c5aeb89592360f42c3d1226", version = "2.2.2" }
 circom-types = { package = "taceo-circom-types", version = "0.3.1" }
 clap = { version = "4.5", features = ["derive"] }
-co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "01296e43b5eecfb56a0cef6306f3767343b873f5", version = "0.6.0" }
-co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "01296e43b5eecfb56a0cef6306f3767343b873f5", version = "0.10.0" }
+co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.6.0" }
+co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
 criterion = "0.5"
 eyre = "0.6.12"
-mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "01296e43b5eecfb56a0cef6306f3767343b873f5", version = "0.10.0" }
-mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "01296e43b5eecfb56a0cef6306f3767343b873f5", version = "0.5.0" }
+mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
+mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.5.0" }
 num-bigint = { version = "0.4.6" }
 num-traits = { version = "0.2.18", default-features = false }
-rand = { version = "0.8.5" }
+rand = { version = "0.8.8" }
 rustc-hash = "2"
 rustls = { version = "0.23" }
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
 toml = { version = "0.8" }
 tracing = { version = "0.1.40" }
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
