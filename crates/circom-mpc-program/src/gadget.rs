@@ -24,7 +24,9 @@ impl Poseidon2Width {
             crate::POSEIDON2_SUPPORTED_WIDTHS.contains(&t),
             "unsupported Poseidon2 width {t}"
         );
-        Ok(Self(u32::try_from(t).expect("supported widths fit into u32")))
+        Ok(Self(
+            u32::try_from(t).expect("supported widths fit into u32"),
+        ))
     }
 
     /// The width as a `usize`, for width arithmetic.

@@ -8,7 +8,7 @@ use circom_compiler::intermediate_representation::ir_interface::{
 };
 use eyre::Result;
 
-use super::build::{to_u64, GraphCompiler};
+use super::build::{GraphCompiler, to_u64};
 
 #[derive(Clone, Copy, Debug)]
 enum Step {

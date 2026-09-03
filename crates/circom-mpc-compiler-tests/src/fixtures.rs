@@ -10,13 +10,13 @@ pub mod rep3 {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
     use mpc_core::protocols::rep3::{
-        combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+        Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element,
     };
     use mpc_net::local::LocalNetwork;
 
     use circom_mpc_program::{Bank, Program};
-    use circom_mpc_vm::driver::rep3::Rep3Driver;
     use circom_mpc_vm::Machine;
+    use circom_mpc_vm::driver::rep3::Rep3Driver;
 
     /// One `[share; 3]` triple per `Shared`-domain input, in the order `Program::classify_inputs`
     /// visits them - each party takes its own component.

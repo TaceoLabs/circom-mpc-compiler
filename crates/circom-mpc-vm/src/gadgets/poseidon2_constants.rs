@@ -12,11 +12,7 @@ use ark_ff::PrimeField;
 
 /// How many partial rounds `Poseidon2(t)` runs - `amount_partial_rounds` in the circuit.
 pub(super) const fn partial_rounds(t: usize) -> usize {
-    if t <= 4 {
-        56
-    } else {
-        57
-    }
+    if t <= 4 { 56 } else { 57 }
 }
 
 /// `load_rc_full1(2)`, flattened row-major (4 rounds x 2).
@@ -690,8 +686,16 @@ impl RoundConstants {
                  {{2, 3, 4, 8, 12, 16}}"
             ),
         };
-        debug_assert_eq!(full1.len(), 4 * t, "wrong number of first-full-round constants");
-        debug_assert_eq!(full2.len(), 4 * t, "wrong number of second-full-round constants");
+        debug_assert_eq!(
+            full1.len(),
+            4 * t,
+            "wrong number of first-full-round constants"
+        );
+        debug_assert_eq!(
+            full2.len(),
+            4 * t,
+            "wrong number of second-full-round constants"
+        );
         debug_assert_eq!(
             partial.len(),
             partial_rounds(t),

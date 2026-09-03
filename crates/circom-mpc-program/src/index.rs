@@ -41,9 +41,9 @@ macro_rules! index_type {
             type Error = eyre::Report;
 
             fn try_from(raw: usize) -> Result<Self, Self::Error> {
-                u32::try_from(raw)
-                    .map(Self)
-                    .map_err(|_| eyre::eyre!(concat!($what, " {raw} does not fit into u32"), raw = raw))
+                u32::try_from(raw).map(Self).map_err(|_| {
+                    eyre::eyre!(concat!($what, " {raw} does not fit into u32"), raw = raw)
+                })
             }
         }
     };

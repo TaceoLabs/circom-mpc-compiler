@@ -94,7 +94,9 @@ mod tests {
         assert!(changed);
         graph.gc();
         assert_eq!(graph.len(), 1);
-        assert!(matches!(graph.nodes()[ValueId::new(0).index()].op, Op::Constant(c) if c == Fr::from(5u64)));
+        assert!(
+            matches!(graph.nodes()[ValueId::new(0).index()].op, Op::Constant(c) if c == Fr::from(5u64))
+        );
     }
 
     #[test]
@@ -111,7 +113,10 @@ mod tests {
         graph.gc();
         // only the Input node should survive - the Add collapsed into an alias for it
         assert_eq!(graph.len(), 1);
-        assert!(matches!(graph.nodes()[ValueId::new(0).index()].op, Op::Input(_)));
+        assert!(matches!(
+            graph.nodes()[ValueId::new(0).index()].op,
+            Op::Input(_)
+        ));
     }
 
     #[test]

@@ -108,9 +108,7 @@ pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
         .into_iter()
         .enumerate()
         .map(|(site, stage)| {
-            stage.unwrap_or_else(|| {
-                panic!("gadget site {site} has no Op::Gadget node")
-            })
+            stage.unwrap_or_else(|| panic!("gadget site {site} has no Op::Gadget node"))
         })
         .collect()
 }
@@ -147,17 +145,10 @@ mod tests {
     fn site_results_are_one_level_above_their_inputs() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
         ];
-        let graph = graph_of(
-            nodes,
-            ValueId::new(2),
-            vec![site(GadgetKind::IsZero)],
-        );
+        let graph = graph_of(nodes, ValueId::new(2), vec![site(GadgetKind::IsZero)]);
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),
             vec![0, 0, 1]
@@ -172,20 +163,11 @@ mod tests {
     fn chained_sites_with_no_multiplication_get_distinct_stages() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(2)],
-            ), // 3
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 3
             Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
-            Node::new(
-                Op::Gadget(GadgetId::new(2)),
-                vec![ValueId::new(4)],
-            ), // 5
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(4)]), // 5
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6
         ];
         let graph = graph_of(
@@ -209,25 +191,16 @@ mod tests {
     fn independent_sites_share_a_stage() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(0)],
-            ), // 3
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(0)]), // 3
             Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
             Node::new(Op::Add, vec![ValueId::new(2), ValueId::new(4)]), // 5
         ];
         let graph = graph_of(
             nodes,
             ValueId::new(5),
-            vec![
-                site(GadgetKind::IsZero),
-                site(GadgetKind::IsZero),
-            ],
+            vec![site(GadgetKind::IsZero), site(GadgetKind::IsZero)],
         );
         assert_eq!(site_stages(&graph, &compute_domains(&graph)), vec![0, 0]);
     }
@@ -236,22 +209,13 @@ mod tests {
     fn public_gadget_does_not_split_shared_batches() {
         let nodes = vec![
             Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 1: public
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1: public
             Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 3: shared
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(3)],
-            ), // 4: shared A
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(3)]), // 4: shared A
             Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(2)]), // 6
-            Node::new(
-                Op::Gadget(GadgetId::new(2)),
-                vec![ValueId::new(6)],
-            ), // 7: shared B
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(6)]), // 7: shared B
             Node::new(Op::GadgetResult(0), vec![ValueId::new(7)]), // 8
             Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(8)]), // 9
         ];

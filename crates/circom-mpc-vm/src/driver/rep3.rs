@@ -3,8 +3,8 @@
 //! its own, so there's nothing to wrap.
 
 use ark_bn254::Fr;
-use mpc_core::protocols::rep3::{self, Rep3PrimeFieldShare, Rep3State};
 use mpc_core::MpcState;
+use mpc_core::protocols::rep3::{self, Rep3PrimeFieldShare, Rep3State};
 use mpc_net::Network;
 
 use circom_mpc_program::Program;

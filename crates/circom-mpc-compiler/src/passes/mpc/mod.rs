@@ -3,8 +3,8 @@
 //! passes in `super`, this is a lowering *sequence*, run once, not a fixpoint - every public entry
 //! point runs it unconditionally; there is no plaintext-only end state.
 
-pub(crate) mod gadget_schedule;
 pub(crate) mod domain;
+pub(crate) mod gadget_schedule;
 pub(crate) mod level;
 mod mul_split;
 mod round_schedule;

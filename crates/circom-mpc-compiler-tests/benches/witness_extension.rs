@@ -28,9 +28,13 @@ fn cases() -> Vec<Case> {
     vec![
         // Known round shape (see tests/mpc_lowering.rs): a dependent chain, a balanced tree, and
         // four independent products - i.e. worst, middling and best cases for round batching.
-        Case { name: "bench_chain" },
+        Case {
+            name: "bench_chain",
+        },
         Case { name: "bench_tree" },
-        Case { name: "bench_widesum" },
+        Case {
+            name: "bench_widesum",
+        },
     ]
 }
 

@@ -105,9 +105,7 @@ pub(crate) fn run(graph: &mut Graph) -> eyre::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{
-        GadgetId, GadgetKind, GadgetSite, GraphParts, Node, Op, SignalIdx, ValueId,
-    };
+    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, Op, SignalIdx, ValueId};
 
     use super::*;
 
@@ -139,7 +137,8 @@ mod tests {
             Node::new(Op::Mul, vec![ValueId::new(3), ValueId::new(2)]), // 4: (a*b)*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(4));
-        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        super::super::mul_split::run(&mut graph)
+            .expect("mul_split should not fail on this test graph");
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.round_slots(), vec![1, 1]);
@@ -157,7 +156,8 @@ mod tests {
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(4)]), // 5: a*b + b*c
         ];
         let mut graph = graph_of(nodes, ValueId::new(5));
-        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        super::super::mul_split::run(&mut graph)
+            .expect("mul_split should not fail on this test graph");
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.round_slots(), vec![2]);
@@ -175,11 +175,8 @@ mod tests {
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: b
             Node::new(Op::Mul, vec![ValueId::new(0), ValueId::new(1)]), // 2: a*b (round 0)
             // The site consumes a value that only exists after round 0.
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(2)],
-            ), // 3
-            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]),          // 4
             // ... and its result feeds a further product, which therefore needs its own round.
             Node::new(Op::Mul, vec![ValueId::new(4), ValueId::new(0)]), // 5
         ];
@@ -191,7 +188,8 @@ mod tests {
                 precomputed: false,
             }],
         );
-        super::super::mul_split::run(&mut graph).expect("mul_split should not fail on this test graph");
+        super::super::mul_split::run(&mut graph)
+            .expect("mul_split should not fail on this test graph");
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         // Two products separated by a site service: they can never share a round.
@@ -207,16 +205,10 @@ mod tests {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
-            Node::new(
-                Op::Gadget(GadgetId::new(0)),
-                vec![ValueId::new(0)],
-            ), // 2: A
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: A
             Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3: A.result
             Node::new(Op::Add, vec![ValueId::new(3), ValueId::new(0)]), // 4: early consumer
-            Node::new(
-                Op::Gadget(GadgetId::new(1)),
-                vec![ValueId::new(1)],
-            ), // 5: B
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 5: B
             Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6: B.result
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(6)]), // 7: output
         ];

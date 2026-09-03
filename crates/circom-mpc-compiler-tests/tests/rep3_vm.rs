@@ -57,8 +57,7 @@ fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config())
-            .unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
     assert_eq!(program.statistics().gadget_sites, 2);
@@ -115,8 +114,7 @@ fn fused_iszero_reveal_costs_one_online_round() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
-        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config())
-            .unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config()).unwrap();
     let (_, _, online) = run_witness_counted(&program, &[Fr::from(0u64), Fr::from(7u64)]);
     assert_eq!(online, [1, 1, 1]);
 }
@@ -377,12 +375,12 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
     use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
 
     let program =
-        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config())
+            .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let baseline =
-            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config())
-                .unwrap();
+            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config()).unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
         Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
     };
@@ -491,13 +489,16 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
     use circom_mpc_vm::driver::plain::PlainDriver;
     use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
 
-    let program = circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
-        .unwrap();
+    let program =
+        circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
+            .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
-        let baseline =
-            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), &config())
-                .unwrap();
+        let baseline = circom_mpc_compiler::compile(
+            circuit_path("gadget_poseidon2_mixed_domain_test"),
+            &config(),
+        )
+        .unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
         Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
     };

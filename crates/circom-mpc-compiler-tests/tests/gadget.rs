@@ -36,11 +36,8 @@ fn wrappers() -> Vec<&'static str> {
 /// `Arity4CMux`.
 #[test]
 fn unrecognized_gadget_compiles_its_body() {
-    let program = circom_mpc_compiler::compile(
-        circuit_path("unsupported_gadget_test"),
-        &config(),
-    )
-    .expect("an unrecognized gadget must compile its body");
+    let program = circom_mpc_compiler::compile(circuit_path("unsupported_gadget_test"), &config())
+        .expect("an unrecognized gadget must compile its body");
     assert_eq!(
         program.statistics().gadget_sites,
         0,
@@ -111,8 +108,7 @@ fn independent_same_kind_sites_share_one_batch() {
 #[test]
 fn num2bits_zero_returns_an_empty_trace_without_panicking() {
     let program =
-        circom_mpc_compiler::compile(circuit_path("gadget_num2bits_zero_test"), &config())
-            .unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_num2bits_zero_test"), &config()).unwrap();
     let values = [Fr::from(0u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();

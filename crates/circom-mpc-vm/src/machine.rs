@@ -6,8 +6,8 @@ use ark_bn254::Fr;
 use ark_ff::{One, Zero};
 
 use circom_mpc_program::{
-    GadgetBatch, GadgetKind, Bank, BatchKind, InputValue, InputValues, Instruction, Program,
-    Slot, WitnessSource,
+    Bank, BatchKind, GadgetBatch, GadgetKind, InputValue, InputValues, Instruction, Program, Slot,
+    WitnessSource,
 };
 
 use crate::driver::VmDriver;
@@ -464,9 +464,9 @@ impl Machine {
             .map(|input| match input.bank {
                 Bank::Public => driver.promote(public[input.slot]),
                 Bank::Shared => shared[input.slot].clone(),
-                Bank::Local => unreachable!(
-                    "codegen rejects an un-reshared MulLocal feeding a site"
-                ),
+                Bank::Local => {
+                    unreachable!("codegen rejects an un-reshared MulLocal feeding a site")
+                }
             })
             .collect();
 

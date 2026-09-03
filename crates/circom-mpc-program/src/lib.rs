@@ -13,7 +13,7 @@ pub use gadget::{GadgetKind, Poseidon2Width};
 pub use index::{BatchIdx, InputIdx, ResultSlot, RoundIdx, Slot};
 pub use inputs::{InputValue, InputValues};
 pub use program::{
-    GadgetBatch, Bank, BatchKind, InputBinding, InputSignal, Instruction, Opcode,
+    Bank, BatchKind, GadgetBatch, InputBinding, InputSignal, Instruction, Opcode,
     POSEIDON2_SUPPORTED_WIDTHS, PrecomputedBatch, Program, ProgramParts, ProgramStatistics,
     ResultTarget, RoundEntry, SiteInput, SlotCounts, WitnessSource,
 };

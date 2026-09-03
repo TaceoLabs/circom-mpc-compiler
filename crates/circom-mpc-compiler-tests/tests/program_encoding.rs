@@ -10,15 +10,14 @@ fn program(circuit: &str) -> Program {
     config
         .link_library
         .push(format!("{root}/../../circuits/node_modules/").into());
-    circom_mpc_compiler::compile(format!("{root}/../../circuits/{circuit}.circom"), &config).unwrap()
+    circom_mpc_compiler::compile(format!("{root}/../../circuits/{circuit}.circom"), &config)
+        .unwrap()
 }
 
 #[test]
 fn accepts_a_freshly_compiled_program() {
     program("multiplier2").validate_encoding().unwrap();
-    program("gadget_iszero_test")
-        .validate_encoding()
-        .unwrap();
+    program("gadget_iszero_test").validate_encoding().unwrap();
 }
 
 #[test]
@@ -35,7 +34,15 @@ fn rejects_an_instruction_slot_out_of_bank_bounds() {
     let instruction = parts
         .instructions
         .iter_mut()
-        .find(|instruction| matches!(instruction, Instruction::Arith { op: circom_mpc_program::Opcode::MulLocal, .. }))
+        .find(|instruction| {
+            matches!(
+                instruction,
+                Instruction::Arith {
+                    op: circom_mpc_program::Opcode::MulLocal,
+                    ..
+                }
+            )
+        })
         .expect("multiplier2's product is a genuine secret x secret multiplication");
     let Instruction::Arith { a, .. } = instruction else {
         unreachable!("just matched above")

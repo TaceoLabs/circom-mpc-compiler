@@ -163,8 +163,7 @@ pub fn rep3_trace<N: mpc_net::Network>(
                         + arithmetic::mul_public(low_sig, b)
                 }
                 (false, true) => arithmetic::add_public(
-                    arithmetic::mul_public(smsb_times_slsb, a)
-                        - arithmetic::mul_public(low_sig, a)
+                    arithmetic::mul_public(smsb_times_slsb, a) - arithmetic::mul_public(low_sig, a)
                         + arithmetic::mul_public(high_sig, b)
                         - arithmetic::mul_public(high_sig, a),
                     a,

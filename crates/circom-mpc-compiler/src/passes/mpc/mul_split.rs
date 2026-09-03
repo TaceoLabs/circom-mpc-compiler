@@ -8,7 +8,7 @@
 
 use crate::ir::{Graph, Node, Op, RewriteAction, RoundId, ValueId};
 
-use super::domain::{compute_domains, Domain};
+use super::domain::{Domain, compute_domains};
 
 #[allow(
     clippy::unnecessary_wraps,
@@ -81,9 +81,18 @@ mod tests {
         let changed = run(&mut graph).expect("run should not fail on this test graph");
         assert!(changed);
         assert_eq!(graph.len(), 5); // Input, Input, MulLocal, Round, RoundResult
-        assert!(matches!(graph.nodes()[ValueId::new(2).index()].op, Op::MulLocal));
-        assert!(matches!(graph.nodes()[ValueId::new(3).index()].op, Op::Round(_)));
-        assert!(matches!(graph.nodes()[ValueId::new(4).index()].op, Op::RoundResult(0)));
+        assert!(matches!(
+            graph.nodes()[ValueId::new(2).index()].op,
+            Op::MulLocal
+        ));
+        assert!(matches!(
+            graph.nodes()[ValueId::new(3).index()].op,
+            Op::Round(_)
+        ));
+        assert!(matches!(
+            graph.nodes()[ValueId::new(4).index()].op,
+            Op::RoundResult(0)
+        ));
         assert_eq!(graph.num_rounds(), 1);
         assert_eq!(graph.round_slots(), vec![1]);
     }

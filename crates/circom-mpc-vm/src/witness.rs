@@ -39,7 +39,11 @@ pub fn split_witness<D: VmDriver>(
     let mut witness = witness;
     let secret = witness.split_off(n_pub);
     let public = driver.open(&witness)?;
-    debug_assert_eq!(public.len(), n_pub, "open must return one value per opened share");
+    debug_assert_eq!(
+        public.len(),
+        n_pub,
+        "open must return one value per opened share"
+    );
     eyre::ensure!(
         public[0] == Fr::one(),
         "witness position 0 must be the reserved constant 1, got something else - either the program \

@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use ark_bn254::Fr;
 
-use crate::program::Bank;
 use crate::Program;
+use crate::program::Bank;
 
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
@@ -113,14 +113,24 @@ where
 
 impl<S: Clone> InputValues<S> for BTreeMap<String, Vec<InputValue<S>>> {
     fn as_inputs(&self, program: &Program) -> eyre::Result<Cow<'_, [InputValue<S>]>> {
-        let flat = flatten_named(program, |name| self.get(name), self.keys().map(String::as_str))?;
+        let flat = flatten_named(
+            program,
+            |name| self.get(name),
+            self.keys().map(String::as_str),
+        )?;
         Ok(Cow::Owned(flat))
     }
 }
 
-impl<S: Clone, H: std::hash::BuildHasher> InputValues<S> for HashMap<String, Vec<InputValue<S>>, H> {
+impl<S: Clone, H: std::hash::BuildHasher> InputValues<S>
+    for HashMap<String, Vec<InputValue<S>>, H>
+{
     fn as_inputs(&self, program: &Program) -> eyre::Result<Cow<'_, [InputValue<S>]>> {
-        let flat = flatten_named(program, |name| self.get(name), self.keys().map(String::as_str))?;
+        let flat = flatten_named(
+            program,
+            |name| self.get(name),
+            self.keys().map(String::as_str),
+        )?;
         Ok(Cow::Owned(flat))
     }
 }

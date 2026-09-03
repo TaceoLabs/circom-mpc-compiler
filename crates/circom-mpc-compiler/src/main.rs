@@ -99,7 +99,8 @@ fn output_path(cli: &Cli) -> PathBuf {
     cli.output.clone().unwrap_or_else(|| {
         let stem = cli
             .circuit
-            .file_stem().map_or_else(|| PathBuf::from("out"), PathBuf::from);
+            .file_stem()
+            .map_or_else(|| PathBuf::from("out"), PathBuf::from);
         stem.with_extension("cmpc")
     })
 }

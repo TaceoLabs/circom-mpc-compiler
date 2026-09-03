@@ -117,10 +117,11 @@ fn prove_and_verify(name: &str) {
                                 public_inputs: public_inputs.clone(),
                                 witness: secret,
                             };
-                            let proof = Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
-                                &p, pkey, matrices, shared,
-                            )
-                            .unwrap();
+                            let proof =
+                                Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
+                                    &p, pkey, matrices, shared,
+                                )
+                                .unwrap();
                             (full_witness, proof, public_inputs)
                         })
                     })

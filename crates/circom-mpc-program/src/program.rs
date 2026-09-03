@@ -524,11 +524,7 @@ impl Program {
                 })
                 .count(),
             gadget_batches: self.gadget_batches.len(),
-            gadget_sites: self
-                .gadget_batches
-                .iter()
-                .map(|batch| batch.sites)
-                .sum(),
+            gadget_sites: self.gadget_batches.iter().map(|batch| batch.sites).sum(),
             shared_gadget_batches: self
                 .gadget_batches
                 .iter()
@@ -569,14 +565,11 @@ impl Program {
             let Instruction::Gadget(batch_idx) = instruction else {
                 continue;
             };
-            let batch = self
-                .gadget_batches
-                .get(batch_idx.index())
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "instruction {instruction_index} references missing gadget batch {batch_idx}"
-                    )
-                })?;
+            let batch = self.gadget_batches.get(batch_idx.index()).ok_or_else(|| {
+                eyre::eyre!(
+                    "instruction {instruction_index} references missing gadget batch {batch_idx}"
+                )
+            })?;
             if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
                 batches.push(PrecomputedBatch {
                     kind: GadgetKind::Poseidon2 { t },
@@ -652,7 +645,8 @@ impl Program {
             "input signal sizes sum to {signal_total}, expected {}",
             self.num_inputs
         );
-        let mut seen_signal_names = std::collections::HashSet::with_capacity(self.input_signals.len());
+        let mut seen_signal_names =
+            std::collections::HashSet::with_capacity(self.input_signals.len());
         for signal in &self.input_signals {
             eyre::ensure!(
                 signal.offset + signal.size <= self.num_inputs,
@@ -824,9 +818,8 @@ impl Program {
                 batch.result_offsets.len() == expected_offsets,
                 "gadget batch {index} result offsets have wrong length"
             );
-            let request_count = u32::try_from(batch.result_requests.len()).map_err(|_| {
-                eyre::eyre!("gadget batch {index} has too many result requests")
-            })?;
+            let request_count = u32::try_from(batch.result_requests.len())
+                .map_err(|_| eyre::eyre!("gadget batch {index} has too many result requests"))?;
             eyre::ensure!(
                 batch.result_offsets.first() == Some(&0)
                     && batch.result_offsets.last().copied() == Some(request_count)

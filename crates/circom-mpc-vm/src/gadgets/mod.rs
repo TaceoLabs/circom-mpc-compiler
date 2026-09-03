@@ -34,10 +34,10 @@ pub(crate) mod test_support {
     use ark_bn254::Fr;
     use mpc_core::protocols::rep3::conversion::A2BType;
     use mpc_core::protocols::rep3::{
-        combine_field_elements, share_field_element, Rep3PrimeFieldShare, Rep3State,
+        Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element,
     };
-    use mpc_net::local::LocalNetwork;
     use mpc_net::Network;
+    use mpc_net::local::LocalNetwork;
     use rand::thread_rng;
 
     use crate::counting_net::CountingNet;
@@ -50,11 +50,11 @@ pub(crate) mod test_support {
         values: &[Fr],
         a2b_type: A2BType,
         f: impl Fn(
-                &N,
-                &mut Rep3State,
-                &[Rep3PrimeFieldShare<Fr>],
-            ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
-            + Sync,
+            &N,
+            &mut Rep3State,
+            &[Rep3PrimeFieldShare<Fr>],
+        ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
+        + Sync,
     ) -> (Vec<Fr>, Vec<N>) {
         let mut rng = thread_rng();
         let shares: Vec<[Rep3PrimeFieldShare<Fr>; 3]> = values
@@ -71,8 +71,9 @@ pub(crate) mod test_support {
                         let shares = &shares;
                         let f = &f;
                         scope.spawn(move || {
-                            let mut state = Rep3State::new(&net, a2b_type)
-                                .expect("constructing Rep3State from a fresh LocalNetwork does not fail");
+                            let mut state = Rep3State::new(&net, a2b_type).expect(
+                                "constructing Rep3State from a fresh LocalNetwork does not fail",
+                            );
                             let own_shares: Vec<_> = shares.iter().map(|s| s[party]).collect();
                             let witness = f(&net, &mut state, &own_shares)
                                 .expect("the test closure must succeed on well-formed shares");
@@ -86,11 +87,12 @@ pub(crate) mod test_support {
                     .unzip()
             });
 
-        let [r0, r1, r2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses
-            .try_into()
-            .unwrap_or_else(|w: Vec<Vec<Rep3PrimeFieldShare<Fr>>>| {
-                panic!("expected exactly 3 parties, got {}", w.len())
-            });
+        let [r0, r1, r2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] =
+            witnesses
+                .try_into()
+                .unwrap_or_else(|w: Vec<Vec<Rep3PrimeFieldShare<Fr>>>| {
+                    panic!("expected exactly 3 parties, got {}", w.len())
+                });
         (combine_field_elements(&r0, &r1, &r2), networks)
     }
 
@@ -99,11 +101,11 @@ pub(crate) mod test_support {
     pub(crate) fn run3(
         values: &[Fr],
         f: impl Fn(
-                &LocalNetwork,
-                &mut Rep3State,
-                &[Rep3PrimeFieldShare<Fr>],
-            ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
-            + Sync,
+            &LocalNetwork,
+            &mut Rep3State,
+            &[Rep3PrimeFieldShare<Fr>],
+        ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
+        + Sync,
     ) -> Vec<Fr> {
         run3_with_a2b(values, A2BType::default(), f)
     }
@@ -113,11 +115,11 @@ pub(crate) mod test_support {
         values: &[Fr],
         a2b_type: A2BType,
         f: impl Fn(
-                &LocalNetwork,
-                &mut Rep3State,
-                &[Rep3PrimeFieldShare<Fr>],
-            ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
-            + Sync,
+            &LocalNetwork,
+            &mut Rep3State,
+            &[Rep3PrimeFieldShare<Fr>],
+        ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
+        + Sync,
     ) -> Vec<Fr> {
         run_networked(LocalNetwork::new(3), values, a2b_type, f).0
     }
@@ -141,11 +143,11 @@ pub(crate) mod test_support {
     pub(crate) fn run3_counted(
         values: &[Fr],
         f: impl Fn(
-                &CountingNet<LocalNetwork>,
-                &mut Rep3State,
-                &[Rep3PrimeFieldShare<Fr>],
-            ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
-            + Sync,
+            &CountingNet<LocalNetwork>,
+            &mut Rep3State,
+            &[Rep3PrimeFieldShare<Fr>],
+        ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
+        + Sync,
     ) -> (Vec<Fr>, usize) {
         let (result, rounds) = run3_counted_with_a2b(values, A2BType::default(), f);
         (result, rounds.max())
@@ -157,11 +159,11 @@ pub(crate) mod test_support {
         values: &[Fr],
         a2b_type: A2BType,
         f: impl Fn(
-                &CountingNet<LocalNetwork>,
-                &mut Rep3State,
-                &[Rep3PrimeFieldShare<Fr>],
-            ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
-            + Sync,
+            &CountingNet<LocalNetwork>,
+            &mut Rep3State,
+            &[Rep3PrimeFieldShare<Fr>],
+        ) -> eyre::Result<Vec<Rep3PrimeFieldShare<Fr>>>
+        + Sync,
     ) -> (Vec<Fr>, RoundCounts) {
         let networks: Vec<_> = LocalNetwork::new(3)
             .into_iter()

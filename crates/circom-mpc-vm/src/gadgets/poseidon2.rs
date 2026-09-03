@@ -178,7 +178,8 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
 
     fn destination(&self, logical: usize) -> Option<usize> {
         debug_assert!(logical < self.capacity, "logical result slot out of range");
-        let logical = u32::try_from(logical).expect("Poseidon2 result count never approaches u32::MAX");
+        let logical =
+            u32::try_from(logical).expect("Poseidon2 result count never approaches u32::MAX");
         self.requests.binary_search(&logical).ok()
     }
 
@@ -711,7 +712,8 @@ pub fn plain_trace(
     let states: Vec<Fr> = states
         .iter()
         .map(|value| match value {
-            circom_mpc_program::InputValue::Public(v) | circom_mpc_program::InputValue::Secret(v) => *v,
+            circom_mpc_program::InputValue::Public(v)
+            | circom_mpc_program::InputValue::Secret(v) => *v,
         })
         .collect();
     let sites = check_width(t, states.len())?;
@@ -783,7 +785,7 @@ pub(crate) fn mask_elements(t: usize, sites: usize) -> eyre::Result<usize> {
 /// ignores unreachable entries and counts a deliberately repeated batch reference once per
 /// execution.
 pub(crate) fn mask_budget(program: &crate::Program) -> eyre::Result<usize> {
-    use circom_mpc_program::{GadgetKind, BatchKind};
+    use circom_mpc_program::{BatchKind, GadgetKind};
 
     let gadget_batches = program.gadget_batches();
     let mut total = 0usize;
@@ -1084,7 +1086,9 @@ impl Poseidon2Service {
     pub fn trace<N: mpc_net::Network>(
         &mut self,
         t: usize,
-        states: &[circom_mpc_program::InputValue<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>],
+        states: &[circom_mpc_program::InputValue<
+            mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>,
+        >],
         net: &N,
         rep3_state: &mut mpc_core::protocols::rep3::Rep3State,
     ) -> eyre::Result<Vec<crate::SiteTrace<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>>>
@@ -1239,7 +1243,8 @@ mod tests {
             // Site 0 requests everything, which checks that every layout path can address every
             // logical slot. Site 1 is genuinely sparse and crosses all major section boundaries.
             requests.extend(
-                (0..capacity).map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32")),
+                (0..capacity)
+                    .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32")),
             );
             offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
             let layout = Layout::new(t);
@@ -1428,7 +1433,9 @@ mod tests {
             );
 
             let per_call = mask_elements(t, sites).expect("t is one of the supported widths");
-            let total = per_call.checked_mul(2).expect("test-sized mask counts do not overflow");
+            let total = per_call
+                .checked_mul(2)
+                .expect("test-sized mask counts do not overflow");
             let got = run3(&states, |net, state, shares| {
                 let mut preprocessing = preprocess_rep3(total, net, state)?;
                 eyre::ensure!(
@@ -1601,7 +1608,8 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let states: Vec<Fr> = (0..2 * t).map(|i| Fr::from(i as u64 + 1)).collect();
             let flat = plain_full(t, &states);
-            let traces = plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
+            let traces =
+                plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
             assert_eq!(traces.len(), 2, "t={t}");
             let capacity = result_slots(t);
             for (site, trace) in traces.iter().enumerate() {
@@ -1629,7 +1637,8 @@ mod tests {
         for t in SUPPORTED_WIDTHS {
             let sites = 2;
             let states: Vec<Fr> = (0..sites * t).map(|i| Fr::from(i as u64 + 3)).collect();
-            let expected = plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
+            let expected =
+                plain_trace(t, &as_secret(&states)).expect("t is one of the supported widths");
             let got = run3(&states, |net, state, shares| {
                 let mut service = Poseidon2Service::new(t, sites, net, state)?;
                 let traces = service.trace(t, &as_secret(shares), net, state)?;
