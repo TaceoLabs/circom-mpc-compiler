@@ -238,11 +238,11 @@ mod tests {
         let domains = super::super::domain::compute_domains(&graph);
         let plans = super::super::gadget_schedule::plan_gadget_batches(&graph, &domains);
         assert_eq!(plans.len(), 2, "one public service and one shared service");
-        assert!(
-            plans
-                .iter()
-                .any(|plan| plan.domain == Domain::Shared && plan.sites.len() == 2)
-        );
+        assert!(plans.iter().any(|plan| matches!(
+            plan,
+            super::super::gadget_schedule::ScheduledBatch::Gadget(plan)
+                if plan.domain == Domain::Shared && plan.sites.len() == 2
+        )));
     }
 
     /// A round costs a level exactly as a batch service does, and linear ops cost nothing.

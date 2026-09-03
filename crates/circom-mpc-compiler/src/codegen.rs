@@ -13,9 +13,11 @@ use circom_mpc_program::{
     SlotCounts, WitnessSource,
 };
 
-use crate::ir::{GadgetKind, GadgetSite, Graph, Node, Op, RoundId, ValueId};
+use crate::ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId};
 use crate::passes::mpc::domain::{Domain, compute_domains, signal_domain};
-use crate::passes::mpc::gadget_schedule::{BatchPlan, plan_gadget_batches};
+use crate::passes::mpc::gadget_schedule::{
+    BatchPlan, IsZeroRevealPlan, ScheduledBatch, plan_gadget_batches,
+};
 
 /// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a
 /// new one, `free` returns a slot to the pool. This is the whole allocator - liveness (computed
@@ -94,180 +96,6 @@ impl Arena {
             Bank::Local => {} // freed directly at the Round arm, not through this helper
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ZeroTestRevealPair {
-    zero_test_site: usize,
-    zero_test_node: usize,
-    reveal_site: usize,
-}
-
-#[derive(Debug)]
-struct ZeroTestRevealPlan {
-    source_plan: usize,
-    reveal_plan: usize,
-    anchor: usize,
-    pairs: Vec<ZeroTestRevealPair>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RuntimePlan {
-    Normal(usize),
-    IsZeroReveal(usize),
-}
-
-/// The read-only tables the fusion scan needs: `consumers[v]` is how many nodes read value `v`,
-/// `site_plan[s]` is the index of the [`BatchPlan`] that owns gadget site `s` (`usize::MAX` if
-/// none does).
-struct FusionScan<'a> {
-    nodes: &'a [Node],
-    sites: &'a [GadgetSite],
-    domains: &'a [Domain],
-    consumers: Vec<usize>,
-    site_plan: Vec<usize>,
-}
-
-impl<'a> FusionScan<'a> {
-    fn new(graph: &'a Graph, domains: &'a [Domain], plans: &[BatchPlan]) -> Self {
-        let nodes = graph.nodes();
-        let sites = graph.gadget_sites();
-        let mut consumers = vec![0usize; nodes.len()];
-        for node in nodes {
-            for input in &node.inputs {
-                consumers[input.index()] += 1;
-            }
-        }
-        let mut site_plan = vec![usize::MAX; sites.len()];
-        for (plan_idx, plan) in plans.iter().enumerate() {
-            for &(site_id, _) in &plan.sites {
-                site_plan[site_id] = plan_idx;
-            }
-        }
-        Self {
-            nodes,
-            sites,
-            domains,
-            consumers,
-            site_plan,
-        }
-    }
-
-    /// The zero test whose sole revealed result is `reveal_node`, if this Reveal site is fusable.
-    fn pair_for(&self, reveal_site: usize, reveal_node: usize) -> Option<ZeroTestRevealPair> {
-        let &zero_test_result = self.nodes[reveal_node].inputs.first()?;
-        if self.nodes[reveal_node].inputs.len() != 1
-            || !matches!(self.nodes[zero_test_result.index()].op, Op::GadgetResult(0))
-            || self.consumers[zero_test_result.index()] != 1
-        {
-            return None;
-        }
-        let zero_test_node = self.nodes[zero_test_result.index()].inputs[0].index();
-        let Op::Gadget(zero_test_site_id) = self.nodes[zero_test_node].op else {
-            return None;
-        };
-        let zero_test_site = zero_test_site_id.index();
-        if self.sites[zero_test_site].kind != GadgetKind::IsZero
-            || self.domains[zero_test_node] != Domain::Shared
-            || self.nodes[zero_test_node].inputs.len() != 1
-            || self.other_result_has_reader(zero_test_node)
-        {
-            return None;
-        }
-        Some(ZeroTestRevealPair {
-            zero_test_site,
-            zero_test_node,
-            reveal_site,
-        })
-    }
-
-    /// The fused service runs at the Reveal batch's anchor instead of the original zero-test
-    /// anchor. Slot 0 is safe to bypass because its sole computational reader is that Reveal; the
-    /// `inv` helper result must be witness-only, otherwise an earlier reader could observe its
-    /// slot before the fused service fills it.
-    fn other_result_has_reader(&self, zero_test_node: usize) -> bool {
-        self.nodes.iter().enumerate().any(|(result_idx, result)| {
-            matches!(result.op, Op::GadgetResult(slot) if slot != 0)
-                && result
-                    .inputs
-                    .first()
-                    .is_some_and(|input| input.index() == zero_test_node)
-                && self.consumers[result_idx] != 0
-        })
-    }
-
-    /// Every site of `reveal_plan` paired with its zero test, plus the single source plan all
-    /// those zero tests belong to. `None` if the batch is empty, if any site fails [`Self::pair_for`],
-    /// or if the zero tests are spread over more than one plan.
-    fn pairs_for_plan(&self, reveal_plan: &BatchPlan) -> Option<(usize, Vec<ZeroTestRevealPair>)> {
-        if reveal_plan.sites.is_empty() {
-            return None;
-        }
-        let mut pairs = Vec::with_capacity(reveal_plan.sites.len());
-        let mut source_plan_idx = None;
-        for &(reveal_site, reveal_node) in &reveal_plan.sites {
-            let pair = self.pair_for(reveal_site, reveal_node)?;
-            let this_source_plan = self.site_plan[pair.zero_test_site];
-            if this_source_plan == usize::MAX
-                || source_plan_idx.is_some_and(|idx| idx != this_source_plan)
-            {
-                return None;
-            }
-            source_plan_idx = Some(this_source_plan);
-            pairs.push(pair);
-        }
-        Some((source_plan_idx?, pairs))
-    }
-}
-
-/// Whether `source_plan` is exactly the `IsZero` batch covered by `pairs` - same domain, same
-/// kind, and a one-to-one match between its sites and the pairs' zero tests.
-fn source_plan_fully_covered(source_plan: &BatchPlan, pairs: &[ZeroTestRevealPair]) -> bool {
-    source_plan.domain == Domain::Shared
-        && source_plan.kind == GadgetKind::IsZero
-        && source_plan.sites.len() == pairs.len()
-        && source_plan.sites.iter().all(|&(site_id, _)| {
-            pairs
-                .iter()
-                .filter(|pair| pair.zero_test_site == site_id)
-                .count()
-                == 1
-        })
-}
-
-/// Finds whole scheduler batches that can be replaced by the circuit-preserving Rep3 shortcut.
-/// Staying at whole-batch granularity is intentionally conservative: a mixed Reveal batch or an
-/// `IsZero` batch with even one non-revealed result continues through the ordinary gadget paths.
-fn plan_zero_test_reveal_fusions(
-    graph: &Graph,
-    domains: &[Domain],
-    plans: &[BatchPlan],
-) -> Vec<ZeroTestRevealPlan> {
-    let scan = FusionScan::new(graph, domains, plans);
-    let mut claimed_source = vec![false; plans.len()];
-    let mut fusions = Vec::new();
-    for (reveal_plan_idx, reveal_plan) in plans.iter().enumerate() {
-        if reveal_plan.domain != Domain::Shared || reveal_plan.kind != (GadgetKind::Reveal { n: 1 })
-        {
-            continue;
-        }
-        let Some((source_plan_idx, pairs)) = scan.pairs_for_plan(reveal_plan) else {
-            continue;
-        };
-        if claimed_source[source_plan_idx]
-            || !source_plan_fully_covered(&plans[source_plan_idx], &pairs)
-        {
-            continue;
-        }
-        claimed_source[source_plan_idx] = true;
-        fusions.push(ZeroTestRevealPlan {
-            source_plan: source_plan_idx,
-            reveal_plan: reveal_plan_idx,
-            anchor: reveal_plan.anchor,
-            pairs,
-        });
-    }
-    fusions
 }
 
 /// Last node index (in graph order) that reads each value - a value with no reader at all keeps
@@ -361,12 +189,9 @@ fn gadget_result_bank(kind: GadgetKind, domain: Domain, precomputed: bool) -> ey
     })
 }
 
-/// The batch schedule as codegen runs it: the raw plans, the `IsZero`+`Reveal` fusions found among
-/// them, the resulting runtime batch order, and which batches are serviced at each node.
+/// The scheduler's runtime batches plus the node at which each one is serviced.
 struct BatchSchedule {
-    plans: Vec<BatchPlan>,
-    fusion_plans: Vec<ZeroTestRevealPlan>,
-    runtime_plans: Vec<RuntimePlan>,
+    plans: Vec<ScheduledBatch>,
     batches_at: Vec<Vec<usize>>,
 }
 
@@ -375,46 +200,24 @@ struct BatchSchedule {
 fn plan_batches(graph: &Graph, domain: &[Domain], last_use: &mut [usize]) -> BatchSchedule {
     let nodes = graph.nodes();
     let plans = plan_gadget_batches(graph, domain);
-    let fusion_plans = plan_zero_test_reveal_fusions(graph, domain, &plans);
-    let mut source_fusion = vec![None; plans.len()];
-    let mut reveal_fusion = vec![None; plans.len()];
-    for (fusion_idx, fusion) in fusion_plans.iter().enumerate() {
-        source_fusion[fusion.source_plan] = Some(fusion_idx);
-        reveal_fusion[fusion.reveal_plan] = Some(fusion_idx);
-    }
-    let mut runtime_plans = Vec::with_capacity(plans.len());
-    for plan_idx in 0..plans.len() {
-        if source_fusion[plan_idx].is_some() {
-            continue;
-        }
-        if let Some(fusion_idx) = reveal_fusion[plan_idx] {
-            runtime_plans.push(RuntimePlan::IsZeroReveal(fusion_idx));
-        } else {
-            runtime_plans.push(RuntimePlan::Normal(plan_idx));
-        }
-    }
 
     // A site's inputs must still hold their values when its *batch* runs, which is later than the
     // `Op::Gadget` node that reads them - so extend their lifetimes to the batch's anchor.
     // Without this the allocator recycles a witness-dead site input's slot between the node and
     // the service point (dead-code elimination frequently unpins gadget input signals from the
     // witness on real circuits).
-    for runtime in &runtime_plans {
-        match *runtime {
-            RuntimePlan::Normal(plan_idx) => {
-                let plan = &plans[plan_idx];
+    for plan in &plans {
+        match plan {
+            ScheduledBatch::Gadget(plan) => {
                 for &(_, site_node) in &plan.sites {
                     for input in &nodes[site_node].inputs {
                         last_use[input.index()] = last_use[input.index()].max(plan.anchor);
                     }
                 }
             }
-            RuntimePlan::IsZeroReveal(fusion_idx) => {
-                let fusion = &fusion_plans[fusion_idx];
-                for pair in &fusion.pairs {
-                    for input in &nodes[pair.zero_test_node].inputs {
-                        last_use[input.index()] = last_use[input.index()].max(fusion.anchor);
-                    }
+            ScheduledBatch::IsZeroReveal(fusion) => {
+                for site in &fusion.sites {
+                    last_use[site.input.index()] = last_use[site.input.index()].max(fusion.anchor);
                 }
             }
         }
@@ -422,20 +225,11 @@ fn plan_batches(graph: &Graph, domain: &[Domain], last_use: &mut [usize]) -> Bat
 
     // Batch indices anchored at each node, emitted right after that node is processed.
     let mut batches_at: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    for (batch_idx, runtime) in runtime_plans.iter().enumerate() {
-        let anchor = match *runtime {
-            RuntimePlan::Normal(plan_idx) => plans[plan_idx].anchor,
-            RuntimePlan::IsZeroReveal(fusion_idx) => fusion_plans[fusion_idx].anchor,
-        };
-        batches_at[anchor].push(batch_idx);
+    for (batch_idx, plan) in plans.iter().enumerate() {
+        batches_at[plan.anchor()].push(batch_idx);
     }
 
-    BatchSchedule {
-        plans,
-        fusion_plans,
-        runtime_plans,
-        batches_at,
-    }
+    BatchSchedule { plans, batches_at }
 }
 
 /// Where each site's surviving results live.
@@ -639,8 +433,6 @@ struct Emission {
     round_results: Vec<Slot>,
     /// One entry per `GadgetId`, filled as each `Op::Gadget` node is walked.
     site_inputs: Vec<Vec<SiteInput>>,
-    /// One Shared zero-test input per fused site - the `IsZero` site's original input.
-    fusion_inputs: Vec<Vec<SiteInput>>,
 }
 
 /// The state Phase B threads through the forward walk: the recyclable arena, the live node ->
@@ -674,7 +466,6 @@ impl Emitter {
             round_operands: Vec::new(),
             round_results: Vec::new(),
             site_inputs: vec![Vec::new(); graph.gadget_sites().len()],
-            fusion_inputs: Vec::new(),
         };
         Self {
             arena,
@@ -693,12 +484,6 @@ impl Emitter {
         reservation: &Reservation,
     ) -> eyre::Result<()> {
         let nodes = graph.nodes();
-        self.out.fusion_inputs = schedule
-            .fusion_plans
-            .iter()
-            .map(|fusion| Vec::with_capacity(fusion.pairs.len()))
-            .collect();
-
         let mut i = 0usize;
         while i < nodes.len() {
             let node = &nodes[i];
@@ -896,36 +681,23 @@ impl Emitter {
         schedule: &BatchSchedule,
     ) -> eyre::Result<()> {
         for &batch_idx in &schedule.batches_at[i] {
-            if let RuntimePlan::IsZeroReveal(fusion_idx) = schedule.runtime_plans[batch_idx] {
-                let fusion = &schedule.fusion_plans[fusion_idx];
-                debug_assert!(
-                    self.out.fusion_inputs[fusion_idx].is_empty(),
-                    "a fusion's inputs must be collected exactly once, at its first IsZero site"
-                );
-                for pair in &fusion.pairs {
-                    let input = self.out.site_inputs[pair.zero_test_site][0];
-                    self.out.fusion_inputs[fusion_idx].push(input);
-                }
-            }
             self.out
                 .instructions
                 .push(Instruction::Gadget(BatchIdx::try_from(batch_idx)?));
             // Site inputs were pinned to this anchor by the liveness extension in `plan_batches`,
             // so this is where they become recyclable. A fused service retains the original IsZero
             // operand, not the intermediate result passed to Reveal.
-            match schedule.runtime_plans[batch_idx] {
-                RuntimePlan::Normal(plan_idx) => {
-                    for &(_, site_node) in &schedule.plans[plan_idx].sites {
+            match &schedule.plans[batch_idx] {
+                ScheduledBatch::Gadget(plan) => {
+                    for &(_, site_node) in &plan.sites {
                         for &input in &nodes[site_node].inputs {
                             self.arena.free_if_dead(input, i, &mut self.slot);
                         }
                     }
                 }
-                RuntimePlan::IsZeroReveal(fusion_idx) => {
-                    for pair in &schedule.fusion_plans[fusion_idx].pairs {
-                        for &input in &nodes[pair.zero_test_node].inputs {
-                            self.arena.free_if_dead(input, i, &mut self.slot);
-                        }
+                ScheduledBatch::IsZeroReveal(fusion) => {
+                    for site in &fusion.sites {
+                        self.arena.free_if_dead(site.input, i, &mut self.slot);
                     }
                 }
             }
@@ -942,32 +714,28 @@ fn assemble_batches(
     emission: &Emission,
 ) -> Vec<GadgetBatch> {
     schedule
-        .runtime_plans
+        .plans
         .iter()
-        .map(|runtime| match *runtime {
-            RuntimePlan::IsZeroReveal(fusion_idx) => {
-                assemble_fused_batch(schedule, reservation, emission, fusion_idx)
+        .map(|plan| match plan {
+            ScheduledBatch::IsZeroReveal(fusion) => {
+                assemble_fused_batch(fusion, reservation, emission)
             }
-            RuntimePlan::Normal(plan_idx) => {
-                assemble_normal_batch(schedule, reservation, emission, plan_idx)
-            }
+            ScheduledBatch::Gadget(plan) => assemble_normal_batch(plan, reservation, emission),
         })
         .collect()
 }
 
 fn assemble_fused_batch(
-    schedule: &BatchSchedule,
+    fusion: &IsZeroRevealPlan,
     reservation: &Reservation,
     emission: &Emission,
-    fusion_idx: usize,
 ) -> GadgetBatch {
-    let fusion = &schedule.fusion_plans[fusion_idx];
     let mut result_requests = Vec::new();
-    let mut result_offsets = Vec::with_capacity(fusion.pairs.len() + 1);
+    let mut result_offsets = Vec::with_capacity(fusion.sites.len() + 1);
     let mut result_targets = Vec::new();
     result_offsets.push(0);
-    for pair in &fusion.pairs {
-        let source_site = pair.zero_test_site;
+    for site in &fusion.sites {
+        let source_site = site.zero_test_site;
         debug_assert_eq!(
             reservation.gadgets.site_result_base[source_site].bank,
             Bank::Shared,
@@ -990,11 +758,11 @@ fn assemble_fused_batch(
         }
 
         debug_assert_eq!(
-            reservation.gadgets.site_result_base[pair.reveal_site].bank,
+            reservation.gadgets.site_result_base[site.reveal_site].bank,
             Bank::Public,
             "the Reveal half of an IsZeroReveal fusion must have Public results"
         );
-        for (pos, &logical) in reservation.gadgets.live_slots[pair.reveal_site]
+        for (pos, &logical) in reservation.gadgets.live_slots[site.reveal_site]
             .iter()
             .enumerate()
         {
@@ -1007,7 +775,7 @@ fn assemble_fused_batch(
                 bank: Bank::Public,
                 slot: Slot::new(
                     reservation.gadgets.result_phys
-                        [reservation.gadgets.live_nodes[pair.reveal_site][pos]]
+                        [reservation.gadgets.live_nodes[site.reveal_site][pos]]
                         .expect("every live Reveal result has a physical slot"),
                 ),
             });
@@ -1016,8 +784,12 @@ fn assemble_fused_batch(
     }
     GadgetBatch {
         kind: BatchKind::IsZeroReveal,
-        sites: fusion.pairs.len(),
-        input_slots: emission.fusion_inputs[fusion_idx].clone(),
+        sites: fusion.sites.len(),
+        input_slots: fusion
+            .sites
+            .iter()
+            .map(|site| emission.site_inputs[site.zero_test_site][0])
+            .collect(),
         result_requests,
         result_offsets,
         result_targets,
@@ -1025,12 +797,10 @@ fn assemble_fused_batch(
 }
 
 fn assemble_normal_batch(
-    schedule: &BatchSchedule,
+    plan: &BatchPlan,
     reservation: &Reservation,
     emission: &Emission,
-    plan_idx: usize,
 ) -> GadgetBatch {
-    let plan = &schedule.plans[plan_idx];
     let mut input_slots = Vec::new();
     // Site-contiguous, ascending within a site: `result_requests[lo..hi]` (via
     // `result_offsets[site]..result_offsets[site + 1]`) is the sorted list of logical
@@ -1403,6 +1173,48 @@ mod tests {
                 .map(|r| r.get())
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn fused_sites_follow_reveal_batch_order() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: x
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: y
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: IsZero(x)
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3: x.out
+            Node::new(Op::GadgetResult(1), vec![ValueId::new(2)]), // 4: x.inv
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 5: IsZero(y)
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(5)]), // 6: y.out
+            Node::new(Op::GadgetResult(1), vec![ValueId::new(5)]), // 7: y.inv
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(6)]), // 8: Reveal(y.out)
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
+            Node::new(Op::Gadget(GadgetId::new(3)), vec![ValueId::new(3)]), // 10: Reveal(x.out)
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(10)]), // 11
+        ];
+        let graph = graph_with_sites(
+            nodes,
+            vec![
+                (SignalIdx::new(0), ValueId::new(9)),
+                (SignalIdx::new(2), ValueId::new(4)),
+                (SignalIdx::new(3), ValueId::new(11)),
+                (SignalIdx::new(4), ValueId::new(7)),
+            ],
+            vec![iszero_site(), iszero_site(), reveal_site(1), reveal_site(1)],
+            2,
+        );
+        let program =
+            compile(&graph).expect("compile should preserve the Reveal batch's site order");
+
+        let batch = &program.gadget_batches()[0];
+        assert_eq!(batch.kind, BatchKind::IsZeroReveal);
+        assert_eq!(
+            batch
+                .input_slots
+                .iter()
+                .map(|input| input.slot)
+                .collect::<Vec<_>>(),
+            vec![program.inputs()[1].slot, program.inputs()[0].slot]
         );
     }
 
