@@ -7,18 +7,19 @@ use std::collections::HashMap;
 
 use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
-use circom_compiler::circuit_design::template::TemplateCode;
-use circom_compiler::intermediate_representation::ir_interface::{
-    AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket,
-    LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
+use circom_compiler::{
+    circuit_design::template::TemplateCode,
+    intermediate_representation::ir_interface::{
+        AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, Instruction, LoadBucket,
+        LocationRule, OperatorType, SizeOption, StoreBucket, ValueBucket, ValueType,
+    },
 };
 use eyre::Result;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 
-use crate::ir::{GadgetKind, Op, ValueId};
-
 use super::fold::{fold_binary, fold_condition, fold_unary_condition};
+use crate::ir::{GadgetKind, Op, ValueId};
 
 const MAPPED_LOCATION: &str = "unsupported mapped location rule (bus/anonymous component access)";
 

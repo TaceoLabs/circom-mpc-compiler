@@ -11,10 +11,9 @@ use std::cmp::Ordering;
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, Field, PrimeField};
+use circom_compiler::intermediate_representation::ir_interface::{OperatorType, SizeOption};
 use num_bigint::BigUint;
 use num_traits::Zero as _;
-
-use circom_compiler::intermediate_representation::ir_interface::{OperatorType, SizeOption};
 
 /// Field elements as an unsigned big integer, matching circom's own semantics for `\`, `<<`, `>>`,
 /// `|`, `&`, `^` (which all operate on the canonical integer representative, not the field element

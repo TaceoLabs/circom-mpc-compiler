@@ -4,7 +4,6 @@
 
 use ark_bn254::Fr;
 use ark_ff::{One, Zero};
-
 use circom_mpc_program::{
     Bank, BatchKind, GadgetBatch, GadgetKind, InputValue, InputValues, Instruction, Program, Slot,
     WitnessSource,
@@ -736,9 +735,9 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
+    use circom_mpc_program::{ProgramParts, SlotCounts};
 
     use super::*;
-    use circom_mpc_program::{ProgramParts, SlotCounts};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MockLifecycle {

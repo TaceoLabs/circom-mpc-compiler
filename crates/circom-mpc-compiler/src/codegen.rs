@@ -6,17 +6,18 @@
 //! emission.
 
 use ark_bn254::Fr;
-
 use circom_mpc_program::{
     Bank, BatchIdx, BatchKind, GadgetBatch, InputBinding, InputIdx, InputSignal, Instruction,
     Opcode, Program, ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot,
     SlotCounts, WitnessSource,
 };
 
-use crate::ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId};
-use crate::passes::mpc::domain::{Domain, compute_domains, signal_domain};
-use crate::passes::mpc::gadget_schedule::{
-    BatchPlan, IsZeroRevealPlan, ScheduledBatch, plan_gadget_batches,
+use crate::{
+    ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId},
+    passes::mpc::{
+        domain::{Domain, compute_domains, signal_domain},
+        gadget_schedule::{BatchPlan, IsZeroRevealPlan, ScheduledBatch, plan_gadget_batches},
+    },
 };
 
 /// A bump allocator with a free list: `alloc` reuses the most recently freed slot before minting a

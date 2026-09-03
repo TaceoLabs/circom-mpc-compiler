@@ -89,8 +89,10 @@ pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
         Fr,
     )>,
 > {
-    use mpc_core::MpcState;
-    use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, arithmetic};
+    use mpc_core::{
+        MpcState,
+        protocols::rep3::{Rep3PrimeFieldShare, arithmetic},
+    };
 
     eyre::ensure!(!inputs.is_empty(), "masked IsZero/Reveal batch is empty");
 

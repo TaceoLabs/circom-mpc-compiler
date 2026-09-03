@@ -115,8 +115,10 @@ pub fn rep3_trace<N: mpc_net::Network>(
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
 ) -> eyre::Result<Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>> {
-    use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, arithmetic, conversion};
-    use mpc_core::uint::FieldUint;
+    use mpc_core::{
+        protocols::rep3::{Rep3PrimeFieldShare, arithmetic, conversion},
+        uint::FieldUint,
+    };
 
     eyre::ensure!(
         !inputs.is_empty() && inputs.len().is_multiple_of(254),

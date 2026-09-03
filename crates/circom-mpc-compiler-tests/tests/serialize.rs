@@ -6,8 +6,7 @@ use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::{
     Bank, BatchKind, Instruction, Poseidon2Width, Program, Slot, WitnessSource,
 };
-use circom_mpc_vm::Machine;
-use circom_mpc_vm::driver::plain::PlainDriver;
+use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
 
 /// Compiles one fixture through the public path used by serialized programs.
 fn program(circuit: &str) -> Program {
@@ -55,8 +54,9 @@ fn round_trips_a_program_with_a_round_byte_identically() {
 
 #[test]
 fn round_trips_input_signal_names() {
-    use circom_mpc_program::{InputValue, InputValues};
     use std::collections::BTreeMap;
+
+    use circom_mpc_program::{InputValue, InputValues};
 
     let original = program("multiplier2");
     assert!(

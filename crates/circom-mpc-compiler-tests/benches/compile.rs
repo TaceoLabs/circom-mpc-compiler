@@ -3,9 +3,8 @@
 //!
 //! Plain by nature - compilation never touches a driver or a network.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn manifest_dir() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../..")

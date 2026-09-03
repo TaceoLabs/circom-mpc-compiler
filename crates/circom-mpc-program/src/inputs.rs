@@ -1,10 +1,11 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+};
 
 use ark_bn254::Fr;
 
-use crate::Program;
-use crate::program::Bank;
+use crate::{Program, program::Bank};
 
 /// One circuit input's value, in whichever representation its domain calls for -
 /// `Program::input_domains` tells a caller which variant each input needs;
@@ -173,8 +174,7 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::program::InputSignal;
-    use crate::{ProgramParts, SlotCounts};
+    use crate::{ProgramParts, SlotCounts, program::InputSignal};
 
     /// A program with three `Fr` inputs, `a` (1 element) and `b` (2 elements), all `Public` -
     /// enough for `InputValues`, which never touches instructions, rounds, or gadgets.

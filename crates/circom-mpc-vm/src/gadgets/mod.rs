@@ -32,12 +32,11 @@ fn a2b_many_selector<N: mpc_net::Network>(
 #[cfg(test)]
 pub(crate) mod test_support {
     use ark_bn254::Fr;
-    use mpc_core::protocols::rep3::conversion::A2BType;
     use mpc_core::protocols::rep3::{
-        Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element,
+        Rep3PrimeFieldShare, Rep3State, combine_field_elements, conversion::A2BType,
+        share_field_element,
     };
-    use mpc_net::Network;
-    use mpc_net::local::LocalNetwork;
+    use mpc_net::{Network, local::LocalNetwork};
     use rand::thread_rng;
 
     use crate::counting_net::CountingNet;

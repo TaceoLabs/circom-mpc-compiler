@@ -3,15 +3,15 @@
 //! its own, so there's nothing to wrap.
 
 use ark_bn254::Fr;
-use mpc_core::MpcState;
-use mpc_core::protocols::rep3::{self, Rep3PrimeFieldShare, Rep3State};
+use circom_mpc_program::Program;
+use mpc_core::{
+    MpcState,
+    protocols::rep3::{self, Rep3PrimeFieldShare, Rep3State},
+};
 use mpc_net::Network;
 
-use circom_mpc_program::Program;
-
-use crate::gadgets;
-
 use super::VmDriver;
+use crate::gadgets;
 
 /// One freshly prepared rep3 VM execution. The network connection and [`Rep3State`] are borrowed so
 /// callers can reuse those long-lived resources, but this driver and its Poseidon2 mask pool are

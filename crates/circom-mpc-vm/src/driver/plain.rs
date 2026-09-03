@@ -4,9 +4,8 @@
 
 use ark_bn254::Fr;
 
-use crate::gadgets::{aliascheck, iszero, num2bits, poseidon2};
-
 use super::VmDriver;
+use crate::gadgets::{aliascheck, iszero, num2bits, poseidon2};
 
 /// Single-party reference [`VmDriver`]: every share is the plain field element itself.
 #[derive(Debug, Default, Clone, Copy)]

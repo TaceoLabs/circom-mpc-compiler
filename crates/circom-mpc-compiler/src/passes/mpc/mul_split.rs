@@ -6,9 +6,8 @@
 //! called once per secret product (`local_mul` then `reshare`). `round_schedule`, the next pass in
 //! the pipeline, batches these singleton rounds into fewer, wider ones.
 
-use crate::ir::{Graph, Node, Op, RewriteAction, RoundId, ValueId};
-
 use super::domain::{Domain, compute_domains};
+use crate::ir::{Graph, Node, Op, RewriteAction, RoundId, ValueId};
 
 pub(crate) fn run(graph: &mut Graph) -> bool {
     // The split decision depends only on the *old* graph, so classify it up front. Inside the
@@ -50,9 +49,8 @@ pub(crate) fn run(graph: &mut Graph) -> bool {
 mod tests {
     use ark_bn254::Fr;
 
-    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
-
     use super::*;
+    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
 
     fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         Graph::from_parts(GraphParts {

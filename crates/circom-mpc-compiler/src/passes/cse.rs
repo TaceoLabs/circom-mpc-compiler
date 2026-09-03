@@ -45,9 +45,8 @@ fn canonical_inputs(op: &Op, inputs: &[ValueId]) -> Vec<ValueId> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
-
     use super::*;
+    use crate::ir::{GraphParts, Node, Op, SignalIdx, ValueId};
 
     fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         Graph::from_parts(GraphParts {

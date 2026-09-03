@@ -7,10 +7,8 @@
 
 use rustc_hash::FxHashMap;
 
+use super::{domain::Domain, level};
 use crate::ir::{GadgetKind, Graph, Op, ValueId};
-
-use super::domain::Domain;
-use super::level;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BatchPlan {

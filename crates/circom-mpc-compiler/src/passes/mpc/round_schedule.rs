@@ -9,9 +9,8 @@
 //! forward pass cannot express. [`Graph::gc`] sets the precedent for reaching past `rewrite` when
 //! it doesn't fit the shape of the transformation.
 
-use crate::ir::{Graph, Node, Op, RoundId, ValueId};
-
 use super::domain::compute_domains;
+use crate::ir::{Graph, Node, Op, RoundId, ValueId};
 
 pub(crate) fn run(graph: &mut Graph) -> bool {
     let nodes = graph.nodes();
@@ -101,9 +100,8 @@ pub(crate) fn run(graph: &mut Graph) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, Op, SignalIdx, ValueId};
-
     use super::*;
+    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, Op, SignalIdx, ValueId};
 
     fn graph_of(nodes: Vec<Node>, output: ValueId) -> Graph {
         graph_with_sites(nodes, output, vec![])

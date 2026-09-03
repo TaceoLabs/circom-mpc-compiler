@@ -5,9 +5,7 @@
 //!     circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
 //! ```
 
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
+use std::{fs::File, io::BufWriter, path::PathBuf};
 
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
 use clap::Parser;
@@ -47,8 +45,7 @@ struct Cli {
 }
 
 fn install_tracing() {
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()

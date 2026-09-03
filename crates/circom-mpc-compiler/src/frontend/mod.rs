@@ -15,20 +15,18 @@ use std::collections::HashMap;
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
+use build::GraphCompiler;
 use circom_compiler::compiler_interface::{Circuit as CircomCircuit, CompilationFlags, VCP};
 use circom_constraint_generation::BuildConfig;
-use circom_program_structure::error_definition::Report;
-use circom_program_structure::program_archive::ProgramArchive;
+use circom_program_structure::{error_definition::Report, program_archive::ProgramArchive};
 use circom_type_analysis::check_types;
 use eyre::Result;
 use rustc_hash::FxHashMap;
 
-use crate::CompilerConfig;
-use crate::ir;
-
-use build::GraphCompiler;
-
-use crate::ir::{GraphParts, InputList};
+use crate::{
+    CompilerConfig, ir,
+    ir::{GraphParts, InputList},
+};
 
 /// A template header's total flat signal count: its own declared signals plus every signal of
 /// every subcomponent it transitively instantiates - the contiguous span circom's runtime layout

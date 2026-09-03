@@ -4,8 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use mpc_net::bytes::Bytes;
-use mpc_net::{ConnectionStats, Network};
+use mpc_net::{ConnectionStats, Network, bytes::Bytes};
 
 /// Wraps a [`Network`] and counts rounds: a round is one `send` followed by (at least) one `recv`
 /// before the next `send`. Every rep3 primitive that communicates - `reshare_many`,

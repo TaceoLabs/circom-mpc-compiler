@@ -25,9 +25,8 @@
 //! but would split expensive shared gadget batches more aggressively. Public sites do not pay this
 //! cost because their results stay at the same level.
 
-use crate::ir::{Graph, Op};
-
 use super::domain::Domain;
+use crate::ir::{Graph, Op};
 
 /// The network level of every value in `graph`, indexed by [`crate::ir::ValueId`]. `domains` is
 /// the graph's [`super::domain::compute_domains`] result.
@@ -117,8 +116,7 @@ pub(crate) fn site_stages(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
 mod tests {
     use ark_bn254::Fr;
 
-    use super::super::domain::compute_domains;
-    use super::*;
+    use super::{super::domain::compute_domains, *};
     use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, Node, SignalIdx, ValueId};
 
     fn site(kind: GadgetKind) -> GadgetSite {

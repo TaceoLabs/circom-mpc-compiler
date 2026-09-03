@@ -7,12 +7,10 @@
 //! execution.
 
 use ark_bn254::Fr;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler_tests::fixtures::rep3::{run_witness_with_shares, share_inputs};
-use circom_mpc_vm::driver::plain::PlainDriver;
-use circom_mpc_vm::{Machine, Program};
+use circom_mpc_vm::{Machine, Program, driver::plain::PlainDriver};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn manifest_dir() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../..")

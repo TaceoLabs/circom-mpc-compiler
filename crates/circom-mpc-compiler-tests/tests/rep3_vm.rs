@@ -4,14 +4,13 @@
 //! one on genuinely secret-shared data, not just in the clear. `tests/proving.rs`'s prove+verify
 //! tests are the value oracle for both drivers.
 use ark_bn254::Fr;
-use mpc_core::protocols::rep3::conversion::A2BType;
-use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements};
-use mpc_net::local::LocalNetwork;
-
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler_tests::fixtures::rep3::{run_witness, share_inputs};
-use circom_mpc_vm::Machine;
-use circom_mpc_vm::driver::rep3::Rep3Driver;
+use circom_mpc_vm::{Machine, driver::rep3::Rep3Driver};
+use mpc_core::protocols::rep3::{
+    Rep3PrimeFieldShare, Rep3State, combine_field_elements, conversion::A2BType,
+};
+use mpc_net::local::LocalNetwork;
 
 mod common;
 
@@ -164,8 +163,7 @@ fn all_public_gadget_uses_the_plain_path_under_rep3() {
 
 #[test]
 fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
-    use circom_mpc_vm::counting_net::CountingNet;
-    use circom_mpc_vm::driver::plain::PlainDriver;
+    use circom_mpc_vm::{counting_net::CountingNet, driver::plain::PlainDriver};
 
     struct PartyRun {
         first: Vec<Rep3PrimeFieldShare<Fr>>,
@@ -264,8 +262,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
 
 #[test]
 fn execution_error_spends_prepared_driver_without_communication() {
-    use circom_mpc_vm::counting_net::CountingNet;
-    use circom_mpc_vm::driver::plain::PlainDriver;
+    use circom_mpc_vm::{counting_net::CountingNet, driver::plain::PlainDriver};
 
     struct PartyRun {
         fresh: Vec<Rep3PrimeFieldShare<Fr>>,
@@ -369,10 +366,10 @@ fn execution_error_spends_prepared_driver_without_communication() {
 /// matches the ordinary driver-serviced `Poseidon2` circuit run under `PlainDriver`.
 #[test]
 fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
-    use circom_mpc_vm::GadgetPrecomputation;
-    use circom_mpc_vm::counting_net::CountingNet;
-    use circom_mpc_vm::driver::plain::PlainDriver;
-    use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
+    use circom_mpc_vm::{
+        GadgetPrecomputation, counting_net::CountingNet, driver::plain::PlainDriver,
+        gadgets::poseidon2::Poseidon2Service,
+    };
 
     let program =
         circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config())
@@ -484,10 +481,10 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
 /// host secret-sharing it.
 #[test]
 fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
-    use circom_mpc_vm::GadgetPrecomputation;
-    use circom_mpc_vm::InputValue;
-    use circom_mpc_vm::driver::plain::PlainDriver;
-    use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
+    use circom_mpc_vm::{
+        GadgetPrecomputation, InputValue, driver::plain::PlainDriver,
+        gadgets::poseidon2::Poseidon2Service,
+    };
 
     let program =
         circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())

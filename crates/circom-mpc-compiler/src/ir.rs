@@ -5,7 +5,6 @@
 //! produces (its [`ValueId`]).
 
 use ark_bn254::Fr;
-
 pub(crate) use circom_mpc_program::GadgetKind;
 
 /// Identifies a node in a [`Graph`] and, equivalently, the single value it produces.
@@ -516,8 +515,9 @@ impl std::fmt::Debug for Graph {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ark_bn254::Fr;
+
+    use super::*;
 
     // x0 = Input(0); x1 = Constant(2); x2 = Add(x0, x1); x3 = Mul(x0, x1) [dead: no output uses it]
     // output signal 0 <- x2

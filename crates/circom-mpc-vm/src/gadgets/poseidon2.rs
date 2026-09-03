@@ -17,13 +17,12 @@
 
 use ark_bn254::Fr;
 use ark_ff::AdditiveGroup;
-use mpc_core::MpcState as _;
-
-use super::poseidon2_constants::{RoundConstants, partial_rounds};
-
 /// The widths any vendored circuit instantiates. `poseidon2.circom` also defines 12; support it
 /// by restoring its constant tables in `poseidon2_constants.rs`.
 use circom_mpc_program::POSEIDON2_SUPPORTED_WIDTHS as SUPPORTED_WIDTHS;
+use mpc_core::MpcState as _;
+
+use super::poseidon2_constants::{RoundConstants, partial_rounds};
 
 // --- Signal counts, mirroring the circuit's own template structure ---
 

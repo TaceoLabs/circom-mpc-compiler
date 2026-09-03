@@ -8,16 +8,17 @@
 //! rather than failing, so `cargo test` stays green on a fresh clone before that script has run.
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::CompilerConfig;
-use circom_mpc_vm::driver::plain::PlainDriver;
-use circom_mpc_vm::driver::rep3::Rep3Driver;
-use circom_mpc_vm::program::Bank;
-use circom_mpc_vm::split_witness;
-use circom_mpc_vm::{Machine, Program};
+use circom_mpc_vm::{
+    Machine, Program,
+    driver::{plain::PlainDriver, rep3::Rep3Driver},
+    program::Bank,
+    split_witness,
+};
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
-use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{
-    Rep3PrimeFieldShare, Rep3State, combine_field_elements, share_field_element,
+    Rep3PrimeFieldShare, Rep3State, combine_field_elements, conversion::A2BType,
+    share_field_element,
 };
 use mpc_net::local::LocalNetwork;
 use rand::thread_rng;
