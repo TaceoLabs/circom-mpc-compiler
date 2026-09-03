@@ -27,7 +27,7 @@ criterion = "0.5"
 eyre = "0.6.12"
 mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
 mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.5.0" }
-num-bigint = { version = "0.4.6" }
+num-bigint = { version = "0.5.1" }
 num-traits = { version = "0.2.18", default-features = false }
 rand = { version = "0.8.8" }
 rustc-hash = "2"
