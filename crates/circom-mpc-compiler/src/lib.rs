@@ -1,6 +1,6 @@
-//! Compiles a circom circuit into a `circom_mpc_program::Program`: [`CoCircomCompiler::parse`]
-//! builds the frontend's [`ir::Graph`], runs the optimization/MPC-lowering [`passes`] pipeline
-//! over it, and [`CoCircomCompiler::compile`] hands the result to [`codegen`].
+//! Compiles a circom circuit into a `circom_mpc_program::Program`: [`parse`] builds the
+//! frontend's [`ir::Graph`], runs the optimization/MPC-lowering [`passes`] pipeline over it, and
+//! [`compile`] hands the result to [`codegen`].
 
 use std::path::PathBuf;
 
@@ -42,8 +42,7 @@ pub struct CompilerConfig {
     /// Whether a `TACEO_PRECOMPUTATION_Poseidon2` wrapper is honored as a host-precomputed site.
     /// `false` compiles it as an ordinary driver-serviced `Poseidon2` site instead - the two are
     /// R1CS-identical, so a zkey built from one still matches the other. Set this to `false` to
-    /// prove against inputs whose commitment hashes were never computed by the host (e.g. the
-    /// merces JSON scenario fixtures, which don't carry them).
+    /// prove against inputs whose commitment hashes were never computed by the host.
     #[serde(default = "default_precomputed_gadgets")]
     pub precomputed_gadgets: bool,
 }
@@ -70,52 +69,39 @@ impl Default for CompilerConfig {
     }
 }
 
-/// Namespace for the BN254 compiler entry points.
-pub struct CoCircomCompiler;
+/// Parses and type-checks `file`, then runs the optimization/MPC-lowering passes over the
+/// resulting graph.
+///
+/// # Errors
+///
+/// Returns an error if `file` fails to parse, type-check, or build into a graph, or if a pass
+/// fails.
+pub fn parse<Pth>(file: Pth, config: &CompilerConfig) -> eyre::Result<ir::Graph>
+where
+    PathBuf: From<Pth>,
+    Pth: std::fmt::Debug,
+{
+    tracing::debug!("compiler starts parsing..");
+    let opt_level = config.opt_level;
+    let mut graph = frontend::build_graph(PathBuf::from(file).display().to_string(), config)?;
+    graph.verify()?;
+    tracing::debug!("graph before passes:\n{:?}", graph);
+    passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
+    tracing::debug!("success!");
+    Ok(graph)
+}
 
-impl CoCircomCompiler {
-    /// Parses and type-checks `file`, then runs the optimization/MPC-lowering passes over the
-    /// resulting graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `file` fails to parse, type-check, or build into a graph, or if a pass
-    /// fails.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "public API taking config by value is the established call convention across the workspace; a by-ref signature would ripple into every caller for no behavioral benefit"
-    )]
-    pub fn parse<Pth>(file: Pth, config: CompilerConfig) -> eyre::Result<ir::Graph>
-    where
-        PathBuf: From<Pth>,
-        Pth: std::fmt::Debug,
-    {
-        tracing::debug!("compiler starts parsing..");
-        let opt_level = config.opt_level;
-        let mut graph =
-            frontend::build_graph(PathBuf::from(file).display().to_string(), &config)?;
-        graph.verify()?;
-        tracing::debug!("graph before passes:\n{:?}", graph);
-        passes::PassManager::for_opt_level(opt_level).run(&mut graph)?;
-        tracing::debug!("success!");
-        Ok(graph)
-    }
-
-    /// `parse`, then lowers the resulting graph into a `circom_mpc_program::Program`, runnable via
-    /// `circom_mpc_vm::Machine::run` against the plain or rep3 driver.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error under the same conditions as [`Self::parse`], or if codegen fails.
-    pub fn compile<Pth>(
-        file: Pth,
-        config: CompilerConfig,
-    ) -> eyre::Result<circom_mpc_program::Program>
-    where
-        PathBuf: From<Pth>,
-        Pth: std::fmt::Debug,
-    {
-        let graph = Self::parse(file, config)?;
-        codegen::compile(&graph)
-    }
+/// `parse`, then lowers the resulting graph into a `circom_mpc_program::Program`, runnable via
+/// `circom_mpc_vm::Machine::run` against the plain or rep3 driver.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as [`parse`], or if codegen fails.
+pub fn compile<Pth>(file: Pth, config: &CompilerConfig) -> eyre::Result<circom_mpc_program::Program>
+where
+    PathBuf: From<Pth>,
+    Pth: std::fmt::Debug,
+{
+    let graph = parse(file, config)?;
+    codegen::compile(&graph)
 }

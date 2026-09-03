@@ -127,7 +127,7 @@ fn build_circuit(
 }
 
 /// Parses `file` all the way down to a flat, verified (but not yet garbage-collected)
-/// [`ir::Graph`]. The caller (`CoCircomCompiler::parse`) runs `gc`/`verify` on the result.
+/// [`ir::Graph`]. The caller (`circom_mpc_compiler::parse`) runs `gc`/`verify` on the result.
 pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::Graph> {
     let program_archive = get_program_archive(file, config)?;
     let public_inputs = program_archive.public_inputs.clone();

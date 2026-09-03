@@ -2,7 +2,7 @@
 //! back byte-identical via `Program::read`. `tests/serialize.rs` round-trips through an in-memory
 //! `Vec<u8>`; this is the one path that goes through an actual file.
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::Program;
 
 #[test]
@@ -12,9 +12,9 @@ fn round_trips_through_a_file() {
     config
         .link_library
         .push(format!("{root}/../../circuits/node_modules/").into());
-    let original = CoCircomCompiler::compile(
+    let original = circom_mpc_compiler::compile(
         format!("{root}/../../circuits/multiplier2.circom"),
-        config,
+        &config,
     )
     .unwrap();
 

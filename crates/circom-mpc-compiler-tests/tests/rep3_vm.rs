@@ -8,7 +8,7 @@ use mpc_core::protocols::rep3::conversion::A2BType;
 use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, Rep3State, combine_field_elements};
 use mpc_net::local::LocalNetwork;
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler_tests::fixtures::rep3::{run_witness, share_inputs};
 use circom_mpc_vm::Machine;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
@@ -31,7 +31,7 @@ fn staged_gadget_matches_the_plain_driver_under_rep3() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_staged_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_staged_test"), &config()).unwrap();
     assert_eq!(
         program.statistics().gadget_batches,
         2,
@@ -57,7 +57,7 @@ fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_iszero_reveal_test"), config())
+        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config())
             .unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
@@ -76,7 +76,7 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_isequal_reveal_test"), config())
+        circom_mpc_compiler::compile(circuit_path("gadget_isequal_reveal_test"), &config())
             .unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().fused_is_zero_reveal_batches, 1);
@@ -115,7 +115,7 @@ fn fused_iszero_reveal_costs_one_online_round() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_iszero_reveal_test"), config())
+        circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config())
             .unwrap();
     let (_, _, online) = run_witness_counted(&program, &[Fr::from(0u64), Fr::from(7u64)]);
     assert_eq!(online, [1, 1, 1]);
@@ -126,7 +126,7 @@ fn three_fused_isequal_reveal_sites_cost_one_online_round() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_isequal_reveal_test"), config())
+        circom_mpc_compiler::compile(circuit_path("gadget_isequal_reveal_test"), &config())
             .unwrap();
     let values = [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)];
     let (_, _, online) = run_witness_counted(&program, &values);
@@ -137,7 +137,7 @@ fn three_fused_isequal_reveal_sites_cost_one_online_round() {
 fn wide_round_vector_products_match_the_plain_driver() {
     use circom_mpc_vm::driver::plain::PlainDriver;
 
-    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().multiplication_rounds, 1);
     assert_eq!(program.statistics().multiplication_elements, 4);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
@@ -155,7 +155,7 @@ fn all_public_gadget_uses_the_plain_path_under_rep3() {
 
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::compile(circuit_path("gadget_public_test"), cfg).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("gadget_public_test"), &cfg).unwrap();
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
@@ -182,7 +182,7 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
 
     // One ordinary shared multiplication round and no Poseidon2 service: preparing either driver
     // must be communication-free, while a successful execution costs exactly one round.
-    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
@@ -279,7 +279,7 @@ fn execution_error_spends_prepared_driver_without_communication() {
         reuse_error: String,
     }
 
-    let program = CoCircomCompiler::compile(circuit_path("bench_widesum"), config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
@@ -377,11 +377,11 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
     use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
 
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let baseline =
-            CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config())
+            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config())
                 .unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
         Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
@@ -491,12 +491,12 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
     use circom_mpc_vm::driver::plain::PlainDriver;
     use circom_mpc_vm::gadgets::poseidon2::Poseidon2Service;
 
-    let program = CoCircomCompiler::compile(circuit_path("precomputation_mixed_domain_test"), config())
+    let program = circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
         .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let baseline =
-            CoCircomCompiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), config())
+            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), &config())
                 .unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
         Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()

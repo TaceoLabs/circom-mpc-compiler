@@ -4,10 +4,9 @@
 //! oracle is needed here: `Graph::mpc_summary` reports round *shape*, which a value comparison
 //! can't see.
 //!
-//! Synthetic, because round shape must be known in advance to assert on; `tests/merces.rs`
-//! covers batching on the real circuits.
+//! Synthetic, because round shape must be known in advance to assert on.
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 
 mod common;
 
@@ -21,7 +20,7 @@ fn config() -> CompilerConfig {
 
 #[test]
 fn chain_of_dependent_products_needs_one_round_per_depth() {
-    let graph = CoCircomCompiler::parse(circuit_path("bench_chain"), config()).unwrap();
+    let graph = circom_mpc_compiler::parse(circuit_path("bench_chain"), &config()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.rounds, 3, "{summary:?}");
     assert_eq!(summary.reshare_elements, 3, "{summary:?}");
@@ -31,7 +30,7 @@ fn chain_of_dependent_products_needs_one_round_per_depth() {
 
 #[test]
 fn balanced_tree_batches_each_level_into_one_round() {
-    let graph = CoCircomCompiler::parse(circuit_path("bench_tree"), config()).unwrap();
+    let graph = circom_mpc_compiler::parse(circuit_path("bench_tree"), &config()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.rounds, 3, "{summary:?}");
     assert_eq!(summary.reshare_elements, 4 + 2 + 1, "{summary:?}");
@@ -41,7 +40,7 @@ fn balanced_tree_batches_each_level_into_one_round() {
 
 #[test]
 fn independent_products_batch_into_a_single_round() {
-    let graph = CoCircomCompiler::parse(circuit_path("bench_widesum"), config()).unwrap();
+    let graph = circom_mpc_compiler::parse(circuit_path("bench_widesum"), &config()).unwrap();
     let summary = graph.mpc_summary();
     assert_eq!(summary.rounds, 1, "{summary:?}");
     assert_eq!(summary.reshare_elements, 4, "{summary:?}");

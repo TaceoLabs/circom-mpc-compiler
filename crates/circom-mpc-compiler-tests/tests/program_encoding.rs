@@ -1,7 +1,7 @@
 //! `Program::validate_encoding` against real compiled circuits, mutated into deliberately
 //! malformed shapes via `Program::into_parts`.
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::{Instruction, Program, RoundIdx, Slot};
 
 fn program(circuit: &str) -> Program {
@@ -10,7 +10,7 @@ fn program(circuit: &str) -> Program {
     config
         .link_library
         .push(format!("{root}/../../circuits/node_modules/").into());
-    CoCircomCompiler::compile(format!("{root}/../../circuits/{circuit}.circom"), config).unwrap()
+    circom_mpc_compiler::compile(format!("{root}/../../circuits/{circuit}.circom"), &config).unwrap()
 }
 
 #[test]

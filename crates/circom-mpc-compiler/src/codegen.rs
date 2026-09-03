@@ -1,5 +1,5 @@
 //! `Graph` -> `Program`: not a `Pass` (it changes representation, not the IR), called by
-//! `CoCircomCompiler::compile` once `PassManager` has finished lowering. A single forward walk
+//! `circom_mpc_compiler::compile` once `PassManager` has finished lowering. A single forward walk
 //! over `graph.nodes()` (already topologically ordered - `Graph::verify`) doing three things at
 //! once: classifying each value's `Domain` (reusing `passes::mpc::domain`, the same analysis
 //! `mul_split` used while lowering), linear-scan slot allocation over liveness, and instruction
@@ -337,7 +337,7 @@ fn gadget_result_bank(
 }
 
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
-/// `CoCircomCompiler::compile`) into a `Program`.
+/// `circom_mpc_compiler::compile`) into a `Program`.
 ///
 /// # Panics
 ///
@@ -440,9 +440,9 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
     // Every site's *surviving* result slots: `passes::dead_signals` (run before `gc`) has already
     // dropped the `outputs` binding for every witness-dead result, and `gc` then deleted the
     // now-unreferenced `Op::GadgetResult` nodes - so a site's reserved region only needs to be
-    // as wide as what's left, not its full `num_outputs + num_intermediates` capacity. Real scale:
-    // at merces' `transfer_arity4_batch8`, this is the difference between ~2700 Poseidon2 result
-    // slots per site and the ~140 actually read.
+    // as wide as what's left, not its full `num_outputs + num_intermediates` capacity. On a
+    // circuit with a large batch of gadget sites, this is the difference between thousands of
+    // Poseidon2 result slots per site and the handful actually read.
     //
     // `live_nodes[site]` is parallel to `live_slots[site]`: the node index of each surviving
     // `GadgetResult`, resolved to a physical slot below once `site_result_base` is known.
@@ -703,8 +703,8 @@ pub fn compile(graph: &Graph) -> eyre::Result<Program> {
                 // A site's inputs are ordinary operands, resolved like any other. They are *not*
                 // required to be bare `Op::Input`/`Op::Constant`: batches are serviced at their own
                 // point in the instruction stream (see `Opcode::Gadget`), so a site whose inputs
-                // are computed is fine - which is what the merces circuits need, since their
-                // Poseidon2 sites chain through secret multiplications.
+                // are computed is fine - needed by circuits whose Poseidon2 sites chain through
+                // secret multiplications.
                 let mut inputs = Vec::with_capacity(node.inputs.len());
                 for &input in &node.inputs {
                     let s = slot[input.index()].expect("gadget input not yet resolved");
@@ -1603,10 +1603,9 @@ mod tests {
         }
     }
 
-    /// A literal passed to a gadget resolves to a `Public`-bank slot. This is the shape
-    /// `circuits/merces/oblivious_vector/hash.circom` uses
-    /// (`Poseidon2(4)([value, 0, r, commitDs()])`); rejecting it, as codegen
-    /// once did, blocks that circuit outright.
+    /// A literal passed to a gadget resolves to a `Public`-bank slot. This is the shape a circuit
+    /// like `Poseidon2(4)([value, 0, r, domainSeparator()])` uses; rejecting it, as codegen once
+    /// did, blocks that circuit outright.
     #[test]
     fn public_constant_site_input_is_recorded_as_a_public_bank_slot() {
         let nodes = vec![

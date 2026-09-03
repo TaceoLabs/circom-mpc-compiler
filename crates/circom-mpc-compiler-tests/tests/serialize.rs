@@ -2,7 +2,7 @@
 //! real compiled circuits and checks the resulting witness is identical.
 
 use ark_bn254::Fr;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::{
     Bank, BatchKind, Instruction, Poseidon2Width, Program, Slot, WitnessSource,
 };
@@ -16,7 +16,7 @@ fn program(circuit: &str) -> Program {
     config
         .link_library
         .push(format!("{root}/../../circuits/node_modules/").into());
-    CoCircomCompiler::compile(format!("{root}/../../circuits/{circuit}.circom"), config).unwrap()
+    circom_mpc_compiler::compile(format!("{root}/../../circuits/{circuit}.circom"), &config).unwrap()
 }
 
 fn witness(program: &Program, inputs: &[Fr]) -> Vec<Fr> {

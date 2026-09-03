@@ -8,17 +8,17 @@ A Cargo workspace of four crates:
   `CountingNet`. Rep3 is always available; `mpc-net` backends are selected independently through
   the `local`, `quic`, `tcp`, `tcp-session`, `tcp-session-blocking`, and `tls` features.
 - `circom-mpc-compiler` — parses circom source into the IR, lowers it through the MPC passes, and
-  compiles it to a `circom-mpc-program::Program` (`CoCircomCompiler::compile`). It does not depend
-  on the VM or a network backend.
-- `circom-mpc-compiler-tests` — non-published integration tests, fixtures, benchmarks, and runnable
-  Merces tools. Its default `local` feature keeps the complete in-process MPC suite in plain
-  `cargo test`; other network backends remain opt-in.
+  compiles it to a `circom-mpc-program::Program` (`circom_mpc_compiler::compile`). It does not
+  depend on the VM or a network backend.
+- `circom-mpc-compiler-tests` — non-published integration tests, fixtures, and benchmarks. Its
+  default `local` feature keeps the complete in-process MPC suite in plain `cargo test`; other
+  network backends remain opt-in.
 
 ## Security boundary and deferred hardening
 
-The current deployment is focused on Merces and treats the circuit source, compiled VM program,
-and zkey as trusted, authentic, mutually matching artifacts. MPC public inputs and every
-`TACEO_REVEAL` site are likewise reviewed as part of that artifact set.
+The current deployment treats the circuit source, compiled VM program, and zkey as trusted,
+authentic, mutually matching artifacts. MPC public inputs and every `TACEO_REVEAL` site are
+likewise reviewed as part of that artifact set.
 
 Future hardening should authenticate and bind the program, circuit, and zkey; store and check the
 exact public-witness count; encode an auditable reveal manifest; and perform semantic bytecode
@@ -36,12 +36,7 @@ Pipeline: circom source → circom's own parser/type-checker/constraint-generati
 value-graph IR → MPC lowering and codegen → the plain interpreter or the rep3 driver.
 
 The runtime operator surface is deliberately narrow — only `Add`/`Sub`/`Mul` are supported; every
-other circom operator is a typed `unsupported operator: ...` error. The main target is the set of
-merces circuits vendored under `circuits/merces/`: the two server mains compile, run under real
-3-party rep3, and produce a co-groth16 proof against circom's own R1CS that verifies, against real
-protocol inputs (`inputs/`).
-`cargo run --release -p circom-mpc-compiler-tests --example merces` runs this end to end, including
-the proof.
+other circom operator is a typed `unsupported operator: ...` error.
 
 ## Development
 
@@ -49,12 +44,7 @@ the proof.
 gitignored `node_modules`; run `pnpm -C circuits install` once before `cargo test`.
 
 ```
-cargo test                              # prove/verify correctness tests (checked against circom itself)
-cargo run --release -p circom-mpc-compiler-tests --example merces
-                                        # full pipeline on a real production circuit, proof included
-scripts/run-merces-net.sh --runs 5      # precompute, witness extension and (optionally) proving,
-                                         # over a genuine 3-process TLS network - needs configs/ +
-                                         # data/ supplied, see the script
+cargo test    # prove/verify correctness tests (checked against circom itself)
 ```
 
 ## CLI
@@ -64,8 +54,7 @@ file to a `circom-mpc-program::Program` file:
 
 ```
 cargo run --release -p circom-mpc-compiler --features cli -- \
-    circuits/merces/main/transfer_arity4_batch1.circom \
-    -l circuits/node_modules/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
+    circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
 ```
 
 `cargo install --path crates/circom-mpc-compiler --features cli` installs it. `--config <toml>`

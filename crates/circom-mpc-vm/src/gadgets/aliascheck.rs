@@ -3,10 +3,10 @@
 //! `CompConstant(-1)` (`circuits/node_modules/circomlib/circuits/compconstant.circom`), which itself wraps `Num2Bits(135)`.
 //!
 //! See `ir::GadgetKind::AliasCheck` for why the 519-slot result layout below is derived
-//! directly from the real circuit's own signal numbering, and how it differs by one from merces'
-//! own `DEFAULT_ALIAS_TRACE` (~/repos/merces/crates/merces-core/src/circom_proof/cosnark.rs) -
-//! that trace omits `Num2Bits`' own single input signal (`num2bits.in`), which this compiler's
-//! signal-span accounting doesn't let it skip.
+//! directly from the real circuit's own signal numbering, and how it differs by one from a
+//! reference `DEFAULT_ALIAS_TRACE` implementation elsewhere - that trace omits `Num2Bits`' own
+//! single input signal (`num2bits.in`), which this compiler's signal-span accounting doesn't let
+//! it skip.
 //!
 //! Slot order (519 total, no outputs): `[0] compConstant.out` (`== bits[127]`, still a genuine
 //! witness signal despite aliasing one of `Num2Bits`' own outputs), `[1..255] compConstant.in[0..254]`
@@ -19,8 +19,8 @@ use ark_ff::{One, Zero};
 use super::num2bits;
 
 /// `CompConstant`'s compile-time constant bits, for `ct = -1` (i.e. `p - 1`, BN254's scalar field
-/// modulus minus one) - the same table `~/repos/merces` uses (`CT_BITS_MINUS_ONE`), since it's an
-/// intrinsic property of the field, not merces-specific logic.
+/// modulus minus one) - the same table other rep3 implementations use (`CT_BITS_MINUS_ONE`),
+/// since it's an intrinsic property of the field, not implementation-specific logic.
 #[rustfmt::skip]
 const CT_BITS_MINUS_ONE: [bool; 254] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
@@ -97,12 +97,11 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
 }
 
 /// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`).
-/// Ported from `~/repos/merces`'s `alias_check_trace_helper_rep3`
-/// (`crates/merces-core/src/circom_proof/cosnark.rs`), generalized from one site to a batch and
-/// from merces' own (518-slot, zero-padded) trace convention to the real 519-slot layout above -
-/// `compConstant.in[0..254]` and `compConstant.out` are genuine values here (already in hand as
-/// this function's own input, and `bits[127]` respectively), not zero placeholders, at no extra
-/// round cost.
+/// Ported from a reference `alias_check_trace_helper_rep3` implementation, generalized from one
+/// site to a batch and from that implementation's own (518-slot, zero-padded) trace convention
+/// to the real 519-slot layout above - `compConstant.in[0..254]` and `compConstant.out` are
+/// genuine values here (already in hand as this function's own input, and `bits[127]`
+/// respectively), not zero placeholders, at no extra round cost.
 ///
 /// The 127-way products (`mul_vec`) batch across every site in one round - genuinely circuit-wide.
 /// The strategy-selected A2B conversion and `bit_inject_many` are batched the same way.

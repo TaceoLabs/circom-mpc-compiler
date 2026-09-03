@@ -7,7 +7,7 @@
 //! with `scripts/gen-proving-artifacts.sh`; a test whose zkey is missing skips with a printed note
 //! rather than failing, so `cargo test` stays green on a fresh clone before that script has run.
 use ark_bn254::{Bn254, Fr};
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::driver::rep3::Rep3Driver;
 use circom_mpc_vm::program::Bank;
@@ -29,7 +29,7 @@ use common::{circuit_path, inputs_from_test_name, libs_path, manifest_dir};
 fn compiled(name: &str) -> Program {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
-    CoCircomCompiler::compile(circuit_path(name), config)
+    circom_mpc_compiler::compile(circuit_path(name), &config)
         .unwrap_or_else(|e| panic!("{name} must compile: {e}"))
 }
 

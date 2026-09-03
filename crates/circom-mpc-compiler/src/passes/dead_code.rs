@@ -3,7 +3,7 @@
 //!
 //! The output pruning matters because most of a recognized gadget gadget's result slots
 //! are *not* witness positions: circom's own `--O2` constraint simplification removes the vast
-//! majority of e.g. a Poseidon2 trace from the witness (roughly 90% on the merces mains). Without
+//! majority of e.g. a Poseidon2 trace from the witness - often the great majority. Without
 //! pruning, every dead result slot would stay bound into `outputs`, survive every later pass,
 //! reserve a real codegen slot, and be copied around by `Machine::run`.
 

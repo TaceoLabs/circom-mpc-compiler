@@ -1,15 +1,14 @@
 use ark_bn254::Fr;
-use circom_mpc_compiler::CoCircomCompiler;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler::OptLevel;
-use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::Machine;
+use circom_mpc_vm::driver::plain::PlainDriver;
 
 mod common;
 
 use common::{circuit_path, inputs_from_test_name, libs_path};
 
-/// Every opt level exercises `CoCircomCompiler::compile`'s unconditional MPC lowering and codegen
+/// Every opt level exercises `circom_mpc_compiler::compile`'s unconditional MPC lowering and codegen
 /// (there is no plaintext-only path), so this matrix makes every test below also a correctness
 /// test for lowering and codegen, not just the frontend and the classical passes. The oracle is
 /// agreement across opt levels; `tests/proving.rs`'s prove+verify tests are the value oracle.
@@ -27,7 +26,8 @@ macro_rules! witness_extension_test_plain {
                     config.link_library.push(libs_path());
                     config.opt_level = opt_level;
                     let program =
-                        CoCircomCompiler::compile(circuit_path(stringify!($name)), config).unwrap();
+                        circom_mpc_compiler::compile(circuit_path(stringify!($name)), &config)
+                            .unwrap();
 
                     assert_eq!(program.statistics().inputs, input.len());
 
@@ -62,7 +62,8 @@ fn repeated_dynamic_operands_are_safe_at_o2() {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
     config.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::compile(circuit_path("repeated_operands_o2"), config).unwrap();
+    let program =
+        circom_mpc_compiler::compile(circuit_path("repeated_operands_o2"), &config).unwrap();
     let inputs = program.classify_inputs(&values, |v| v);
     let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
     assert_eq!(witness[1], Fr::from(436u64));
@@ -72,7 +73,7 @@ fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
     let mut config = CompilerConfig::default();
     config.link_library.push(libs_path());
     config.opt_level = OptLevel::O2;
-    let program = CoCircomCompiler::compile(circuit_path(circuit), config).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path(circuit), &config).unwrap();
     assert_eq!(program.statistics().inputs, 0);
     let mut driver = PlainDriver;
     Machine::run(&program, &mut driver, &[]).unwrap()

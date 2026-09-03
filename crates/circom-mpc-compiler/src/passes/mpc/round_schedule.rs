@@ -172,9 +172,8 @@ mod tests {
     /// A gadget site whose inputs are *computed* rather than bare `Op::Input`s must be
     /// placed strictly after the level that produces those inputs, or the rebuild below would visit
     /// the site before the values it reads (a real panic: `round_schedule: input not yet placed`).
-    /// This is the shape `circuits/merces/merces/dependencies/merkle_root_4.circom` has -
-    /// `Arity4CMux` multiplies secret selector bits, feeds a Poseidon2 site, and that site's result
-    /// feeds the next level.
+    /// This is the shape a Merkle-path circuit has - a multiplexer multiplies secret selector
+    /// bits, feeds a Poseidon2 site, and that site's result feeds the next level.
     #[test]
     fn site_between_two_products_does_not_panic() {
         let nodes = vec![

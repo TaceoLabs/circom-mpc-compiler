@@ -7,7 +7,7 @@
 use ark_bn254::Fr;
 
 use circom_mpc_compiler::ir::GadgetKind;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::gadgets::poseidon2;
 use circom_mpc_vm::program::BatchKind;
@@ -32,7 +32,7 @@ fn config() -> CompilerConfig {
 #[test]
 fn precomputed_poseidon2_site_is_its_own_batch() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().precomputed_batches, 1);
     let batches = program.precomputed_batches().unwrap();
@@ -46,9 +46,9 @@ fn precomputed_poseidon2_site_is_its_own_batch() {
 /// never share a driver call with one the driver still has to service.
 #[test]
 fn mixed_precomputed_and_gadget_sites_never_share_a_batch() {
-    let program = CoCircomCompiler::compile(
+    let program = circom_mpc_compiler::compile(
         circuit_path("precomputation_mixed_poseidon2_test"),
-        config(),
+        &config(),
     )
     .unwrap();
     let stats = program.statistics();
@@ -65,9 +65,9 @@ fn mixed_precomputed_and_gadget_sites_never_share_a_batch() {
 #[test]
 fn precomputed_poseidon2_matches_the_gadget_twin() {
     let gadget_program =
-        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config()).unwrap();
     let precomputed_program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
 
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
@@ -95,10 +95,10 @@ fn precomputed_poseidon2_matches_the_gadget_twin() {
 #[test]
 fn precomputed_poseidon2_with_a_mixed_public_and_shared_input_matches_the_gadget_twin() {
     let gadget_program =
-        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), config())
+        circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_mixed_domain_test"), &config())
             .unwrap();
     let precomputed_program =
-        CoCircomCompiler::compile(circuit_path("precomputation_mixed_domain_test"), config())
+        circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
             .unwrap();
 
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
@@ -128,7 +128,7 @@ fn precomputed_poseidon2_with_a_mixed_public_and_shared_input_matches_the_gadget
 #[test]
 fn machine_run_errors_on_a_program_with_precomputed_batches() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let err = Machine::run(&program, &mut PlainDriver, &inputs).unwrap_err();
@@ -141,7 +141,7 @@ fn machine_run_errors_on_a_program_with_precomputed_batches() {
 #[test]
 fn wrong_site_count_is_rejected() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
@@ -156,7 +156,7 @@ fn wrong_site_count_is_rejected() {
 #[test]
 fn short_intermediate_is_rejected() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
@@ -173,7 +173,7 @@ fn short_intermediate_is_rejected() {
 #[test]
 fn leftover_precomputation_after_the_run_is_rejected() {
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config()).unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
@@ -189,7 +189,7 @@ fn an_all_public_precomputed_site_falls_back_to_an_ordinary_gadget() {
     // Nothing for the host to precompute, so the wrapper is ignored rather than rejected - the
     // site compiles exactly as if it had called `Poseidon2` directly.
     let program =
-        CoCircomCompiler::compile(circuit_path("precomputation_all_public_test"), config())
+        circom_mpc_compiler::compile(circuit_path("precomputation_all_public_test"), &config())
             .unwrap();
     assert_eq!(program.statistics().precomputed_batches, 0);
     assert!(program.precomputed_batches().unwrap().is_empty());
@@ -197,9 +197,9 @@ fn an_all_public_precomputed_site_falls_back_to_an_ordinary_gadget() {
 
 #[test]
 fn a_wrapper_kind_mismatch_is_rejected_at_compile_time() {
-    let err = CoCircomCompiler::compile(
+    let err = circom_mpc_compiler::compile(
         circuit_path("precomputation_wrapper_mismatch_test"),
-        config(),
+        &config(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("host-precomputed"), "{err}");
@@ -208,7 +208,7 @@ fn a_wrapper_kind_mismatch_is_rejected_at_compile_time() {
 #[test]
 fn batch_kind_precomputed_poseidon2_is_never_used_for_a_gadget_site() {
     let program =
-        CoCircomCompiler::compile(circuit_path("gadget_poseidon2_test"), config()).unwrap();
+        circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config()).unwrap();
     assert_eq!(program.statistics().precomputed_batches, 0);
     // `precomputed_batches()` walks `BatchKind::PrecomputedPoseidon2` specifically - confirm the
     // ordinary driver-serviced path never produces one.

@@ -63,8 +63,8 @@ pub enum Opcode {
     /// [`Opcode::Reshare`].
     ///
     /// Being a real instruction rather than an out-of-band phase is what lets a site's inputs depend
-    /// on earlier instructions - which the merces circuits require, since their Poseidon2 sites chain
-    /// through secret multiplications.
+    /// on earlier instructions - needed by circuits whose Poseidon2 sites chain through secret
+    /// multiplications.
     Gadget,
 }
 
@@ -93,8 +93,8 @@ pub enum Instruction {
     Reshare(RoundIdx),
     /// One batched gadget service: an index into [`Program::gadget_batches`]. Being a real
     /// instruction rather than an out-of-band phase is what lets a site's inputs depend on
-    /// earlier instructions - which the merces circuits require, since their Poseidon2 sites
-    /// chain through secret multiplications.
+    /// earlier instructions - needed by circuits whose Poseidon2 sites chain through secret
+    /// multiplications.
     Gadget(BatchIdx),
 }
 
@@ -125,9 +125,9 @@ pub struct RoundEntry {
 }
 
 /// One input value of one gadget site. Carries its bank because a site input is *not*
-/// always a share: a circuit may pass a literal, as `circuits/merces/oblivious_vector/hash.circom`
-/// does (`Poseidon2(4)([value, 0, r, commitDs()])` - two of those four fold to
-/// `Op::Constant`, i.e. `Bank::Public`). `Machine::run` promotes a `Public` slot into a share before
+/// always a share: a circuit may pass a literal, as in
+/// `Poseidon2(4)([value, 0, r, domainSeparator()])` - two of those four fold to
+/// `Op::Constant`, i.e. `Bank::Public`. `Machine::run` promotes a `Public` slot into a share before
 /// handing the batch to the driver. `Bank::Local` never appears - both `Graph::verify` and codegen
 /// reject an un-reshared `MulLocal` reaching a site.
 ///

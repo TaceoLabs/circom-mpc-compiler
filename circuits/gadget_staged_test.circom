@@ -4,10 +4,10 @@ include "circomlib/circuits/comparators.circom";
 
 // Two gadget sites of the *same kind* that cannot be serviced together: the second one's
 // input depends on the first one's output, through a secret multiplication each way. This is the
-// minimal version of the shape the merces circuits have at scale
-// (`circuits/merces/merces/dependencies/merkle_root_4.circom` chains MAX_DEPTH Poseidon2 sites the
-// same way), and it is what "staged batching" exists for: an implementation that ran every batch
-// up front, or that keyed batches on multiplicative depth alone, gets this wrong.
+// minimal version of a shape that shows up at scale whenever a chain of gadget sites feeds into
+// each other (e.g. a Merkle path of Poseidon2 hashes), and it is what "staged batching" exists
+// for: an implementation that ran every batch up front, or that keyed batches on multiplicative
+// depth alone, gets this wrong.
 //
 // `IsZero` rather than `Poseidon2` deliberately: it is this compiler's own gadget on both the plain
 // and rep3 paths, so this fixture tests *staging* rather than a gadget's trace layout.

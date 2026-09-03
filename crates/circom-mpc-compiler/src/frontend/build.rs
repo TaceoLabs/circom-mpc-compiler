@@ -208,7 +208,10 @@ impl<'a> GraphCompiler<'a> {
                 is_output,
                 ..
             } => {
-                debug_assert!(*is_output, "a subcomponent read must target one of its outputs");
+                debug_assert!(
+                    *is_output,
+                    "a subcomponent read must target one of its outputs"
+                );
                 let cmp_index = self.get_constant_value(cmp_address);
                 self.push_sub_cmp_output_read(cmp_index, index)
             }
@@ -228,7 +231,10 @@ impl<'a> GraphCompiler<'a> {
                 is_output,
                 ..
             } => {
-                debug_assert!(!*is_output, "a subcomponent write must target one of its inputs");
+                debug_assert!(
+                    !*is_output,
+                    "a subcomponent write must target one of its inputs"
+                );
                 let cmp_index = self.get_constant_value(cmp_address);
                 self.push_sub_cmp_input(cmp_index, index, value);
             }
@@ -328,11 +334,6 @@ impl<'a> GraphCompiler<'a> {
     }
 
     fn handle_create_cmp_bucket(&mut self, create_cmp_bucket: &CreateCmpBucket) -> Result<()> {
-        tracing::debug!(
-            "we need to create {} {} times",
-            create_cmp_bucket.symbol,
-            create_cmp_bucket.number_of_cmp
-        );
         let symbol = create_cmp_bucket.symbol.clone();
 
         // Fast path: already compiled. A gadget's entry is never inserted into
@@ -420,9 +421,10 @@ impl<'a> GraphCompiler<'a> {
                 );
             }
 
-            let span = *self.gadget_spans.get(&header).unwrap_or_else(|| {
-                panic!("no signal-span entry for gadget template `{header}`")
-            });
+            let span = *self
+                .gadget_spans
+                .get(&header)
+                .unwrap_or_else(|| panic!("no signal-span entry for gadget template `{header}`"));
             let num_intermediates = span - num_inputs - num_outputs;
 
             self.push_instances(create_cmp_bucket, |signal_offset| {
@@ -486,18 +488,29 @@ impl<'a> GraphCompiler<'a> {
         match &node.op {
             TemplateOp::Real(Op::Constant(c)) => Some(*c),
             TemplateOp::Real(Op::Add) => Some(
-                self.eval_constant_node(node.inputs[0])? + self.eval_constant_node(node.inputs[1])?,
+                self.eval_constant_node(node.inputs[0])?
+                    + self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Sub) => Some(
-                self.eval_constant_node(node.inputs[0])? - self.eval_constant_node(node.inputs[1])?,
+                self.eval_constant_node(node.inputs[0])?
+                    - self.eval_constant_node(node.inputs[1])?,
             ),
             TemplateOp::Real(Op::Mul) => Some(
-                self.eval_constant_node(node.inputs[0])? * self.eval_constant_node(node.inputs[1])?,
+                self.eval_constant_node(node.inputs[0])?
+                    * self.eval_constant_node(node.inputs[1])?,
             ),
-            TemplateOp::Real(Op::Input(_) | Op::Gadget(_) | Op::GadgetResult(_) |
-Op::MulLocal | Op::Round(_) | Op::RoundResult(_)) | TemplateOp::LocalSignal(_)
-| TemplateOp::LocalSignalWrite(_) | TemplateOp::SubCmpInput { .. } |
-TemplateOp::SubCmpOutput { .. } => None,
+            TemplateOp::Real(
+                Op::Input(_)
+                | Op::Gadget(_)
+                | Op::GadgetResult(_)
+                | Op::MulLocal
+                | Op::Round(_)
+                | Op::RoundResult(_),
+            )
+            | TemplateOp::LocalSignal(_)
+            | TemplateOp::LocalSignalWrite(_)
+            | TemplateOp::SubCmpInput { .. }
+            | TemplateOp::SubCmpOutput { .. } => None,
         }
     }
 
@@ -540,7 +553,7 @@ TemplateOp::SubCmpOutput { .. } => None,
                 }
                 // circom does not always route address arithmetic through the dedicated
                 // `*Address` operators above - idioms like reverse indexing (`arr[N-1-i]`, seen in
-                // merces' AliasCheck-style bit-reversal loops) or modular indexing (`arr[i % n]`,
+                // AliasCheck-style bit-reversal loops) or modular indexing (`arr[i % n]`,
                 // seen in poseidon/sha256-style round tables) compile to a plain `Sub`/`Add`/`Mod`
                 // compute bucket in address position, same as they would for a genuine signal
                 // value. Treat these the same way as the `*Address` variants: recurse and combine.

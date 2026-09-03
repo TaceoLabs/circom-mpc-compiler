@@ -3,7 +3,7 @@
 //! alongside the graph. The positive value cases live in `tests/proving.rs`.
 //!
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
+use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_vm::program::Bank;
 
 mod common;
@@ -17,7 +17,7 @@ fn config() -> CompilerConfig {
 }
 
 fn expect_unsupported(circuit: &str) -> String {
-    match CoCircomCompiler::parse(circuit_path(circuit), config()) {
+    match circom_mpc_compiler::parse(circuit_path(circuit), &config()) {
         Ok(_) => panic!(
             "{circuit} compiled unexpectedly - if this is a genuine new capability, move it to a \
              witness-comparison test in tests/circom_ir.rs instead of deleting this assertion"
@@ -67,7 +67,7 @@ fn non_constant_bitwise_operator_is_a_typed_error() {
 /// rejects.
 #[test]
 fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
-    let graph = CoCircomCompiler::parse(circuit_path("multiplier2_public"), config())
+    let graph = circom_mpc_compiler::parse(circuit_path("multiplier2_public"), &config())
         .expect("multiplier2_public compiles");
     assert_eq!(graph.public_inputs(), vec!["a".to_owned()]);
     let mut offsets: Vec<(String, usize, usize)> = graph.input_list().clone();
@@ -79,7 +79,7 @@ fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
     );
 
     // And the classification that depends on them.
-    let program = CoCircomCompiler::compile(circuit_path("multiplier2_public"), config())
+    let program = circom_mpc_compiler::compile(circuit_path("multiplier2_public"), &config())
         .expect("multiplier2_public compiles");
     assert_eq!(
         program.input_domains(),

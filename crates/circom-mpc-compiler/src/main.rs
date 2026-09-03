@@ -2,15 +2,14 @@
 //!
 //! ```text
 //! cargo run --release -p circom-mpc-compiler --features cli -- \
-//!     circuits/merces/main/transfer_arity4_batch1.circom \
-//!     -l circuits/node_modules/ -l circuits/merces/ --opt 2 -o transfer_arity4_batch1.cmpc
+//!     circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
 //! ```
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig, OptLevel};
+use circom_mpc_compiler::{CompilerConfig, OptLevel};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -111,7 +110,7 @@ fn main() -> eyre::Result<()> {
     let config = build_config(&cli)?;
     let out = output_path(&cli);
 
-    let program = CoCircomCompiler::compile(&cli.circuit, config)?;
+    let program = circom_mpc_compiler::compile(&cli.circuit, &config)?;
 
     let stats = program.statistics();
     tracing::info!("compiled: {}", cli.circuit.display());

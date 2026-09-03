@@ -14,10 +14,9 @@
 //! - Two shared sites at the same level are mutually independent because a dependency forces `+1`.
 //!   Public sites at one level may depend on each other, so the batch planner additionally enforces
 //!   each batch's anchor/deadline window. The level distinction cannot be recovered from
-//!   multiplicative depth alone: `circuits/merces/merces/
-//!   server.circom` chains `Num2Bits(254)` -> `AliasCheck` -> `IsZero` with **zero multiplications
-//!   between them**, so all three sit at identical multiplicative depth despite being sequentially
-//!   dependent.
+//!   multiplicative depth alone: a chain like `Num2Bits(254)` -> `AliasCheck` -> `IsZero` has
+//!   **zero multiplications between the gadgets**, so all three sit at identical multiplicative
+//!   depth despite being sequentially dependent.
 //! - A shared result at `+1` cannot be read at its producer's level. Public results may be read at
 //!   the same level, but source order and the planner's placement window retain that local order.
 //!

@@ -21,9 +21,8 @@ use mpc_core::MpcState as _;
 
 use super::poseidon2_constants::{RoundConstants, partial_rounds};
 
-/// The widths any vendored circuit instantiates (merces' compression sponge uses 16).
-/// `poseidon2.circom` also defines 12; support it by restoring its constant tables in
-/// `poseidon2_constants.rs`.
+/// The widths any vendored circuit instantiates. `poseidon2.circom` also defines 12; support it
+/// by restoring its constant tables in `poseidon2_constants.rs`.
 use circom_mpc_program::POSEIDON2_SUPPORTED_WIDTHS as SUPPORTED_WIDTHS;
 
 // --- Signal counts, mirroring the circuit's own template structure ---

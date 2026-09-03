@@ -10,10 +10,8 @@ use ark_bn254::Fr;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use circom_mpc_compiler::codegen;
-use circom_mpc_compiler::{CoCircomCompiler, CompilerConfig};
-use circom_mpc_compiler_tests::fixtures::{
-    self, rep3::run_witness_with_shares, rep3::share_inputs,
-};
+use circom_mpc_compiler::CompilerConfig;
+use circom_mpc_compiler_tests::fixtures::rep3::{run_witness_with_shares, share_inputs};
 use circom_mpc_vm::driver::plain::PlainDriver;
 use circom_mpc_vm::{Machine, Program};
 
@@ -23,57 +21,21 @@ fn manifest_dir() -> &'static str {
 
 /// One benched circuit: where it lives and how to build its inputs.
 struct Case {
-    /// Benchmark label.
+    /// Benchmark label, also the circuit's file stem under `circuits/`.
     name: &'static str,
-    path: String,
-    /// `Some(scenario)` for a merces server main, naming which real input set to use; `None` for a
-    /// simple circuit whose inputs are just sequential values.
-    merces_scenario: Option<&'static str>,
-    /// Needs the merces link libraries.
-    merces_config: bool,
-}
-
-fn simple(name: &'static str) -> Case {
-    Case {
-        name,
-        path: format!("{}/circuits/{name}.circom", manifest_dir()),
-        merces_scenario: None,
-        merces_config: false,
-    }
-}
-
-fn merces(name: &'static str, scenario: &'static str) -> Case {
-    Case {
-        name,
-        path: format!("{}/circuits/merces/main/{name}.circom", manifest_dir()),
-        merces_scenario: Some(scenario),
-        merces_config: true,
-    }
 }
 
 fn cases() -> Vec<Case> {
     vec![
         // Known round shape (see tests/mpc_lowering.rs): a dependent chain, a balanced tree, and
         // four independent products - i.e. worst, middling and best cases for round batching.
-        simple("bench_chain"),
-        simple("bench_tree"),
-        simple("bench_widesum"),
-        // `transfer`/`full_batch` are the scenarios with `isTransfer = 1` slots, the widest live
-        // value spread of the four scenarios each main has.
-        merces("transfer_arity4_batch1", "transfer"),
-        merces("transfer_arity4_batch8", "full_batch"),
+        Case { name: "bench_chain" },
+        Case { name: "bench_tree" },
+        Case { name: "bench_widesum" },
     ]
 }
 
-fn config(case: &Case) -> CompilerConfig {
-    if case.merces_config {
-        // The scenario fixtures don't carry precomputed commitment hashes, so this bench (which
-        // calls `Machine::run` directly, not `run_with_precomputation`) needs the commit sites
-        // compiled as ordinary driver-serviced Poseidon2, not host-precomputed.
-        let mut config = fixtures::merces_config();
-        config.precomputed_gadgets = false;
-        return config;
-    }
+fn config() -> CompilerConfig {
     let mut config = CompilerConfig::default();
     config
         .link_library
@@ -84,19 +46,15 @@ fn config(case: &Case) -> CompilerConfig {
 /// Compiles a case and builds its inputs, printing the round shape so a timing can be read against
 /// it. Compilation is deliberately outside the measured closure.
 fn prepare(case: &Case) -> (Program, Vec<Fr>) {
-    let graph = CoCircomCompiler::parse(case.path.clone(), config(case))
-        .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+    let path = format!("{}/circuits/{}.circom", manifest_dir(), case.name);
+    let graph =
+        circom_mpc_compiler::parse(path, &config()).unwrap_or_else(|e| panic!("{}: {e}", case.name));
     let summary = graph.mpc_summary();
     let program = codegen::compile(&graph).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-    let values = match case.merces_scenario {
-        Some(scenario) => fixtures::scenario(case.name, scenario)
-            .and_then(|s| s.values(program.input_signals()))
-            .unwrap_or_else(|e| panic!("{}: {e}", case.name)),
-        // Arbitrary but non-zero, so nothing degenerates into a trivial product.
-        None => (0..graph.num_inputs())
-            .map(|i| Fr::from(i as u64 + 1))
-            .collect(),
-    };
+    // Arbitrary but non-zero, so nothing degenerates into a trivial product.
+    let values: Vec<Fr> = (0..graph.num_inputs())
+        .map(|i| Fr::from(i as u64 + 1))
+        .collect();
     println!(
         "{:26} rounds={:3} reshare_elements={:6} max_slots={:5} sites={:4} batches={:3} instrs={:6}",
         case.name,

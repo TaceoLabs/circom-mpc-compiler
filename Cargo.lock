@@ -890,25 +890,18 @@ version = "0.1.0"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",
- "ark-serialize 0.6.0",
  "circom-mpc-compiler",
  "circom-mpc-program",
  "circom-mpc-vm",
- "clap",
  "co-circom-types",
  "co-groth16",
  "criterion",
  "eyre",
  "mpc-core",
  "mpc-net",
- "num-bigint 0.4.6",
  "rand 0.8.8",
- "rustls",
- "serde",
  "serde_json",
  "taceo-circom-types",
- "toml",
- "tracing-subscriber",
 ]
 
 [[package]]

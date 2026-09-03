@@ -4,19 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[[bin]]
-name = "merces-net"
-path = "src/bin/merces-net.rs"
-required-features = ["tls"]
-
-[[example]]
-name = "merces"
-required-features = ["local"]
-
-[[test]]
-name = "merces"
-required-features = ["local"]
-
 [[test]]
 name = "proving"
 required-features = ["local"]
@@ -31,55 +18,32 @@ name = "compile"
 
 [[bench]]
 harness = false
-name = "merces"
-required-features = ["local"]
-
-[[bench]]
-harness = false
 name = "witness_extension"
 required-features = ["local"]
 
 [dependencies]
 ark-bn254.workspace = true
 ark-ff.workspace = true
-ark-serialize = { workspace = true, optional = true }
 circom-mpc-compiler = { path = "../circom-mpc-compiler" }
 circom-mpc-program = { path = "../circom-mpc-program" }
 circom-mpc-vm = { path = "../circom-mpc-vm", default-features = false }
-circom-types = { workspace = true, optional = true }
-clap = { workspace = true, optional = true }
-co-circom-types = { workspace = true, optional = true }
-co-groth16 = { workspace = true, optional = true, features = ["verifier"] }
 eyre.workspace = true
 mpc-core.workspace = true
 mpc-net.workspace = true
-num-bigint.workspace = true
 rand.workspace = true
-rustls = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
 serde_json.workspace = true
-toml = { workspace = true, optional = true }
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
+circom-types.workspace = true
+co-circom-types.workspace = true
+co-groth16 = { workspace = true, features = ["verifier"] }
 criterion.workspace = true
 
 [features]
 default = ["local"]
-# The co-groth16 proving stack - needed by `merces-net` (a `[[bin]]`, so it cannot use
-# dev-dependencies), and pulled in by both `local` and `tls` below.
-prove = ["dep:ark-serialize", "dep:circom-types", "dep:co-circom-types", "dep:co-groth16"]
-local = ["circom-mpc-vm/local", "mpc-net/local", "prove"]
+local = ["circom-mpc-vm/local", "mpc-net/local"]
 quic = ["circom-mpc-vm/quic", "mpc-net/quic"]
 tcp = ["circom-mpc-vm/tcp", "mpc-net/tcp"]
 tcp-session = ["circom-mpc-vm/tcp-session", "mpc-net/tcp-session"]
 tcp-session-blocking = ["circom-mpc-vm/tcp-session-blocking", "mpc-net/tcp-session-blocking"]
-tls = [
-  "circom-mpc-vm/tls",
-  "dep:clap",
-  "dep:rustls",
-  "dep:serde",
-  "dep:toml",
-  "mpc-net/tls",
-  "prove",
-]
+tls = ["circom-mpc-vm/tls", "mpc-net/tls"]
