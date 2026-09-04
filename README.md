@@ -16,6 +16,8 @@ A Cargo workspace of four crates:
 
 ## Security boundary and deferred hardening
 
+
+
 The current deployment treats the circuit source, compiled VM program, and zkey as trusted,
 authentic, mutually matching artifacts. MPC public inputs and every `TACEO_REVEAL` site are
 likewise reviewed as part of that artifact set.
