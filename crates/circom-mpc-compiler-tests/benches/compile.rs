@@ -1,64 +1,56 @@
 //! Compile-time bench: `circom_mpc_compiler::compile` end to end (circom frontend, this crate's
-//! passes, and codegen), and what each optimization level costs.
+//! passes, and codegen), across every case in `circom_mpc_compiler_tests::cases`, plus what each
+//! optimization level costs on a small circuit.
 //!
-//! Plain by nature - compilation never touches a driver or a network.
+//! Plain by nature - compilation never touches a driver or a network. `BENCH_CASES=<substr>`
+//! filters cases, same as `witness_extension.rs`. `merces/batch32` is omitted by default because
+//! repeated compilation is too slow; an explicit matching filter opts it back in. A case that
+//! fails to compile is skipped with a printed warning.
 
-use circom_mpc_compiler::{CompilerConfig, OptLevel};
+use circom_mpc_compiler::OptLevel;
+use circom_mpc_compiler_tests::cases;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-fn manifest_dir() -> &'static str {
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../..")
-}
-
-struct Case {
-    name: &'static str,
-    path: String,
-}
-
-fn cases() -> Vec<Case> {
-    let simple = |name: &'static str| Case {
-        name,
-        path: format!("{}/circuits/{name}.circom", manifest_dir()),
-    };
-    vec![simple("multiplier16"), simple("bench_tree")]
-}
-
-fn config() -> CompilerConfig {
-    let mut config = CompilerConfig::default();
-    config
-        .link_library
-        .push(format!("{}/circuits/node_modules/", manifest_dir()).into());
-    config
-}
-
 fn bench(c: &mut Criterion) {
-    let cases = cases();
+    let filter = std::env::var("BENCH_CASES").ok();
+    let cases: Vec<_> = cases::select(filter.as_deref())
+        .into_iter()
+        .filter(|case| filter.is_some() || case.name != "merces/batch32")
+        .filter(|case| match cases::compile(case) {
+            Ok(_) => true,
+            Err(e) => {
+                println!("skipping {}: {e}", case.name);
+                false
+            }
+        })
+        .collect();
 
     let mut group = c.benchmark_group("compile");
     for case in &cases {
-        group.bench_with_input(BenchmarkId::from_parameter(case.name), &(), |b, ()| {
+        group.bench_with_input(BenchmarkId::from_parameter(&case.name), &(), |b, ()| {
             b.iter(|| {
-                circom_mpc_compiler::compile(case.path.clone(), &config()).unwrap();
+                cases::compile(case).unwrap();
             });
         });
     }
     group.finish();
 
-    // What each optimization level costs, on a circuit small enough for the difference to be legible.
+    // What each optimization level costs, on a circuit small enough for the difference to be
+    // legible.
     let mut group = c.benchmark_group("opt_level");
-    let case = Case {
-        name: "multiplier16",
-        path: format!("{}/circuits/multiplier16.circom", manifest_dir()),
-    };
+    let case = &cases::select(Some("micro/multiplier16"))
+        .into_iter()
+        .next()
+        .expect("micro/multiplier16 is registered");
     for opt in [OptLevel::O0, OptLevel::O1, OptLevel::O2] {
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{opt:?}")),
             &(),
             |b, ()| {
                 b.iter(|| {
-                    let mut cfg = config();
-                    cfg.opt_level = opt;
-                    circom_mpc_compiler::compile(case.path.clone(), &cfg).unwrap();
+                    let mut config = case.config.clone();
+                    config.opt_level = opt;
+                    circom_mpc_compiler::compile(case.path.clone(), &config).unwrap();
                 });
             },
         );
