@@ -1,0 +1,18 @@
+{
+  "name": "@taceo/circom-mpc-compiler-circuits",
+  "version": "0.0.0",
+  "private": true,
+  "description": "circom-mpc-compiler test circuits; circomlib pulled via pnpm",
+  "dependencies": {
+    "@taceo/circom-lib": "^0.9.0",
+    "circomlib": "2.0.5",
+    "snarkjs": "0.7.5"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.22.0",
+      "onFail": "download"
+    }
+  }
+}

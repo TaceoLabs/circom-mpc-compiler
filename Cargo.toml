@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+homepage = "https://taceo.io/"
+repository = "https://github.com/TaceoLabs/circom-mpc-compiler"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ark-bn254 = "0.6"
+ark-ff = "0.6"
+ark-serialize = { version = "0.6", features = ["derive", "std"] }
+circom-compiler = { package = "compiler", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
+circom-constraint_generation = { package = "constraint_generation", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
+circom-parser = { package = "parser", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
+circom-program_structure = { package = "program_structure", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
+circom-type_analysis = { package = "type_analysis", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
+circom-types = { package = "taceo-circom-types", version = "0.3.1" }
+clap = { version = "4.5", features = ["derive"] }
+co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.6.0" }
+co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
+eyre = "0.6.12"
+mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
+mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.5.0" }
+num-bigint = { version = "0.4.6" }
+num-traits = { version = "0.2.18", default-features = false }
+rand = { version = "0.8.8" }
+rustc-hash = "2"
+serde = { version = "1.0.214", features = ["derive"] }
+serde_json = "1.0"
+toml = { version = "0.8" }
+tracing = { version = "0.1.40" }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+assertions_on_result_states = "deny"
+dbg_macro = "deny"
+decimal_literal_representation = "deny"
+iter_over_hash_type = "deny"
+let_underscore_must_use = "deny"
+missing_assert_message = "deny"
+pedantic = { level = "deny", priority = -1 }
+print_stderr = "deny"
+print_stdout = "deny"
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+unwrap_used = "deny"
+
+[workspace.lints.rust]
+missing_docs = "deny"
