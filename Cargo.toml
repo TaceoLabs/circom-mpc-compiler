@@ -41,6 +41,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 assertions_on_result_states = "deny"
 dbg_macro = "deny"

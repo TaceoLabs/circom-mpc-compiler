@@ -606,24 +606,28 @@ impl Program {
     ///
     /// Returns an error describing the first inconsistency found - an out-of-range slot, a
     /// malformed side table, or a reference to a missing round/gadget batch.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "a single sequential validation pass over every side table; splitting it would not improve clarity"
-    )]
     pub fn validate_encoding(&self) -> eyre::Result<()> {
-        let check_slot = |bank: Bank, slot: Slot, what: &str| -> eyre::Result<()> {
-            let limit = match bank {
-                Bank::Public => self.slots.public,
-                Bank::Shared => self.slots.shared,
-                Bank::Local => self.slots.local,
-            };
-            eyre::ensure!(
-                slot.get() < limit,
-                "{what} references {bank:?} slot {slot}, but bank size is {limit}"
-            );
-            Ok(())
-        };
+        self.validate_inputs()?;
+        self.validate_instructions()?;
+        self.validate_rounds()?;
+        self.validate_gadget_batches()?;
+        self.validate_witness()
+    }
 
+    fn check_slot(&self, bank: Bank, slot: Slot, what: &str) -> eyre::Result<()> {
+        let limit = match bank {
+            Bank::Public => self.slots.public,
+            Bank::Shared => self.slots.shared,
+            Bank::Local => self.slots.local,
+        };
+        eyre::ensure!(
+            slot.get() < limit,
+            "{what} references {bank:?} slot {slot}, but bank size is {limit}"
+        );
+        Ok(())
+    }
+
+    fn validate_inputs(&self) -> eyre::Result<()> {
         eyre::ensure!(
             self.constants.len() <= self.slots.public as usize,
             "{} constants do not fit in {} public slots",
@@ -654,7 +658,7 @@ impl Program {
                 binding.bank,
                 self.input_domains[input]
             );
-            check_slot(binding.bank, binding.slot, "input binding")?;
+            self.check_slot(binding.bank, binding.slot, "input binding")?;
         }
 
         let signal_total: usize = self.input_signals.iter().map(|s| s.size).sum();
@@ -680,7 +684,10 @@ impl Program {
                 signal.name
             );
         }
+        Ok(())
+    }
 
+    fn validate_instructions(&self) -> eyre::Result<()> {
         for (index, instruction) in self.instructions.iter().enumerate() {
             match *instruction {
                 Instruction::Arith {
@@ -689,9 +696,9 @@ impl Program {
                     a,
                     b,
                 } => {
-                    check_slot(Bank::Public, dst, "instruction")?;
-                    check_slot(Bank::Public, a, "instruction")?;
-                    check_slot(Bank::Public, b, "instruction")?;
+                    self.check_slot(Bank::Public, dst, "instruction")?;
+                    self.check_slot(Bank::Public, a, "instruction")?;
+                    self.check_slot(Bank::Public, b, "instruction")?;
                 }
                 Instruction::Arith {
                     op: Opcode::AddSS | Opcode::SubSS,
@@ -699,9 +706,9 @@ impl Program {
                     a,
                     b,
                 } => {
-                    check_slot(Bank::Shared, dst, "instruction")?;
-                    check_slot(Bank::Shared, a, "instruction")?;
-                    check_slot(Bank::Shared, b, "instruction")?;
+                    self.check_slot(Bank::Shared, dst, "instruction")?;
+                    self.check_slot(Bank::Shared, a, "instruction")?;
+                    self.check_slot(Bank::Shared, b, "instruction")?;
                 }
                 Instruction::Arith {
                     op: Opcode::AddSP | Opcode::SubSP | Opcode::MulSP,
@@ -709,9 +716,9 @@ impl Program {
                     a,
                     b,
                 } => {
-                    check_slot(Bank::Shared, dst, "instruction")?;
-                    check_slot(Bank::Shared, a, "instruction")?;
-                    check_slot(Bank::Public, b, "instruction")?;
+                    self.check_slot(Bank::Shared, dst, "instruction")?;
+                    self.check_slot(Bank::Shared, a, "instruction")?;
+                    self.check_slot(Bank::Public, b, "instruction")?;
                 }
                 Instruction::Arith {
                     op: Opcode::SubPS,
@@ -719,9 +726,9 @@ impl Program {
                     a,
                     b,
                 } => {
-                    check_slot(Bank::Shared, dst, "instruction")?;
-                    check_slot(Bank::Public, a, "instruction")?;
-                    check_slot(Bank::Shared, b, "instruction")?;
+                    self.check_slot(Bank::Shared, dst, "instruction")?;
+                    self.check_slot(Bank::Public, a, "instruction")?;
+                    self.check_slot(Bank::Shared, b, "instruction")?;
                 }
                 Instruction::Arith {
                     op: Opcode::MulLocal,
@@ -729,9 +736,9 @@ impl Program {
                     a,
                     b,
                 } => {
-                    check_slot(Bank::Local, dst, "instruction")?;
-                    check_slot(Bank::Shared, a, "instruction")?;
-                    check_slot(Bank::Shared, b, "instruction")?;
+                    self.check_slot(Bank::Local, dst, "instruction")?;
+                    self.check_slot(Bank::Shared, a, "instruction")?;
+                    self.check_slot(Bank::Shared, b, "instruction")?;
                 }
                 Instruction::Arith {
                     op: Opcode::Reshare | Opcode::Gadget,
@@ -749,7 +756,10 @@ impl Program {
                 ),
             }
         }
+        Ok(())
+    }
 
+    fn validate_rounds(&self) -> eyre::Result<()> {
         for (index, round) in self.rounds.iter().enumerate() {
             eyre::ensure!(round.len > 0, "round {index} has no operands");
             let operand_start = round.operand_start as usize;
@@ -770,150 +780,163 @@ impl Program {
                 "round {index} result range is out of bounds"
             );
             for &slot in &self.round_operands[operand_start..operand_end] {
-                check_slot(Bank::Local, slot, "round operand")?;
+                self.check_slot(Bank::Local, slot, "round operand")?;
             }
             for &slot in &self.round_results[result_start..result_end] {
-                check_slot(Bank::Shared, slot, "round result")?;
+                self.check_slot(Bank::Shared, slot, "round result")?;
             }
         }
+        Ok(())
+    }
 
+    fn validate_gadget_batches(&self) -> eyre::Result<()> {
         for (index, batch) in self.gadget_batches.iter().enumerate() {
-            eyre::ensure!(batch.sites > 0, "gadget batch {index} has no sites");
-            let inputs_per_site = match batch.kind {
-                // `t` is a `Poseidon2Width`, checked against `POSEIDON2_SUPPORTED_WIDTHS` at
-                // construction - no need to re-check it here.
-                BatchKind::Gadget(GadgetKind::Poseidon2 { t })
-                | BatchKind::PrecomputedPoseidon2 { t } => t.get(),
-                BatchKind::Gadget(GadgetKind::Num2Bits { .. } | GadgetKind::IsZero)
-                | BatchKind::IsZeroReveal => 1,
-                BatchKind::Gadget(GadgetKind::AliasCheck) => 254,
-                BatchKind::Gadget(GadgetKind::Reveal { n }) => n,
-            };
-            let expected_inputs = batch
-                .sites
-                .checked_mul(inputs_per_site)
-                .ok_or_else(|| eyre::eyre!("gadget batch {index} input count overflows"))?;
-            eyre::ensure!(
-                batch.input_slots.len() == expected_inputs,
-                "gadget batch {index} has {} inputs, expected {expected_inputs}",
-                batch.input_slots.len()
-            );
-            for input in &batch.input_slots {
-                eyre::ensure!(
-                    input.bank != Bank::Local,
-                    "gadget batch {index} has a Local input"
-                );
-                check_slot(input.bank, input.slot, "gadget input")?;
-            }
-            if batch.kind == BatchKind::IsZeroReveal {
-                eyre::ensure!(
-                    batch
-                        .input_slots
-                        .iter()
-                        .all(|input| input.bank == Bank::Shared),
-                    "fused IsZeroReveal batch {index} must have only Shared inputs"
-                );
-            }
-            if matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. }) {
-                // Mirrors `codegen::gadget_result_bank`'s `Domain::Shared` requirement: a
-                // host-precomputed site may mix Public and Shared inputs (e.g. a public domain
-                // separator alongside real shares), but at least one input must be Shared -
-                // otherwise there is nothing for the host to precompute.
-                eyre::ensure!(
-                    batch
-                        .input_slots
-                        .iter()
-                        .any(|input| input.bank == Bank::Shared),
-                    "precomputed batch {index} must have at least one Shared input"
-                );
-            }
+            self.validate_gadget_batch(index, batch)?;
+        }
+        Ok(())
+    }
 
-            let expected_offsets = batch
-                .sites
-                .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("gadget batch {index} site count overflows"))?;
+    fn validate_gadget_batch(&self, index: usize, batch: &GadgetBatch) -> eyre::Result<()> {
+        eyre::ensure!(batch.sites > 0, "gadget batch {index} has no sites");
+        let inputs_per_site = match batch.kind {
+            // `t` is a `Poseidon2Width`, checked against `POSEIDON2_SUPPORTED_WIDTHS` at
+            // construction - no need to re-check it here.
+            BatchKind::Gadget(GadgetKind::Poseidon2 { t })
+            | BatchKind::PrecomputedPoseidon2 { t } => t.get(),
+            BatchKind::Gadget(GadgetKind::Num2Bits { .. } | GadgetKind::IsZero)
+            | BatchKind::IsZeroReveal => 1,
+            BatchKind::Gadget(GadgetKind::AliasCheck) => 254,
+            BatchKind::Gadget(GadgetKind::Reveal { n }) => n,
+        };
+        let expected_inputs = batch
+            .sites
+            .checked_mul(inputs_per_site)
+            .ok_or_else(|| eyre::eyre!("gadget batch {index} input count overflows"))?;
+        eyre::ensure!(
+            batch.input_slots.len() == expected_inputs,
+            "gadget batch {index} has {} inputs, expected {expected_inputs}",
+            batch.input_slots.len()
+        );
+        for input in &batch.input_slots {
             eyre::ensure!(
-                batch.result_offsets.len() == expected_offsets,
-                "gadget batch {index} result offsets have wrong length"
+                input.bank != Bank::Local,
+                "gadget batch {index} has a Local input"
             );
-            let request_count = u32::try_from(batch.result_requests.len())
-                .map_err(|_| eyre::eyre!("gadget batch {index} has too many result requests"))?;
+            self.check_slot(input.bank, input.slot, "gadget input")?;
+        }
+        if batch.kind == BatchKind::IsZeroReveal {
             eyre::ensure!(
-                batch.result_offsets.first() == Some(&0)
-                    && batch.result_offsets.last().copied() == Some(request_count)
-                    && batch
-                        .result_offsets
-                        .windows(2)
-                        .all(|window| window[0] <= window[1]),
-                "gadget batch {index} has invalid CSR offsets"
+                batch
+                    .input_slots
+                    .iter()
+                    .all(|input| input.bank == Bank::Shared),
+                "fused IsZeroReveal batch {index} must have only Shared inputs"
             );
+        }
+        if matches!(batch.kind, BatchKind::PrecomputedPoseidon2 { .. }) {
+            // Mirrors `codegen::gadget_result_bank`'s `Domain::Shared` requirement: a
+            // host-precomputed site may mix Public and Shared inputs (e.g. a public domain
+            // separator alongside real shares), but at least one input must be Shared - otherwise
+            // there is nothing for the host to precompute.
             eyre::ensure!(
-                batch.result_requests.len() == batch.result_targets.len(),
-                "gadget batch {index} request/target lengths differ"
+                batch
+                    .input_slots
+                    .iter()
+                    .any(|input| input.bank == Bank::Shared),
+                "precomputed batch {index} must have at least one Shared input"
             );
-            let capacity = match batch.kind {
-                BatchKind::Gadget(kind) => kind.expected_results(),
-                BatchKind::PrecomputedPoseidon2 { t } => {
-                    GadgetKind::Poseidon2 { t }.expected_results()
-                }
-                BatchKind::IsZeroReveal => 3,
-            };
-            let normal_result_bank = match batch.kind {
-                BatchKind::Gadget(GadgetKind::Reveal { .. }) => Some(Bank::Public),
-                BatchKind::Gadget(_) => Some(
-                    if batch
-                        .input_slots
-                        .iter()
-                        .any(|input| input.bank == Bank::Shared)
-                    {
-                        Bank::Shared
-                    } else {
-                        Bank::Public
-                    },
-                ),
-                // A host-precomputed site is always `Shared`-domain by construction (see
-                // `gadget_result_bank`); a batch built any other way is rejected above.
-                BatchKind::PrecomputedPoseidon2 { .. } => Some(Bank::Shared),
-                BatchKind::IsZeroReveal => None,
-            };
-            for site in 0..batch.sites {
-                let lo = batch.result_offsets[site] as usize;
-                let hi = batch.result_offsets[site + 1] as usize;
-                eyre::ensure!(
-                    hi <= batch.result_requests.len(),
-                    "gadget batch {index} CSR row is out of bounds"
-                );
-                let requests = &batch.result_requests[lo..hi];
-                eyre::ensure!(
-                    requests.windows(2).all(|window| window[0] < window[1]),
-                    "gadget batch {index} site {site} requests are not strictly ascending"
-                );
-                for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
-                    eyre::ensure!(
-                        request.index() < capacity,
-                        "gadget batch {index} request {request} exceeds capacity {capacity}"
-                    );
-                    eyre::ensure!(
-                        target.bank != Bank::Local,
-                        "gadget batch {index} targets Local bank"
-                    );
-                    let expected_bank = normal_result_bank.unwrap_or({
-                        if request.get() == 2 {
-                            Bank::Public
-                        } else {
-                            Bank::Shared
-                        }
-                    });
-                    eyre::ensure!(
-                        target.bank == expected_bank,
-                        "gadget batch {index} result {request} targets {:?}, expected {expected_bank:?}",
-                        target.bank
-                    );
-                    check_slot(target.bank, target.slot, "gadget result")?;
-                }
-            }
         }
 
+        let expected_offsets = batch
+            .sites
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("gadget batch {index} site count overflows"))?;
+        eyre::ensure!(
+            batch.result_offsets.len() == expected_offsets,
+            "gadget batch {index} result offsets have wrong length"
+        );
+        let request_count = u32::try_from(batch.result_requests.len())
+            .map_err(|_| eyre::eyre!("gadget batch {index} has too many result requests"))?;
+        eyre::ensure!(
+            batch.result_offsets.first() == Some(&0)
+                && batch.result_offsets.last().copied() == Some(request_count)
+                && batch
+                    .result_offsets
+                    .windows(2)
+                    .all(|window| window[0] <= window[1]),
+            "gadget batch {index} has invalid CSR offsets"
+        );
+        eyre::ensure!(
+            batch.result_requests.len() == batch.result_targets.len(),
+            "gadget batch {index} request/target lengths differ"
+        );
+        self.validate_gadget_results(index, batch)
+    }
+
+    fn validate_gadget_results(&self, index: usize, batch: &GadgetBatch) -> eyre::Result<()> {
+        let capacity = match batch.kind {
+            BatchKind::Gadget(kind) => kind.expected_results(),
+            BatchKind::PrecomputedPoseidon2 { t } => GadgetKind::Poseidon2 { t }.expected_results(),
+            BatchKind::IsZeroReveal => 3,
+        };
+        let normal_result_bank = match batch.kind {
+            BatchKind::Gadget(GadgetKind::Reveal { .. }) => Some(Bank::Public),
+            BatchKind::Gadget(_) => Some(
+                if batch
+                    .input_slots
+                    .iter()
+                    .any(|input| input.bank == Bank::Shared)
+                {
+                    Bank::Shared
+                } else {
+                    Bank::Public
+                },
+            ),
+            // A host-precomputed site is always `Shared`-domain by construction (see
+            // `gadget_result_bank`); a batch built any other way is rejected above.
+            BatchKind::PrecomputedPoseidon2 { .. } => Some(Bank::Shared),
+            BatchKind::IsZeroReveal => None,
+        };
+        for site in 0..batch.sites {
+            let lo = batch.result_offsets[site] as usize;
+            let hi = batch.result_offsets[site + 1] as usize;
+            eyre::ensure!(
+                hi <= batch.result_requests.len(),
+                "gadget batch {index} CSR row is out of bounds"
+            );
+            let requests = &batch.result_requests[lo..hi];
+            eyre::ensure!(
+                requests.windows(2).all(|window| window[0] < window[1]),
+                "gadget batch {index} site {site} requests are not strictly ascending"
+            );
+            for (request, target) in requests.iter().zip(&batch.result_targets[lo..hi]) {
+                eyre::ensure!(
+                    request.index() < capacity,
+                    "gadget batch {index} request {request} exceeds capacity {capacity}"
+                );
+                eyre::ensure!(
+                    target.bank != Bank::Local,
+                    "gadget batch {index} targets Local bank"
+                );
+                let expected_bank = normal_result_bank.unwrap_or({
+                    if request.get() == 2 {
+                        Bank::Public
+                    } else {
+                        Bank::Shared
+                    }
+                });
+                eyre::ensure!(
+                    target.bank == expected_bank,
+                    "gadget batch {index} result {request} targets {:?}, expected {expected_bank:?}",
+                    target.bank
+                );
+                self.check_slot(target.bank, target.slot, "gadget result")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_witness(&self) -> eyre::Result<()> {
         eyre::ensure!(
             !self.witness_sources.is_empty(),
             "program has an empty witness"
@@ -945,7 +968,7 @@ impl Program {
                 ),
                 WitnessSource::Slot { bank, slot } => {
                     eyre::ensure!(bank != Bank::Local, "witness source cannot use Local bank");
-                    check_slot(bank, slot, "witness source")?;
+                    self.check_slot(bank, slot, "witness source")?;
                 }
             }
         }

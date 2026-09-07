@@ -455,155 +455,190 @@ fn record_sbox_e<V: Clone>(
     output.record(base + 3, &trace.pow4);
 }
 
-/// Runs the permutation for every site in `states` (each `t` elements, concatenated) in lock-step,
-/// so each round's s-boxes across the whole batch are one [`Ops::sbox_layer`] call.
-#[allow(
-    clippy::too_many_lines,
-    reason = "a single sequential walk over every permutation round; splitting it would not improve clarity"
-)]
-fn walk<O: Ops>(
-    ops: &mut O,
+struct WalkState<'ops, 'output, O: Ops> {
+    ops: &'ops mut O,
     t: usize,
-    states: &[O::V],
-    rc: &RoundConstants,
-    mut outputs: Vec<SiteOutput<'_, O::V>>,
-) -> eyre::Result<Vec<O::V>> {
-    let sites = states.len() / t;
-    let pr = partial_rounds(t);
-    let layout = Layout::new(t);
-    debug_assert_eq!(outputs.len(), sites, "one SiteOutput per site");
+    sites: usize,
+    layout: Layout,
+    current: Vec<Vec<O::V>>,
+    outputs: Vec<SiteOutput<'output, O::V>>,
+}
 
-    // Current state per site. Witness values are recorded directly into `outputs`; no round or
-    // subcomponent trace blocks are materialized.
-    let mut current: Vec<Vec<O::V>> = Vec::with_capacity(sites);
-    for site in 0..sites {
-        let input = &states[site * t..(site + 1) * t];
-        let out = external_matmul(ops, input, &mut outputs[site], layout.initial_matmul);
-        outputs[site].record_slice(layout.states, &out);
-        current.push(out);
+impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
+    fn new(
+        ops: &'ops mut O,
+        t: usize,
+        states: &[O::V],
+        mut outputs: Vec<SiteOutput<'output, O::V>>,
+    ) -> Self {
+        let sites = states.len() / t;
+        let layout = Layout::new(t);
+        debug_assert_eq!(outputs.len(), sites, "one SiteOutput per site");
+
+        // Current state per site. Witness values are recorded directly into `outputs`; no round or
+        // subcomponent trace blocks are materialized.
+        let mut current = Vec::with_capacity(sites);
+        for site in 0..sites {
+            let input = &states[site * t..(site + 1) * t];
+            let out = external_matmul(ops, input, &mut outputs[site], layout.initial_matmul);
+            outputs[site].record_slice(layout.states, &out);
+            current.push(out);
+        }
+
+        Self {
+            ops,
+            t,
+            sites,
+            layout,
+            current,
+            outputs,
+        }
     }
 
     // A full round, for every site at once: add RC, one s-box layer, external matrix.
-    let full_round = |ops: &mut O,
-                      current: &mut Vec<Vec<O::V>>,
-                      outputs: &mut Vec<SiteOutput<'_, O::V>>,
-                      round_rc: &[Fr],
-                      layout_round: usize,
-                      state_row: usize|
-     -> eyre::Result<()> {
-        let mut linear: Vec<Vec<O::V>> = Vec::with_capacity(sites);
-        for state in current.iter() {
+    fn full_round(
+        &mut self,
+        round_rc: &[Fr],
+        layout_round: usize,
+        state_row: usize,
+    ) -> eyre::Result<()> {
+        let mut linear: Vec<Vec<O::V>> = Vec::with_capacity(self.sites);
+        for state in &self.current {
             linear.push(
                 state
                     .iter()
                     .zip(round_rc)
-                    .map(|(x, &c)| ops.add_public(x, c))
+                    .map(|(x, &c)| self.ops.add_public(x, c))
                     .collect(),
             );
         }
         let flat: Vec<O::V> = linear.iter().flatten().cloned().collect();
-        let sboxes = ops.sbox_layer(&flat)?;
+        let sboxes = self.ops.sbox_layer(&flat)?;
 
-        for (site, state) in current.iter_mut().enumerate() {
-            let sbox_traces = &sboxes[site * t..(site + 1) * t];
+        for (site, state) in self.current.iter_mut().enumerate() {
+            let sbox_traces = &sboxes[site * self.t..(site + 1) * self.t];
             let sbox_out: Vec<O::V> = sbox_traces.iter().map(|s| s.out.clone()).collect();
-            let base = layout.full + layout_round * full_round_signals(t);
-            let emm_base = base + 5 * t;
-            let out = external_matmul(ops, &sbox_out, &mut outputs[site], emm_base);
+            let base = self.layout.full + layout_round * full_round_signals(self.t);
+            let emm_base = base + 5 * self.t;
+            let out = external_matmul(self.ops, &sbox_out, &mut self.outputs[site], emm_base);
 
             // [out][in][RC][linear_layer][sbox] + ExternalMatMulT + Sbox
-            outputs[site].record_slice(base, &out);
-            outputs[site].record_slice(base + t, state);
+            self.outputs[site].record_slice(base, &out);
+            self.outputs[site].record_slice(base + self.t, state);
             for (i, &c) in round_rc.iter().enumerate() {
-                let logical = base + 2 * t + i;
-                if outputs[site].wants(logical) {
-                    let value = ops.public(c);
-                    outputs[site].record_owned(logical, value);
+                let logical = base + 2 * self.t + i;
+                if self.outputs[site].wants(logical) {
+                    let value = self.ops.public(c);
+                    self.outputs[site].record_owned(logical, value);
                 }
             }
-            outputs[site].record_slice(base + 3 * t, &linear[site]);
-            outputs[site].record_slice(base + 4 * t, &sbox_out);
+            self.outputs[site].record_slice(base + 3 * self.t, &linear[site]);
+            self.outputs[site].record_slice(base + 4 * self.t, &sbox_out);
             // Sbox(t)'s own block: [out[t]][in[t]] + t x Sbox_e
-            let sbox_base = emm_base + external_matmul_signals(t);
-            outputs[site].record_slice(sbox_base, &sbox_out);
-            outputs[site].record_slice(sbox_base + t, &linear[site]);
+            let sbox_base = emm_base + external_matmul_signals(self.t);
+            self.outputs[site].record_slice(sbox_base, &sbox_out);
+            self.outputs[site].record_slice(sbox_base + self.t, &linear[site]);
             for (k, s) in sbox_traces.iter().enumerate() {
                 record_sbox_e(
-                    &mut outputs[site],
-                    sbox_base + 2 * t + k * SBOX_E_SIGNALS,
+                    &mut self.outputs[site],
+                    sbox_base + 2 * self.t + k * SBOX_E_SIGNALS,
                     &linear[site][k],
                     s,
                 );
             }
 
-            outputs[site].record_slice(layout.states + state_row * t, &out);
+            self.outputs[site].record_slice(self.layout.states + state_row * self.t, &out);
             *state = out;
         }
         Ok(())
-    };
-
-    for round in 0..4 {
-        let round_rc = &rc.full1[round * t..(round + 1) * t];
-        full_round(ops, &mut current, &mut outputs, round_rc, round, round + 1)?;
     }
 
-    // Partial rounds: RC and s-box on element 0 only, then the internal matrix.
-    for round in 0..pr {
-        let c = rc.partial[round];
-        let linear: Vec<O::V> = current
+    // RC and s-box on element 0 only, then the internal matrix.
+    fn partial_round(&mut self, round: usize, c: Fr, diag: &[Fr]) -> eyre::Result<()> {
+        let linear: Vec<O::V> = self
+            .current
             .iter()
-            .map(|state| ops.add_public(&state[0], c))
+            .map(|state| self.ops.add_public(&state[0], c))
             .collect();
-        let sboxes = ops.sbox_layer(&linear)?;
+        let sboxes = self.ops.sbox_layer(&linear)?;
 
-        for (site, state) in current.iter_mut().enumerate() {
+        for (site, state) in self.current.iter_mut().enumerate() {
             let sbox = &sboxes[site];
             let mut imm_input = vec![sbox.out.clone()];
             imm_input.extend_from_slice(&state[1..]);
-            let base = layout.partial + round * partial_round_signals(t);
-            let imm_base = base + 2 * t + 3 + SBOX_E_SIGNALS;
-            let out = internal_matmul(ops, &imm_input, &rc.diag, &mut outputs[site], imm_base);
+            let base = self.layout.partial + round * partial_round_signals(self.t);
+            let imm_base = base + 2 * self.t + 3 + SBOX_E_SIGNALS;
+            let out = internal_matmul(
+                self.ops,
+                &imm_input,
+                diag,
+                &mut self.outputs[site],
+                imm_base,
+            );
 
             // [out][in][RC][linear_layer][sbox] + Sbox_e + InternalMatMulT
-            outputs[site].record_slice(base, &out);
-            outputs[site].record_slice(base + t, state);
-            let rc_slot = base + 2 * t;
-            if outputs[site].wants(rc_slot) {
-                let rc_value = ops.public(c);
-                outputs[site].record_owned(rc_slot, rc_value);
+            self.outputs[site].record_slice(base, &out);
+            self.outputs[site].record_slice(base + self.t, state);
+            let rc_slot = base + 2 * self.t;
+            if self.outputs[site].wants(rc_slot) {
+                let rc_value = self.ops.public(c);
+                self.outputs[site].record_owned(rc_slot, rc_value);
             }
-            outputs[site].record(base + 2 * t + 1, &linear[site]);
-            outputs[site].record(base + 2 * t + 2, &sbox.out);
-            record_sbox_e(&mut outputs[site], base + 2 * t + 3, &linear[site], sbox);
+            self.outputs[site].record(base + 2 * self.t + 1, &linear[site]);
+            self.outputs[site].record(base + 2 * self.t + 2, &sbox.out);
+            record_sbox_e(
+                &mut self.outputs[site],
+                base + 2 * self.t + 3,
+                &linear[site],
+                sbox,
+            );
 
-            outputs[site].record_slice(layout.states + (5 + round) * t, &out);
+            self.outputs[site].record_slice(self.layout.states + (5 + round) * self.t, &out);
             *state = out;
         }
+        Ok(())
     }
+
+    fn finish(mut self) -> eyre::Result<Vec<O::V>> {
+        // Top-level `[out[t]]`, known only after the second full-round group.
+        for (site, state) in self.current.iter().enumerate() {
+            self.outputs[site].record_slice(0, state);
+        }
+
+        let expected = self.outputs.iter().map(|output| output.values.len()).sum();
+        let mut result = Vec::with_capacity(expected);
+        for (site, output) in self.outputs.into_iter().enumerate() {
+            result.extend(output.finish(site)?);
+        }
+        Ok(result)
+    }
+}
+
+/// Runs the permutation for every site in `states` (each `t` elements, concatenated) in lock-step,
+/// so each round's s-boxes across the whole batch are one [`Ops::sbox_layer`] call.
+fn walk<O: Ops>(
+    ops: &mut O,
+    t: usize,
+    states: &[O::V],
+    rc: &RoundConstants,
+    outputs: Vec<SiteOutput<'_, O::V>>,
+) -> eyre::Result<Vec<O::V>> {
+    let pr = partial_rounds(t);
+    let mut state = WalkState::new(ops, t, states, outputs);
 
     for round in 0..4 {
+        let round_rc = &rc.full1[round * t..(round + 1) * t];
+        state.full_round(round_rc, round, round + 1)?;
+    }
+    for round in 0..pr {
+        state.partial_round(round, rc.partial[round], &rc.diag)?;
+    }
+    for round in 0..4 {
         let round_rc = &rc.full2[round * t..(round + 1) * t];
-        full_round(
-            ops,
-            &mut current,
-            &mut outputs,
-            round_rc,
-            4 + round,
-            5 + pr + round,
-        )?;
+        state.full_round(round_rc, 4 + round, 5 + pr + round)?;
     }
 
-    // Top-level `[out[t]]`, known only after the second full-round group.
-    for (site, state) in current.iter().enumerate() {
-        outputs[site].record_slice(0, state);
-    }
-
-    let expected = outputs.iter().map(|output| output.values.len()).sum();
-    let mut result = Vec::with_capacity(expected);
-    for (site, output) in outputs.into_iter().enumerate() {
-        result.extend(output.finish(site)?);
-    }
-    Ok(result)
+    state.finish()
 }
 
 fn check_width(t: usize, states: usize) -> eyre::Result<usize> {

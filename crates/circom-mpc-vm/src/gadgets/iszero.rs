@@ -5,6 +5,8 @@
 use ark_bn254::Fr;
 use ark_ff::{Field, One, Zero};
 
+use crate::driver::IsZeroRevealTrace;
+
 /// `[out, inv]`.
 ///
 /// # Panics
@@ -74,21 +76,11 @@ pub fn rep3_trace<N: mpc_net::Network>(
 /// # Errors
 ///
 /// Returns an error if `inputs` is empty, or the underlying computation/network round fails.
-#[allow(
-    clippy::type_complexity,
-    reason = "the tuple mirrors the fused IsZeroReveal batch's own three-value result shape; a named struct would only add ceremony for one call site"
-)]
 pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
     inputs: &[mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>],
     net: &N,
     state: &mut mpc_core::protocols::rep3::Rep3State,
-) -> eyre::Result<
-    Vec<(
-        mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>,
-        mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>,
-        Fr,
-    )>,
-> {
+) -> eyre::Result<Vec<IsZeroRevealTrace<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>>> {
     use mpc_core::{
         MpcState,
         protocols::rep3::{Rep3PrimeFieldShare, arithmetic},
@@ -104,18 +96,18 @@ pub fn rep3_masked_reveal_trace<N: mpc_net::Network>(
         .map(|(mask, product)| {
             if product.is_zero() {
                 let is_zero = Fr::one();
-                (
-                    Rep3PrimeFieldShare::promote_from_trivial(&is_zero, state.id()),
-                    Rep3PrimeFieldShare::default(),
-                    is_zero,
-                )
+                IsZeroRevealTrace {
+                    is_zero: Rep3PrimeFieldShare::promote_from_trivial(&is_zero, state.id()),
+                    inverse: Rep3PrimeFieldShare::default(),
+                    revealed: is_zero,
+                }
             } else {
                 let inverse = product.inverse().expect("non-zero product checked above");
-                (
-                    Rep3PrimeFieldShare::default(),
-                    arithmetic::mul_public(mask, inverse),
-                    Fr::zero(),
-                )
+                IsZeroRevealTrace {
+                    is_zero: Rep3PrimeFieldShare::default(),
+                    inverse: arithmetic::mul_public(mask, inverse),
+                    revealed: Fr::zero(),
+                }
             }
         })
         .collect())
@@ -149,12 +141,15 @@ mod tests {
         let got = run3_with_a2b(&values, A2BType::default(), |net, state, shares| {
             let traces = rep3_masked_reveal_trace(shares, net, state)?;
             assert_eq!(
-                traces.iter().map(|trace| trace.2).collect::<Vec<_>>(),
+                traces
+                    .iter()
+                    .map(|trace| trace.revealed)
+                    .collect::<Vec<_>>(),
                 [Fr::from(1u64), Fr::from(0u64)]
             );
             Ok(traces
                 .into_iter()
-                .flat_map(|(is_zero, inverse, _)| [is_zero, inverse])
+                .flat_map(|trace| [trace.is_zero, trace.inverse])
                 .collect())
         });
         assert_eq!(got, expected);
@@ -169,7 +164,7 @@ mod tests {
             run3_counted_with_a2b(&values, A2BType::default(), |net, state, shares| {
                 Ok(rep3_masked_reveal_trace(shares, net, state)?
                     .into_iter()
-                    .flat_map(|(is_zero, inverse, _)| [is_zero, inverse])
+                    .flat_map(|trace| [trace.is_zero, trace.inverse])
                     .collect())
             });
         assert_eq!(rounds.by_party, [1, 1, 1]);
