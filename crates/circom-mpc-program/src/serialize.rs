@@ -89,9 +89,9 @@ impl WireIndex for ResultSlot {
 }
 
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
-/// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
-/// shim: accepting an older layout could produce a plausible-looking wrong witness.
-const VERSION: u32 = 3;
+/// Bump after release when the layout changes; `read` rejects anything else. Deliberately no
+/// compatibility shim: accepting an older layout could produce a plausible-looking wrong witness.
+const VERSION: u32 = 1;
 
 /// Caps [`Program::read`] enforces against an untrusted or corrupted input before it allocates
 /// anything, so a malformed length field can't drive an unbounded allocation.
@@ -717,5 +717,18 @@ mod tests {
         let err = super::Program::read(&mut [0u8; 16].as_slice())
             .expect_err("all-zero bytes are not a valid magic");
         assert!(err.to_string().contains("bad magic"), "{err}");
+    }
+
+    #[test]
+    fn read_rejects_unsupported_version() {
+        let mut bytes = Vec::from(*super::MAGIC);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        let err = super::Program::read(&mut bytes.as_slice())
+            .expect_err("version 3 is not a supported program format");
+        assert!(
+            err.to_string()
+                .contains("unsupported program format version 3"),
+            "{err}"
+        );
     }
 }
