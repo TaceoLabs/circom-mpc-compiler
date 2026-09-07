@@ -71,3 +71,23 @@ cargo run --release -p taceo-circom-mpc-compiler --features cli -- \
 `cargo install --path crates/circom-mpc-compiler --features cli` installs it. `--config <toml>`
 loads a `CompilerConfig` (see `crates/circom-mpc-compiler/src/lib.rs`); CLI flags apply on top of
 it. Run with `--help` for the full flag list.
+
+## License
+
+This repository uses split licensing:
+
+- `taceo-circom-mpc-compiler` and `circom-mpc-compiler-tests` are licensed under
+  [GPL-3.0-only](LICENSE-GPL-3.0). The compiler links directly to Circom's GPL-licensed Rust
+  packages, so the compiler library and `circom-mpc-compile` CLI must be distributed under
+  GPL-compatible terms.
+- `taceo-circom-mpc-program` and `taceo-circom-mpc-vm` are licensed under
+  [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. They do not link to Circom.
+- The TACEO-authored sources under `circuits/merces` are licensed under
+  [MIT](circuits/merces/LICENSE-MIT).
+- Other repository-authored files are licensed under MIT or Apache-2.0 unless a file or directory
+  states otherwise.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and adapted third-party
+material. Merely using GPL-licensed build tools such as Circom or snarkjs does not by itself apply
+their license to generated output; output that incorporates third-party source remains subject to
+that source's license.
