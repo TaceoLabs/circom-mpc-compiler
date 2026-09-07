@@ -832,7 +832,7 @@ dependencies = [
  "eyre",
  "mpc-core",
  "mpc-net",
- "rand 0.8.8",
+ "rand 0.10.2",
  "serde_json",
  "taceo-circom-mpc-compiler",
  "taceo-circom-mpc-program",
@@ -3693,7 +3693,7 @@ dependencies = [
  "mpc-net",
  "num-bigint 0.4.8",
  "num-traits",
- "rand 0.8.8",
+ "rand 0.10.2",
  "taceo-circom-mpc-program",
 ]
 
