@@ -6,7 +6,7 @@
 use ark_bn254::Fr;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_compiler_tests::fixtures::rep3::{run_witness, share_inputs};
-use circom_mpc_vm::{Machine, driver::rep3::Rep3Driver};
+use circom_mpc_vm::Vm;
 use mpc_core::protocols::rep3::{
     Rep3PrimeFieldShare, Rep3State, combine_field_elements, conversion::A2BType,
 };
@@ -22,13 +22,28 @@ fn config() -> CompilerConfig {
     config
 }
 
+/// Stitches one party's opened `public_inputs` prefix (identical across parties) back together
+/// with the three parties' secret-shared remainders - the full flat witness, in original witness
+/// order, for comparison against a plain-driver oracle.
+fn combine_witness(
+    w0: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+    w1: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+    w2: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+) -> Vec<Fr> {
+    let mut full = w0.public_inputs;
+    full.extend(combine_field_elements(
+        &w0.witness,
+        &w1.witness,
+        &w2.witness,
+    ));
+    full
+}
+
 /// Staged batching under a real network - the test that proves batch interleaving works.
 /// `PlainDriver` cannot detect a mis-ordered batch (its `reshare` is the identity and slots start
 /// zeroed); against three real parties the same bug deadlocks or diverges.
 #[test]
 fn staged_gadget_matches_the_plain_driver_under_rep3() {
-    use circom_mpc_vm::driver::plain::PlainDriver;
-
     let program =
         circom_mpc_compiler::compile(circuit_path("gadget_staged_test"), &config()).unwrap();
     assert_eq!(
@@ -44,8 +59,7 @@ fn staged_gadget_matches_the_plain_driver_under_rep3() {
     ] {
         let plain = {
             let inputs = program.classify_inputs(&values, |v| v);
-            let mut driver = PlainDriver;
-            Machine::run(&program, &mut driver, &inputs).unwrap()
+            Vm::plain(&program).run(&inputs).unwrap().into_full()
         };
         assert_eq!(run_witness(&program, &values), plain, "inputs {values:?}");
     }
@@ -53,8 +67,6 @@ fn staged_gadget_matches_the_plain_driver_under_rep3() {
 
 #[test]
 fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
-    use circom_mpc_vm::driver::plain::PlainDriver;
-
     let program =
         circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
@@ -64,15 +76,13 @@ fn fused_iszero_reveal_matches_plain_for_zero_and_nonzero() {
     let values = [Fr::from(0u64), Fr::from(7u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
-        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&program).run(&inputs).unwrap().into_full()
     };
     assert_eq!(run_witness(&program, &values), plain, "inputs {values:?}");
 }
 
 #[test]
 fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
-    use circom_mpc_vm::driver::plain::PlainDriver;
-
     let program =
         circom_mpc_compiler::compile(circuit_path("gadget_isequal_reveal_test"), &config())
             .unwrap();
@@ -97,7 +107,7 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     ] {
         let plain = {
             let inputs = program.classify_inputs(&values, |v| v);
-            Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+            Vm::plain(&program).run(&inputs).unwrap().into_full()
         };
         assert_eq!(
             &plain[1..4],
@@ -108,18 +118,21 @@ fn fused_isequal_reveal_matches_plain_for_shared_and_mixed_operands() {
     }
 }
 
+/// The fused reveal itself costs one round; `Vm::run`'s own closing open of the public-witness
+/// prefix (here, the constant plus main's two revealed outputs) costs a second.
 #[test]
-fn fused_iszero_reveal_costs_one_online_round() {
+fn fused_iszero_reveal_costs_two_online_rounds() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
         circom_mpc_compiler::compile(circuit_path("gadget_iszero_reveal_test"), &config()).unwrap();
     let (_, _, online) = run_witness_counted(&program, &[Fr::from(0u64), Fr::from(7u64)]);
-    assert_eq!(online, [1, 1, 1]);
+    assert_eq!(online, [2, 2, 2]);
 }
 
+/// As above: one round for the three fused sites, one for `Vm::run`'s closing open.
 #[test]
-fn three_fused_isequal_reveal_sites_cost_one_online_round() {
+fn three_fused_isequal_reveal_sites_cost_two_online_rounds() {
     use circom_mpc_compiler_tests::fixtures::rep3::run_witness_counted;
 
     let program =
@@ -127,20 +140,18 @@ fn three_fused_isequal_reveal_sites_cost_one_online_round() {
             .unwrap();
     let values = [Fr::from(4u64), Fr::from(10u64), Fr::from(4u64)];
     let (_, _, online) = run_witness_counted(&program, &values);
-    assert_eq!(online, [1, 1, 1]);
+    assert_eq!(online, [2, 2, 2]);
 }
 
 #[test]
 fn wide_round_vector_products_match_the_plain_driver() {
-    use circom_mpc_vm::driver::plain::PlainDriver;
-
     let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().multiplication_rounds, 1);
     assert_eq!(program.statistics().multiplication_elements, 4);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
-        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&program).run(&inputs).unwrap().into_full()
     };
     assert_eq!(run_witness(&program, &values), plain);
 }
@@ -148,7 +159,6 @@ fn wide_round_vector_products_match_the_plain_driver() {
 #[test]
 fn all_public_gadget_uses_the_plain_path_under_rep3() {
     use circom_mpc_compiler::OptLevel;
-    use circom_mpc_vm::driver::plain::PlainDriver;
 
     let mut cfg = config();
     cfg.opt_level = OptLevel::O2;
@@ -156,28 +166,19 @@ fn all_public_gadget_uses_the_plain_path_under_rep3() {
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let plain = {
         let inputs = program.classify_inputs(&values, |v| v);
-        Machine::run(&program, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&program).run(&inputs).unwrap().into_full()
     };
     assert_eq!(run_witness(&program, &values), plain);
 }
 
+/// `Vm::rep3` preparation must be communication-free, and a successful run costs exactly the
+/// expected two rounds (one shared multiplication, one closing witness-split open). Reusing a `Vm`
+/// is no longer something to test here at all: `run(self)` consumes it, so a second call is a
+/// compile error, not a runtime "spent" rejection.
 #[test]
-fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
-    use circom_mpc_vm::{counting_net::CountingNet, driver::plain::PlainDriver};
+fn preparation_is_free_and_run_costs_the_expected_rounds() {
+    use circom_mpc_vm::counting_net::CountingNet;
 
-    struct PartyRun {
-        first: Vec<Rep3PrimeFieldShare<Fr>>,
-        fresh: Vec<Rep3PrimeFieldShare<Fr>>,
-        preparation_rounds: usize,
-        first_online_rounds: usize,
-        reuse_rounds: usize,
-        fresh_preparation_rounds: usize,
-        fresh_online_rounds: usize,
-        reuse_error: String,
-    }
-
-    // One ordinary shared multiplication round and no Poseidon2 service: preparing either driver
-    // must be communication-free, while a successful execution costs exactly one round.
     let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
@@ -186,6 +187,12 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
         .into_iter()
         .map(CountingNet::new)
         .collect();
+
+    struct PartyRun {
+        witness: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+        preparation_rounds: usize,
+        online_rounds: usize,
+    }
 
     let runs: Vec<PartyRun> = std::thread::scope(|scope| {
         networks
@@ -205,35 +212,16 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
                         share
                     });
 
-                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let vm = Vm::rep3(program, &net, &mut state).unwrap();
                     let preparation_rounds = net.rounds();
-                    let first = Machine::run(program, &mut driver, &inputs).unwrap();
-                    let first_online_rounds = net.rounds() - preparation_rounds;
-
-                    let before_reuse = net.rounds();
-                    let reuse_error = Machine::run(program, &mut driver, &inputs)
-                        .unwrap_err()
-                        .to_string();
-                    let reuse_rounds = net.rounds() - before_reuse;
-                    drop(driver);
-
-                    let before_fresh_preparation = net.rounds();
-                    let mut fresh_driver =
-                        Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
-                    let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
-                    let before_fresh_run = net.rounds();
-                    let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();
-                    let fresh_online_rounds = net.rounds() - before_fresh_run;
+                    let before_run = net.rounds();
+                    let witness = vm.run(&inputs).unwrap();
+                    let online_rounds = net.rounds() - before_run;
 
                     PartyRun {
-                        first,
-                        fresh,
+                        witness,
                         preparation_rounds,
-                        first_online_rounds,
-                        reuse_rounds,
-                        fresh_preparation_rounds,
-                        fresh_online_rounds,
-                        reuse_error,
+                        online_rounds,
                     }
                 })
             })
@@ -245,91 +233,60 @@ fn prepared_driver_is_one_shot_and_fresh_driver_reuses_network_and_state() {
 
     for run in &runs {
         assert_eq!(run.preparation_rounds, 0);
-        assert_eq!(run.first_online_rounds, 1);
-        assert_eq!(run.reuse_rounds, 0, "reuse rejection must be local");
-        assert_eq!(run.fresh_preparation_rounds, 0);
-        assert_eq!(run.fresh_online_rounds, 1);
-        assert!(run.reuse_error.contains("spent"), "{}", run.reuse_error);
+        assert_eq!(run.online_rounds, 2);
     }
 
-    let first = combine_field_elements(&runs[0].first, &runs[1].first, &runs[2].first);
-    let fresh = combine_field_elements(&runs[0].fresh, &runs[1].fresh, &runs[2].fresh);
+    let [w0, w1, w2] = runs
+        .into_iter()
+        .map(|run| run.witness)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("exactly three parties"));
+    let got = combine_witness(w0, w1, w2);
     let expected_inputs = program.classify_inputs(&values, |value| value);
-    let expected = Machine::run(&program, &mut PlainDriver, &expected_inputs).unwrap();
-    assert_eq!(first, expected);
-    assert_eq!(fresh, expected);
+    let expected = Vm::plain(&program)
+        .run(&expected_inputs)
+        .unwrap()
+        .into_full();
+    assert_eq!(got, expected);
 }
 
+/// An execution error (here, a wrong input count) must not touch the network at all.
 #[test]
-fn execution_error_spends_prepared_driver_without_communication() {
-    use circom_mpc_vm::{counting_net::CountingNet, driver::plain::PlainDriver};
-
-    struct PartyRun {
-        fresh: Vec<Rep3PrimeFieldShare<Fr>>,
-        error_rounds: usize,
-        reuse_rounds: usize,
-        fresh_preparation_rounds: usize,
-        fresh_online_rounds: usize,
-        execution_error: String,
-        reuse_error: String,
-    }
+fn execution_error_costs_no_communication() {
+    use circom_mpc_vm::counting_net::CountingNet;
 
     let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
-    let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
-    let shares = share_inputs(&program, &values);
     let networks: Vec<_> = LocalNetwork::new(3)
         .into_iter()
         .map(CountingNet::new)
         .collect();
 
+    struct PartyRun {
+        error_rounds: usize,
+        execution_error: String,
+    }
+
     let runs: Vec<PartyRun> = std::thread::scope(|scope| {
         networks
             .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
+            .map(|net| {
                 let program = &program;
-                let shares = &shares;
-                let values = &values;
                 scope.spawn(move || {
                     let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
                     net.reset();
-                    let mut next = 0;
-                    let inputs = program.classify_inputs(values, |_| {
-                        let share = shares[next][party];
-                        next += 1;
-                        share
-                    });
-                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let vm = Vm::rep3(program, &net, &mut state).unwrap();
 
                     let before_error = net.rounds();
-                    let execution_error = Machine::run(program, &mut driver, &[])
-                        .unwrap_err()
-                        .to_string();
+                    let no_inputs: Vec<circom_mpc_vm::InputValue<Rep3PrimeFieldShare<Fr>>> =
+                        Vec::new();
+                    let execution_error = vm.run(&no_inputs).unwrap_err().to_string();
                     let error_rounds = net.rounds() - before_error;
-                    let before_reuse = net.rounds();
-                    let reuse_error = Machine::run(program, &mut driver, &inputs)
-                        .unwrap_err()
-                        .to_string();
-                    let reuse_rounds = net.rounds() - before_reuse;
-                    drop(driver);
-
-                    let before_fresh_preparation = net.rounds();
-                    let mut fresh_driver =
-                        Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
-                    let fresh_preparation_rounds = net.rounds() - before_fresh_preparation;
-                    let before_fresh_run = net.rounds();
-                    let fresh = Machine::run(program, &mut fresh_driver, &inputs).unwrap();
-                    let fresh_online_rounds = net.rounds() - before_fresh_run;
 
                     PartyRun {
-                        fresh,
                         error_rounds,
-                        reuse_rounds,
-                        fresh_preparation_rounds,
-                        fresh_online_rounds,
                         execution_error,
-                        reuse_error,
                     }
                 })
             })
@@ -341,34 +298,26 @@ fn execution_error_spends_prepared_driver_without_communication() {
 
     for run in &runs {
         assert_eq!(run.error_rounds, 0);
-        assert_eq!(run.reuse_rounds, 0);
-        assert_eq!(run.fresh_preparation_rounds, 0);
-        assert_eq!(run.fresh_online_rounds, 1);
         assert!(
             run.execution_error.contains("expected 8 inputs, got 0"),
             "{}",
             run.execution_error
         );
-        assert!(run.reuse_error.contains("spent"), "{}", run.reuse_error);
     }
-
-    let fresh = combine_field_elements(&runs[0].fresh, &runs[1].fresh, &runs[2].fresh);
-    let expected_inputs = program.classify_inputs(&values, |value| value);
-    let expected = Machine::run(&program, &mut PlainDriver, &expected_inputs).unwrap();
-    assert_eq!(fresh, expected);
 }
 
 /// Precomputing a Poseidon2 permutation with [`circom_mpc_vm::gadgets::poseidon2::Poseidon2Service`]
 /// and handing the trace to the host removes that permutation's rounds from the proof run
 /// entirely, which is the whole point of `TACEO_PRECOMPUTATION_Poseidon2`. The precompute phase
-/// still pays for the permutation once (3 preprocessing + `8 + partial_rounds(t)` online), but the
-/// proof run's own online round count for it drops to zero, and the reconstructed witness still
-/// matches the ordinary driver-serviced `Poseidon2` circuit run under `PlainDriver`.
+/// still pays for the permutation once (3 preprocessing + `8 + partial_rounds(t)` online); the
+/// proof run's own online round count for the permutation itself drops to zero, leaving only
+/// `Vm::run`'s own closing open of the public-witness prefix (the constant plus the 3 revealed
+/// outputs). The reconstructed witness still matches the ordinary driver-serviced `Poseidon2`
+/// circuit run under `PlainDriver`.
 #[test]
 fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
     use circom_mpc_vm::{
-        GadgetPrecomputation, counting_net::CountingNet, driver::plain::PlainDriver,
-        gadgets::poseidon2::Poseidon2Service,
+        GadgetPrecomputation, counting_net::CountingNet, gadgets::poseidon2::Poseidon2Service,
     };
 
     let program =
@@ -379,7 +328,7 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
         let baseline =
             circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config()).unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
-        Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&baseline).run(&inputs).unwrap().into_full()
     };
 
     let shares = share_inputs(&program, &values);
@@ -389,7 +338,7 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
         .collect();
 
     struct PartyRun {
-        witness: Vec<Rep3PrimeFieldShare<Fr>>,
+        witness: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
         precompute_rounds: usize,
         online_rounds: usize,
     }
@@ -429,7 +378,9 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
                     // (its only Poseidon2 batch is host-precomputed, not driver-serviced), and
                     // running it makes no further network calls for that site at all.
                     net.reset();
-                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let vm = Vm::rep3(program, &net, &mut state)
+                        .unwrap()
+                        .with_precomputation(precomputation);
                     let mut next = 0;
                     let inputs = program
                         .classify_inputs(values, |_v| {
@@ -438,13 +389,7 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
                             s
                         })
                         .unwrap();
-                    let witness = Machine::run_with_precomputation(
-                        program,
-                        &mut driver,
-                        &inputs,
-                        precomputation,
-                    )
-                    .unwrap();
+                    let witness = vm.run(&inputs).unwrap();
                     let online_rounds = net.rounds();
 
                     PartyRun {
@@ -467,11 +412,18 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
             "Poseidon2(t=3) has 56 partial rounds"
         );
         assert_eq!(
-            run.online_rounds, 0,
-            "no driver-serviced Poseidon2 batch should remain in the proof run"
+            run.online_rounds, 1,
+            "no driver-serviced Poseidon2 batch should remain in the proof run - the one round \
+             left is Vm::run's own closing witness-split open"
         );
     }
-    let got = combine_field_elements(&runs[0].witness, &runs[1].witness, &runs[2].witness);
+    let [w0, w1, w2] = runs
+        .into_iter()
+        .map(|run| run.witness)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("exactly three parties"));
+    let got = combine_witness(w0, w1, w2);
     assert_eq!(got, expected);
 }
 
@@ -481,10 +433,7 @@ fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
 /// host secret-sharing it.
 #[test]
 fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
-    use circom_mpc_vm::{
-        GadgetPrecomputation, InputValue, driver::plain::PlainDriver,
-        gadgets::poseidon2::Poseidon2Service,
-    };
+    use circom_mpc_vm::{GadgetPrecomputation, InputValue, gadgets::poseidon2::Poseidon2Service};
 
     let program =
         circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
@@ -497,7 +446,7 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
         )
         .unwrap();
         let inputs = baseline.classify_inputs(&values, |v| v);
-        Machine::run(&baseline, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&baseline).run(&inputs).unwrap().into_full()
     };
 
     // `share_inputs` only secret-shares `Bank::Shared` inputs - `a` is `Bank::Public`, so `shares`
@@ -505,7 +454,7 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
     let shares = share_inputs(&program, &values);
     assert_eq!(shares.len(), 2, "only b and c are Shared");
 
-    let runs: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+    let runs: Vec<_> = std::thread::scope(|scope| {
         LocalNetwork::new(3)
             .into_iter()
             .enumerate()
@@ -530,7 +479,9 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
                     let mut precomputation = GadgetPrecomputation::new();
                     precomputation.push_batch(traces);
 
-                    let mut driver = Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                    let vm = Vm::rep3(program, &net, &mut state)
+                        .unwrap()
+                        .with_precomputation(precomputation);
                     let mut next = 0;
                     let inputs = program
                         .classify_inputs(values, |_v| {
@@ -539,8 +490,7 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
                             s
                         })
                         .unwrap();
-                    Machine::run_with_precomputation(program, &mut driver, &inputs, precomputation)
-                        .unwrap()
+                    vm.run(&inputs).unwrap()
                 })
             })
             .collect::<Vec<_>>()
@@ -549,6 +499,9 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
             .collect()
     });
 
-    let got = combine_field_elements(&runs[0], &runs[1], &runs[2]);
+    let [w0, w1, w2] = runs
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("exactly three parties"));
+    let got = combine_witness(w0, w1, w2);
     assert_eq!(got, expected);
 }

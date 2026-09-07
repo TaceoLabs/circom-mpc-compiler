@@ -695,9 +695,9 @@ pub(crate) fn plain_trace_requested(
 
 /// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
 /// `t` output elements) and `intermediate` (its round trace) - exactly `GadgetSite`'s own
-/// outputs/intermediates, and exactly the shape `Machine::run_with_precomputation` expects. A thin,
+/// outputs/intermediates, and exactly the shape `Vm::run` with attached precomputation expects. A thin,
 /// full-CSR-request wrapper over `plain_trace_requested` for a host that wants to precompute a
-/// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`. `states` may mix
+/// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Vm::run`. `states` may mix
 /// `InputValue::Public` and `InputValue::Secret` - a site's inputs need not all be secret, only
 /// at least one of them (see `Program::validate_encoding`).
 ///
@@ -1036,9 +1036,9 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
     Ok(out)
 }
 
-/// A standalone Poseidon2 trace producer, usable outside a `Machine::run` - e.g. to precompute a
+/// A standalone Poseidon2 trace producer, usable outside a `Vm::run` - e.g. to precompute a
 /// batch of `TACEO_PRECOMPUTATION_Poseidon2` sites' traces before a proof run, so the proof run can
-/// inline them via `Machine::run_with_precomputation` instead of paying their online rounds twice.
+/// inline them via `Vm::run` with attached precomputation instead of paying their online rounds twice.
 /// Round cost is exactly what the same permutations would cost inside the VM: 3 preprocessing
 /// rounds (amortized once per `new`) plus `8 + partial_rounds(t)` online rounds per [`Self::trace`]
 /// call, independent of how many sites that call covers.
@@ -1046,7 +1046,7 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
 /// `mpc_core::gadgets::poseidon2::Poseidon2`'s own
 /// `rep3_permutation_in_place_with_precomputation_intermediate` computes the same permutation, but
 /// its trace vector is a *different shape* from the one this module (and hence
-/// `Machine::run_with_precomputation`) expects - see this module's own
+/// `Vm::run` with attached precomputation) expects - see this module's own
 /// `plain_output_matches_mpc_core_poseidon2_output` test. Use this type, not mpc-core's trace
 /// directly, to build a host-precomputable [`crate::SiteTrace`].
 pub struct Poseidon2Service {
@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     /// [`plain_trace`] splits the same flat trace [`plain_full`] uses into `output`/`intermediate`
-    /// at exactly `t` - the layout `Machine::run_with_precomputation` expects.
+    /// at exactly `t` - the layout `Vm::run` with attached precomputation expects.
     #[test]
     fn plain_trace_splits_output_and_intermediate_at_t() {
         for t in SUPPORTED_WIDTHS {
@@ -1628,7 +1628,7 @@ mod tests {
 
     /// [`Poseidon2Service`] must agree with the plain driver and consume exactly the masks it
     /// prepared - the standalone entry point a host uses to precompute a `TACEO_PRECOMPUTATION_Poseidon2`
-    /// site's trace outside a `Machine::run`.
+    /// site's trace outside a `Vm::run`.
     #[test]
     fn poseidon2_service_matches_plain_and_consumes_its_pool() {
         use crate::gadgets::test_support::run3;

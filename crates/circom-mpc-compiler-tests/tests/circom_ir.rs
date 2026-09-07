@@ -1,6 +1,6 @@
 use ark_bn254::Fr;
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
-use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
+use circom_mpc_vm::Vm;
 
 mod common;
 
@@ -30,8 +30,7 @@ macro_rules! witness_extension_test_plain {
                     assert_eq!(program.statistics().inputs, input.len());
 
                     let classified = program.classify_inputs(input, |v| v);
-                    let mut driver = PlainDriver;
-                    let witness = Machine::run(&program, &mut driver, &classified).unwrap();
+                    let witness = Vm::plain(&program).run(&classified).unwrap().into_full();
 
                     if let Some(prev) = &prev {
                         assert_eq!(&witness, prev, "opt_level {opt_level:?} disagrees with O0");
@@ -63,7 +62,7 @@ fn repeated_dynamic_operands_are_safe_at_o2() {
     let program =
         circom_mpc_compiler::compile(circuit_path("repeated_operands_o2"), &config).unwrap();
     let inputs = program.classify_inputs(&values, |v| v);
-    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap().into_full();
     assert_eq!(witness[1], Fr::from(436u64));
 }
 
@@ -73,8 +72,7 @@ fn run_o2_without_inputs(circuit: &str) -> Vec<Fr> {
     config.opt_level = OptLevel::O2;
     let program = circom_mpc_compiler::compile(circuit_path(circuit), &config).unwrap();
     assert_eq!(program.statistics().inputs, 0);
-    let mut driver = PlainDriver;
-    Machine::run(&program, &mut driver, &[]).unwrap()
+    Vm::plain(&program).run(&[]).unwrap().into_full()
 }
 
 #[test]

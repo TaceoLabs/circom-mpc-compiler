@@ -4,7 +4,7 @@ A Cargo workspace of four crates:
 
 - `circom-mpc-program` — the compiled program representation (`Program`, `GadgetKind`) and its
   binary format (`Program::write`/`Program::read`). No dependency on the compiler or the VM.
-- `circom-mpc-vm` — the bytecode VM (`Machine::run`), its plain and rep3 drivers, and
+- `circom-mpc-vm` — the bytecode VM (`Vm::run`), its plain and rep3 drivers, and
   `CountingNet`. Rep3 is always available; `mpc-net` backends are selected independently through
   the `local`, `quic`, `tcp`, `tcp-session`, `tcp-session-blocking`, and `tls` features.
 - `circom-mpc-compiler` — parses circom source into the IR, lowers it through the MPC passes, and
@@ -20,9 +20,9 @@ The current deployment treats the circuit source, compiled VM program, and zkey 
 authentic, mutually matching artifacts. MPC public inputs and every `TACEO_REVEAL` site are
 likewise reviewed as part of that artifact set.
 
-Future hardening should authenticate and bind the program, circuit, and zkey; store and check the
-exact public-witness count; encode an auditable reveal manifest; and perform semantic bytecode
-validation (including initialization, unique input bindings, and schedule consumption). Cleartext
+Future hardening should authenticate and bind the program, circuit, and zkey; encode an auditable
+reveal manifest; and perform semantic bytecode validation (including initialization, unique input
+bindings, and schedule consumption). Cleartext
 checking of `assert(...)`, `===`, and Num2Bits range constraints is also deferred: MPC execution
 cannot check secret predicates without changing the protocol or revealing information.
 

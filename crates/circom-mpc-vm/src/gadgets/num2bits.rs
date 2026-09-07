@@ -20,7 +20,7 @@ pub fn plain_trace(x: Fr, n: usize) -> Vec<Fr> {
         .collect()
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`):
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Vm::run_batch` call (dispatched at `Opcode::Gadget`):
 /// one strategy-selected A2B conversion across every site's input, then one `bit_inject_many`
 /// across every site's bits.
 ///

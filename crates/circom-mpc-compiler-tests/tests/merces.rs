@@ -8,7 +8,7 @@ use ark_ff::{BigInteger, PrimeField};
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
 use circom_mpc_compiler_tests::fixtures::{merces_mpc_public_inputs, rep3::run_witness};
 use circom_mpc_program::{InputSignal, Program};
-use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
+use circom_mpc_vm::Vm;
 use sha2::{Digest, Sha256};
 
 fn root() -> PathBuf {
@@ -104,7 +104,7 @@ fn witness_kat(batch: usize) {
     let program = compile(batch);
     let values = fixture_values(batch, program.input_signals());
     let inputs = program.classify_inputs(&values, |value| value);
-    let plain = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    let plain = Vm::plain(&program).run(&inputs).unwrap().into_full();
     assert_eq!(
         run_witness(&program, &values),
         plain,
