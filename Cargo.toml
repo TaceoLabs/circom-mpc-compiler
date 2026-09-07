@@ -34,6 +34,7 @@ rustc-hash = "2"
 rustls = "0.23"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 toml = { version = "0.8" }
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

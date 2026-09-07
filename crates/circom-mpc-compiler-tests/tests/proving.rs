@@ -2,10 +2,8 @@
 //! it against a real zkey, verify the proof. A verifying proof checks the witness values *and* the
 //! R1CS layout against circom simultaneously.
 //!
-//! Each circuit needs its own checked-in zkey (`kats/proving/<name>.zkey`) from a locally-generated
-//! toy powers-of-tau - fine for exercising plumbing, never for anything real. Regenerate all of them
-//! with `scripts/gen-proving-artifacts.sh`; a test whose zkey is missing skips with a printed note
-//! rather than failing, so `cargo test` stays green on a fresh clone before that script has run.
+//! Each circuit needs its generated zkey (`kats/proving/<name>.zkey`). Regenerate all of them with
+//! `just gen-proving-artifacts`; missing keys are an error because these proof tests are mandatory.
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_vm::{
@@ -37,26 +35,20 @@ fn compiled(name: &str) -> Program {
 /// `kats/proving/<name>.zkey`: a snarkjs-format zkey over a locally-generated toy powers-of-tau (see
 /// `scripts/gen-proving-artifacts.sh`). `None` if it hasn't been generated - every caller skips
 /// cleanly rather than failing in that case.
-fn zkey(name: &str) -> Option<(ConstraintMatrices<Fr>, ProvingKey<Bn254>)> {
+fn zkey(name: &str) -> (ConstraintMatrices<Fr>, ProvingKey<Bn254>) {
     let path = format!("{}/kats/proving/{name}.zkey", manifest_dir());
-    let file = std::fs::File::open(&path).ok()?;
-    Some(
-        circom_types::groth16::Zkey::<Bn254>::from_reader(file, CheckElement::No)
-            .unwrap_or_else(|e| panic!("parsing {path}: {e}"))
-            .into(),
-    )
+    let file = std::fs::File::open(&path).unwrap_or_else(|e| {
+        panic!("missing mandatory proving key {path}: {e}; run `just gen-proving-artifacts`")
+    });
+    circom_types::groth16::Zkey::<Bn254>::from_reader(file, CheckElement::No)
+        .unwrap_or_else(|e| panic!("parsing {path}: {e}"))
+        .into()
 }
 
 /// The full pipeline for one circuit, over every input fixture it has: plain witness, 3-party rep3
 /// witness (cross-checked against plain), then a real co-groth16 proof that must verify.
 fn prove_and_verify(name: &str) {
-    let Some((matrices, pkey)) = zkey(name) else {
-        eprintln!(
-            "note: {name}: no kats/proving/{name}.zkey - run scripts/gen-proving-artifacts.sh. \
-             skipping prove+verify."
-        );
-        return;
-    };
+    let (matrices, pkey) = zkey(name);
     let program = compiled(name);
     // The authoritative split point between cleartext public inputs and the shared remainder - see
     // `vm::witness`'s module doc for why this comes from the zkey and not from `input_domains`.
@@ -187,12 +179,7 @@ prove_and_verify_test!(gadget_aliascheck_test);
 /// problem if a prove+verify test above ever fails.
 #[test]
 fn plain_witness_splits_at_the_zkey_boundary() {
-    let Some((matrices, _)) = zkey("multiplier2_public") else {
-        eprintln!(
-            "note: no kats/proving/multiplier2_public.zkey - run scripts/gen-proving-artifacts.sh. skipping."
-        );
-        return;
-    };
+    let (matrices, _) = zkey("multiplier2_public");
     let program = compiled("multiplier2_public");
     let n_pub = matrices.num_instance_variables;
 
