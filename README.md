@@ -1,5 +1,24 @@
 # circom-mpc-compiler
 
+[![CI](https://github.com/TaceoLabs/circom-mpc-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/TaceoLabs/circom-mpc-compiler/actions/workflows/ci.yml)
+[![Audit Dependencies](https://github.com/TaceoLabs/circom-mpc-compiler/actions/workflows/audit.yml/badge.svg)](https://github.com/TaceoLabs/circom-mpc-compiler/actions/workflows/audit.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0%20%7C%20GPL--3.0-blue)](#license)
+[![rustc](https://img.shields.io/badge/rustc-1.90%2B-blue)](Cargo.toml)
+
+Compiles [circom](https://github.com/iden3/circom) circuits into a witness-extension procedure, then
+runs that procedure for real: a plain (in-the-clear) reference interpreter, and a 3-party rep3 MPC
+driver that produces a co-groth16 proof over the shared witness. It is not a proving-system compiler
+itself — it does not generate R1CS or a proving key, only the witness those need.
+
+Pipeline: circom source → circom's own parser/type-checker/constraint-generation (always at full
+`--O2`) → per-template lowering with lazy sub-component inlining and eager loop unrolling → one flat
+value-graph IR → MPC lowering and codegen → the plain interpreter or the rep3 driver.
+
+The runtime operator surface is deliberately narrow — only `Add`/`Sub`/`Mul` are supported; every
+other circom operator is a typed `unsupported operator: ...` error.
+
+## Crates
+
 A Cargo workspace of four crates:
 
 - `circom-mpc-program` — the compiled program representation (`Program`, `GadgetKind`) and its
@@ -14,6 +33,80 @@ A Cargo workspace of four crates:
   default `local` feature keeps the complete in-process MPC suite in plain `cargo test`; other
   network backends remain opt-in.
 
+## CLI
+
+`circom-mpc-compiler` builds a `circom-mpc-compile` binary, gated behind the `cli` feature, that
+compiles a circom file to a `circom-mpc-program::Program` file.
+
+### Install
+
+From a checkout:
+
+```sh
+cargo install --path crates/circom-mpc-compiler --features cli
+```
+
+Directly from GitHub:
+
+```sh
+cargo install --git https://github.com/TaceoLabs/circom-mpc-compiler --features cli taceo-circom-mpc-compiler
+```
+
+Or run it in place without installing:
+
+```sh
+cargo run --release -p taceo-circom-mpc-compiler --features cli -- <args...>
+```
+
+### Usage
+
+```sh
+circom-mpc-compile circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
+```
+
+| Flag | Description |
+| --- | --- |
+| `<CIRCUIT>` | Path to the circom main file to compile. |
+| `-o, --output <FILE>` | Where to write the compiled program. Defaults to the circuit's file stem with a `.cmpc` extension, in the current directory. |
+| `--config <TOML>` | TOML file deserialized into `CompilerConfig` (see `crates/circom-mpc-compiler/src/lib.rs`); the flags below are applied on top of it. |
+| `-l, --link-library <DIR>` | Directory to resolve circom's `include`s against. Repeatable. |
+| `--mpc-public-input <NAME>` | Input name every MPC party holds in cleartext, even though it is not SNARK-public. Repeatable. |
+| `--opt <0\|1\|2>` | This crate's IR optimization level. Distinct from circom's own constraint simplification, which always runs at full `--O2`. |
+| `--circom-version <VERSION>` | The circom pragma version to compile against. |
+| `--inspect` | Runs an additional check over the produced constraints. |
+| `--verbose` | Shows logs during compilation. |
+
+Run with `--help` for the flags as parsed by the installed binary. Compilation logs (instruction,
+input, witness, slot, round, and gadget statistics) go through `tracing`; set `RUST_LOG` to control
+verbosity.
+
+## Development
+
+`circuits/` pulls its circom dependencies (`@taceo/circom-lib`, `circomlib`) via pnpm into a
+gitignored `node_modules`; run `just circuits` (or `pnpm -C circuits install`) once before
+`cargo test`.
+
+```sh
+just gen-proving-artifacts
+just rust-tests
+```
+
+The small-circuit integration tests require their generated Groth16 keys and run complete
+prove/verify checks; a missing key fails with the generation command above.
+`scripts/gen-proving-artifacts.sh` needs a `circom` built from this repo's pinned upstream
+revision (see `circom-compiler` in `Cargo.toml`) — point `CIRCOM` at it if it's not the one on
+`PATH` — and `snarkjs` on `PATH`. It downloads and verifies the phase-2-ready power-14 Perpetual
+Powers of Tau file into a unique temporary directory, then deletes it on every exit.
+
+`just` alone lists all available recipes. The ones used in CI:
+
+- `just lint` — `cargo +nightly fmt --all -- --check`, clippy (default and `--all-features`), and
+  `cargo doc` with warnings denied. Requires a nightly toolchain for `fmt`.
+- `just cargo-deny` — `cargo deny check`.
+- `just rust-tests` — `cargo test --release --workspace --all-features` (runs `just circuits`
+  first).
+- `just check-pr` — all of the above, in order; run this before opening a PR.
+
 ## Security boundary and deferred hardening
 
 The current deployment treats the circuit source, compiled VM program, and zkey as trusted,
@@ -25,47 +118,6 @@ reveal manifest; and perform semantic bytecode validation (including initializat
 bindings, and schedule consumption). Cleartext
 checking of `assert(...)`, `===`, and Num2Bits range constraints is also deferred: MPC execution
 cannot check secret predicates without changing the protocol or revealing information.
-
-Compiles [circom](https://github.com/iden3/circom) circuits into a witness-extension procedure, then
-runs that procedure for real: a plain (in-the-clear) reference interpreter, and a 3-party rep3 MPC
-driver that produces a co-groth16 proof over the shared witness. It is not a proving-system compiler
-itself — it does not generate R1CS or a proving key, only the witness those need.
-
-Pipeline: circom source → circom's own parser/type-checker/constraint-generation (always at full
-`--O2`) → per-template lowering with lazy sub-component inlining and eager loop unrolling → one flat
-value-graph IR → MPC lowering and codegen → the plain interpreter or the rep3 driver.
-
-The runtime operator surface is deliberately narrow — only `Add`/`Sub`/`Mul` are supported; every
-other circom operator is a typed `unsupported operator: ...` error.
-
-## Development
-
-`circuits/` pulls its circom dependencies (`@taceo/circom-lib`, `circomlib`) via pnpm into a
-gitignored `node_modules`; run `pnpm -C circuits install` once before `cargo test`.
-
-```
-just gen-proving-artifacts
-cargo test --workspace --all-features
-```
-
-The small-circuit integration tests require their generated Groth16 keys and run complete
-prove/verify checks; a missing key fails with the generation command above. Artifact generation
-downloads and verifies the phase-2-ready power-14 Perpetual Powers of Tau file in a unique
-temporary directory, then deletes it on every exit.
-
-## CLI
-
-`circom-mpc-compiler` builds a `circom-mpc-compile` binary (feature `cli`) that compiles a circom
-file to a `circom-mpc-program::Program` file:
-
-```
-cargo run --release -p taceo-circom-mpc-compiler --features cli -- \
-    circuits/multiplier3.circom -l circuits/node_modules/ --opt 2 -o multiplier3.cmpc
-```
-
-`cargo install --path crates/circom-mpc-compiler --features cli` installs it. `--config <toml>`
-loads a `CompilerConfig` (see `crates/circom-mpc-compiler/src/lib.rs`); CLI flags apply on top of
-it. Run with `--help` for the full flag list.
 
 ## License
 
