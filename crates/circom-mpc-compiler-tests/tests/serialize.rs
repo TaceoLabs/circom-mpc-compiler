@@ -45,6 +45,7 @@ fn round_trips_a_program_with_a_round_byte_identically() {
     );
     let mut bytes = Vec::new();
     original.write(&mut bytes).unwrap();
+    assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
     let read_back = Program::read(&mut bytes.as_slice()).unwrap();
 
     let inputs = [Fr::from(5u64), Fr::from(10u64)];
