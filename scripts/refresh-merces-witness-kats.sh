@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Developer-only: refresh the independent Circom full-witness digests checked by tests/merces.rs.
-# CIRCOM must be the workspace-pinned Taceo fork at rev 53c1ccd0c74f12665c5aeb89592360f42c3d1226.
+# CIRCOM must be upstream Circom 2.2.3 at the workspace-pinned immutable release commit,
+# ad44e915a12bb047b05745c2884aad9cc8326bc6. Install it with:
+#   cargo install --git https://github.com/iden3/circom \
+#     --rev ad44e915a12bb047b05745c2884aad9cc8326bc6 --locked --bin circom
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

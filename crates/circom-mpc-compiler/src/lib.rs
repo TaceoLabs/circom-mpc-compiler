@@ -48,7 +48,7 @@ pub struct CompilerConfig {
 }
 
 fn default_version() -> String {
-    "2.2.2".to_owned()
+    "2.2.3".to_owned()
 }
 
 fn default_precomputed_gadgets() -> bool {
@@ -100,4 +100,14 @@ where
     let program = codegen::compile(&graph)?;
     tracing::debug!("compiled: {:?}", program.statistics());
     Ok(program)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompilerConfig;
+
+    #[test]
+    fn compiler_config_defaults_to_pinned_circom_version() {
+        assert_eq!(CompilerConfig::default().version, "2.2.3");
+    }
 }
