@@ -1,6 +1,6 @@
 //! Proves the MPC lowering pipeline's headline claim - independent secret multiplications at the
 //! same multiplicative depth batch into a single network round - against three synthetic circuits
-//! with known round structure (`circuits/bench_{chain,tree,widesum}.circom`). No witness value
+//! with known round structure (`circuits/{mul_chain,mul_tree,wide_sum}.circom`). No witness value
 //! oracle is needed here: `Program::statistics` reports round *shape*, which a value comparison
 //! can't see.
 //!
@@ -20,7 +20,7 @@ fn config() -> CompilerConfig {
 
 #[test]
 fn chain_of_dependent_products_needs_one_round_per_depth() {
-    let program = circom_mpc_compiler::compile(circuit_path("bench_chain"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("mul_chain"), &config()).unwrap();
     let stats = program.statistics();
     assert_eq!(stats.multiplication_rounds, 3, "{stats:?}");
     assert_eq!(stats.multiplication_elements, 3, "{stats:?}");
@@ -30,7 +30,7 @@ fn chain_of_dependent_products_needs_one_round_per_depth() {
 
 #[test]
 fn balanced_tree_batches_each_level_into_one_round() {
-    let program = circom_mpc_compiler::compile(circuit_path("bench_tree"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("mul_tree"), &config()).unwrap();
     let stats = program.statistics();
     assert_eq!(stats.multiplication_rounds, 3, "{stats:?}");
     assert_eq!(stats.multiplication_elements, 4 + 2 + 1, "{stats:?}");
@@ -40,7 +40,7 @@ fn balanced_tree_batches_each_level_into_one_round() {
 
 #[test]
 fn independent_products_batch_into_a_single_round() {
-    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("wide_sum"), &config()).unwrap();
     let stats = program.statistics();
     assert_eq!(stats.multiplication_rounds, 1, "{stats:?}");
     assert_eq!(stats.multiplication_elements, 4, "{stats:?}");

@@ -14,14 +14,6 @@ gen-proving-artifacts *args:
 rust-tests: circuits
     cargo test --release --workspace --all-features
 
-[group('bench')]
-bench *args: circuits
-    cargo bench -p circom-mpc-compiler-tests --bench witness_extension {{args}}
-
-[group('bench')]
-bench-net *args:
-    @bash scripts/run-witext-bench.sh {{args}}
-
 [group('ci')]
 fmt:
     cargo +nightly fmt
@@ -29,8 +21,8 @@ fmt:
 [group('ci')]
 lint:
     cargo +nightly fmt --all -- --check
-    cargo clippy --workspace --tests --examples --benches --bins -q -- -D warnings
-    cargo clippy --workspace --tests --examples --benches --bins -q --all-features -- -D warnings
+    cargo clippy --workspace --tests --examples --bins -q -- -D warnings
+    cargo clippy --workspace --tests --examples --bins -q --all-features -- -D warnings
     RUSTDOCFLAGS='-D warnings' cargo doc --workspace -q --no-deps --document-private-items
 
 [group('ci')]

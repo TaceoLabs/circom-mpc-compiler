@@ -23,7 +23,6 @@ circom-types = { package = "taceo-circom-types", version = "0.3.1" }
 clap = { version = "4.5", features = ["derive"] }
 co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.6.0" }
 co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
-criterion = "0.5"
 eyre = "0.6.12"
 mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.10.0" }
 mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "f6c5a16dff0c5978496f3c2511115c9b8654e7d0", version = "0.5.0" }
@@ -31,10 +30,8 @@ num-bigint = { version = "0.4.6" }
 num-traits = { version = "0.2.18", default-features = false }
 rand = { version = "0.8.8" }
 rustc-hash = "2"
-rustls = "0.23"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
 toml = { version = "0.8" }
 tracing = { version = "0.1.40" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

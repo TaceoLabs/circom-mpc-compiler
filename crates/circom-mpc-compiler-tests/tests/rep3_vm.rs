@@ -145,7 +145,7 @@ fn three_fused_isequal_reveal_sites_cost_two_online_rounds() {
 
 #[test]
 fn wide_round_vector_products_match_the_plain_driver() {
-    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("wide_sum"), &config()).unwrap();
     assert_eq!(program.statistics().multiplication_rounds, 1);
     assert_eq!(program.statistics().multiplication_elements, 4);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
@@ -179,7 +179,7 @@ fn all_public_gadget_uses_the_plain_path_under_rep3() {
 fn preparation_is_free_and_run_costs_the_expected_rounds() {
     use circom_mpc_vm::counting_net::CountingNet;
 
-    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("wide_sum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
     let values: Vec<Fr> = (1..=8).map(Fr::from).collect();
     let shares = share_inputs(&program, &values);
@@ -256,7 +256,7 @@ fn preparation_is_free_and_run_costs_the_expected_rounds() {
 fn execution_error_costs_no_communication() {
     use circom_mpc_vm::counting_net::CountingNet;
 
-    let program = circom_mpc_compiler::compile(circuit_path("bench_widesum"), &config()).unwrap();
+    let program = circom_mpc_compiler::compile(circuit_path("wide_sum"), &config()).unwrap();
     assert_eq!(program.statistics().gadget_batches, 0);
     let networks: Vec<_> = LocalNetwork::new(3)
         .into_iter()
