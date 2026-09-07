@@ -116,7 +116,7 @@ fn build_circuit(
         main_inputs_log: false,
         wat_flag: false,
         no_asm_flag: false,
-        constraint_assert_disabled_flag: false,
+        sanity_check_style: 2,
     };
     Ok((
         CircomCircuit::build(vcp, flags, &config.version),

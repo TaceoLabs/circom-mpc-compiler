@@ -56,8 +56,8 @@ jobs:
           version: 11.22.0
       - name: Install pinned Circom and JavaScript tools
         run: |
-          cargo install --git https://github.com/TaceoLabs/circom \
-            --rev 53c1ccd0c74f12665c5aeb89592360f42c3d1226 --locked --bin circom
+          cargo install --git https://github.com/iden3/circom \
+            --rev ad44e915a12bb047b05745c2884aad9cc8326bc6 --locked --bin circom
           pnpm -C circuits install --frozen-lockfile
           echo "$PWD/circuits/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Generate mandatory small-circuit proving artifacts
