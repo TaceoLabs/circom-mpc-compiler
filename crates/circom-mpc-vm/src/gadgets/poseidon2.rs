@@ -696,7 +696,7 @@ pub(crate) fn plain_trace_requested(
 /// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
 /// `t` output elements) and `intermediate` (its round trace) - exactly `GadgetSite`'s own
 /// outputs/intermediates, and exactly the shape `Machine::run_with_precomputation` expects. A thin,
-/// full-CSR-request wrapper over [`plain_trace_requested`] for a host that wants to precompute a
+/// full-CSR-request wrapper over `plain_trace_requested` for a host that wants to precompute a
 /// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Machine::run`. `states` may mix
 /// `InputValue::Public` and `InputValue::Secret` - a site's inputs need not all be secret, only
 /// at least one of them (see `Program::validate_encoding`).

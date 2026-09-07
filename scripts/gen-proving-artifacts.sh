@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Generates the checked-in zkeys `crates/circom-mpc-compiler-tests/tests/proving.rs` proves and
+# Generates the local zkeys `crates/circom-mpc-compiler-tests/tests/proving.rs` proves and
 # verifies against:
 #
-#   kats/proving/<name>.zkey            a groth16 proving key, over a local toy powers-of-tau
+#   kats/proving/<name>.zkey            a groth16 proving key
 #   kats/proving/<name>-r1cs-info.txt   snarkjs r1cs info, for eyeballing variable counts
 #
-# Every zkey here comes from a locally-generated toy powers-of-tau (one contribution, never
-# reused across runs) - fine for exercising plumbing, never for anything real. The proving test
-# skips a circuit's test with a printed note when its zkey is absent, so `cargo test` stays green
-# on a fresh clone before this script has run.
+# The shared phase-2-ready power-14 transcript is downloaded into a unique temporary directory,
+# verified, used, and deleted on every exit. It is deliberately never cached or committed.
 #
 # Prerequisites:
 #
@@ -47,8 +45,9 @@ if ! command -v "$CIRCOM" >/dev/null 2>&1; then
     echo "error: circom not found (CIRCOM=$CIRCOM). See the prerequisites in this script." >&2
     exit 1
 fi
-if ! command -v snarkjs >/dev/null 2>&1; then
-    echo "error: snarkjs not found on PATH." >&2
+SNARKJS="${SNARKJS:-$ROOT/circuits/node_modules/.bin/snarkjs}"
+if ! command -v "$SNARKJS" >/dev/null 2>&1; then
+    echo "error: snarkjs not found (SNARKJS=$SNARKJS)." >&2
     exit 1
 fi
 
@@ -58,28 +57,22 @@ echo "      counts for the same circuit, and the prove+verify test will fail con
 
 mkdir -p "$OUT"
 
-# One shared toy powers-of-tau, big enough for every circuit here (`loop_unrolling`'s ~1800 linear
-# constraints is the largest by far, needing 2^13; 2^14 leaves headroom). Regenerated every run,
-# never committed - it is not a trusted setup.
 POT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gen-proving-artifacts.XXXXXX")"
 trap 'rm -rf "$POT_DIR"' EXIT
 echo
-echo "=== powers of tau (toy, local, 2^14) ==="
-snarkjs powersoftau new bn128 14 "$POT_DIR/pot0.ptau"
-snarkjs powersoftau contribute "$POT_DIR/pot0.ptau" "$POT_DIR/pot1.ptau" --name=probe -e="$RANDOM$RANDOM"
-snarkjs powersoftau prepare phase2 "$POT_DIR/pot1.ptau" "$POT_DIR/pot.ptau"
+echo "=== powers of tau (perpetual powers of tau contribution 0080, 2^14) ==="
+PTAU="$POT_DIR/ppot_0080_14.ptau"
+curl --fail --location --retry 3 --output "$PTAU" \
+    https://pse-trusted-setup-ppot.s3.eu-central-1.amazonaws.com/pot28_0080/ppot_0080_14.ptau
+"$SNARKJS" powersoftau verify "$PTAU"
 
 for name in "${CIRCUITS[@]}"; do
     echo
     echo "=== $name ==="
     "$CIRCOM" "$ROOT/circuits/$name.circom" -l "$ROOT/circuits/node_modules" --r1cs --O2 -o "$OUT"
-    snarkjs r1cs info "$OUT/$name.r1cs" | tee "$OUT/$name-r1cs-info.txt" >/dev/null
+    "$SNARKJS" r1cs info "$OUT/$name.r1cs" | tee "$OUT/$name-r1cs-info.txt" >/dev/null
 
-    if ! snarkjs groth16 setup "$OUT/$name.r1cs" "$POT_DIR/pot.ptau" "$OUT/$name.zkey"; then
-        echo "note: $name: groth16 setup failed (likely a degenerate R1CS) - skipping this circuit's zkey."
-        rm -f "$OUT/$name.zkey"
-        continue
-    fi
+    "$SNARKJS" groth16 setup "$OUT/$name.r1cs" "$PTAU" "$OUT/$name.zkey"
 
     size=$(wc -c < "$OUT/$name.zkey")
     echo "$name.zkey   $size bytes"

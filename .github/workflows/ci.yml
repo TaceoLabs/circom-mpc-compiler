@@ -53,9 +53,17 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          package_json_file: circuits/package.json
-      - name: Install circom dependencies
-        run: pnpm -C circuits install
+          version: 11.22.0
+      - name: Install pinned Circom and JavaScript tools
+        run: |
+          cargo install --git https://github.com/TaceoLabs/circom \
+            --rev 53c1ccd0c74f12665c5aeb89592360f42c3d1226 --locked --bin circom
+          pnpm -C circuits install --frozen-lockfile
+          echo "$PWD/circuits/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Generate mandatory small-circuit proving artifacts
+        run: bash scripts/gen-proving-artifacts.sh
+      - name: Confirm powers-of-tau cleanup
+        run: test -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'gen-proving-artifacts.*' -print -quit)"
       - name: Unit & Integration Tests
         run: cargo test --workspace --all-features
 
