@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 pragma circom 2.2.2;
 
 // This file is copied from https://github.com/zk-kit/zk-kit.circom/blob/main/packages/binary-merkle-root/src/binary-merkle-root.circom and adapted to use Poseidon2 instead of Poseidon and use it in compression mode and not in sponge mode.

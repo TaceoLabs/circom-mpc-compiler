@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 pragma circom 2.2.2;
 
 include "@taceo/circom-lib/circuits/compression.circom";
