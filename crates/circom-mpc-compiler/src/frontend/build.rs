@@ -758,7 +758,7 @@ impl<'a> GraphCompiler<'a> {
         self.eval_constant_operand(cond).map(|v| !v.is_zero())
     }
 
-    /// Like [`Self::get_constant_operand`], but folds `Add`/`Sub`/`Mul` chains of constants rather
+    /// Like [`Self::get_constant_value`], but folds `Add`/`Sub`/`Mul` chains of constants rather
     /// than requiring the operand to *already* be a single `Op::Constant` node.
     ///
     /// Needed because this build pass deliberately doesn't fold arithmetic (that's `passes::

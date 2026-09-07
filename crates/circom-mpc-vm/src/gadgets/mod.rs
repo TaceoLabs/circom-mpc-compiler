@@ -6,7 +6,8 @@ pub(crate) mod num2bits;
 pub mod poseidon2;
 mod poseidon2_constants;
 
-/// Batched arithmetic-to-binary conversion using the strategy selected on [`Rep3State`].
+/// Batched arithmetic-to-binary conversion using the strategy selected on
+/// [`mpc_core::protocols::rep3::Rep3State`].
 ///
 /// `mpc-core` exposes a selector for one value, but its vector conversion API does not. Keeping the
 /// selection here lets every VM gadget preserve circuit-wide batching without silently forcing the
