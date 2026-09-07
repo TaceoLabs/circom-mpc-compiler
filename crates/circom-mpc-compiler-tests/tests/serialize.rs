@@ -6,7 +6,7 @@ use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::{
     Bank, BatchKind, Instruction, Poseidon2Width, Program, Slot, WitnessSource,
 };
-use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
+use circom_mpc_vm::Vm;
 
 /// Compiles one fixture through the public path used by serialized programs.
 fn program(circuit: &str) -> Program {
@@ -21,8 +21,7 @@ fn program(circuit: &str) -> Program {
 
 fn witness(program: &Program, inputs: &[Fr]) -> Vec<Fr> {
     let inputs = program.classify_inputs(inputs, |v| v).unwrap();
-    let mut driver = PlainDriver;
-    Machine::run(program, &mut driver, &inputs).unwrap()
+    Vm::plain(program).run(&inputs).unwrap().into_full()
 }
 
 #[test]

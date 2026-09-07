@@ -127,7 +127,7 @@ pub struct RoundEntry {
 /// One input value of one gadget site. Carries its bank because a site input is *not*
 /// always a share: a circuit may pass a literal, as in
 /// `Poseidon2(4)([value, 0, r, domainSeparator()])` - two of those four fold to
-/// `Op::Constant`, i.e. `Bank::Public`. `Machine::run` promotes a `Public` slot into a share before
+/// `Op::Constant`, i.e. `Bank::Public`. `Vm::run` promotes a `Public` slot into a share before
 /// handing the batch to the driver. `Bank::Local` never appears - codegen rejects an un-reshared
 /// `MulLocal` reaching a site.
 ///
@@ -154,7 +154,7 @@ pub enum BatchKind {
     /// A `TACEO_PRECOMPUTATION_Poseidon2` site: the host supplies this batch's trace instead of
     /// `circom_mpc_vm::gadgets` servicing it. Poseidon2 is the only gadget that can be
     /// host-precomputed, and its result bank is always `Shared` - see
-    /// `Machine::run_with_precomputation`.
+    /// `Vm::run` with attached precomputation.
     PrecomputedPoseidon2 {
         /// The Poseidon2 state width.
         t: crate::Poseidon2Width,
@@ -225,7 +225,7 @@ pub struct InputSignal {
     pub size: usize,
 }
 
-/// Binds one circuit input to the slot it's read from - `Machine::run` fills these in from the
+/// Binds one circuit input to the slot it's read from - `Vm::run` fills these in from the
 /// caller-supplied input values before running anything else.
 #[derive(Debug, Clone, Copy)]
 pub struct InputBinding {
@@ -239,7 +239,7 @@ pub struct InputBinding {
 }
 
 /// Where one final witness entry comes from once the instruction stream has run. Codegen records
-/// these directly in witness order, so `Machine::run` never needs to materialize circom's much
+/// these directly in witness order, so `Vm::run` never needs to materialize circom's much
 /// larger flat signal array merely to project a small subset out of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WitnessSource {
@@ -248,7 +248,7 @@ pub enum WitnessSource {
     /// A witness slot with no surviving producer. The old signal array was zero-initialized, so
     /// unconstrained/dead circom signals project to zero rather than making compilation fail.
     Zero,
-    /// One of main's original circuit inputs. Inputs remain available to `Machine::run` even when
+    /// One of main's original circuit inputs. Inputs remain available to `Vm::run` even when
     /// their `Op::Input` was dead and removed from the executable graph.
     Input(InputIdx),
     /// A value retained in one of the VM's final slot banks.
@@ -272,7 +272,7 @@ pub struct SlotCounts {
     pub local: u32,
 }
 
-/// A compiled circuit: the instruction stream plus every side table `Machine::run` needs to
+/// A compiled circuit: the instruction stream plus every side table `Vm::run` needs to
 /// execute it against a `circom_mpc_vm::driver::VmDriver`. Produced by the compiler crate's
 /// `codegen::compile`, serializable via [`Program::write`]/[`Program::read`].
 #[derive(Debug, Clone)]
@@ -301,6 +301,12 @@ pub struct Program {
     pub(crate) witness_sources: Vec<WitnessSource>,
     pub(crate) num_inputs: usize,
     pub(crate) slots: SlotCounts,
+    /// How many leading witness entries are the SNARK's public inputs - the reserved constant `1`,
+    /// the circuit's outputs, then its declared public inputs, in that circom-standard order. This
+    /// is the zkey's `num_instance_variables`; unlike `input_domains` (whose MPC analysis falls
+    /// back to `Shared` conservatively), it comes directly from the circuit's declared public
+    /// signals and must never be re-derived from `mpc_public_inputs`.
+    pub(crate) num_public_witness: u32,
 }
 
 /// [`Program`]'s fields, laid bare for construction (by the compiler crate's `codegen::compile`)
@@ -331,6 +337,8 @@ pub struct ProgramParts {
     pub num_inputs: usize,
     /// See [`Program::slots`].
     pub slots: SlotCounts,
+    /// See [`Program::num_public_witness`].
+    pub num_public_witness: u32,
 }
 
 /// One `BatchKind::PrecomputedPoseidon2` batch's shape, as reported by [`Program::precomputed_batches`].
@@ -401,6 +409,7 @@ impl Program {
             witness_sources: parts.witness_sources,
             num_inputs: parts.num_inputs,
             slots: parts.slots,
+            num_public_witness: parts.num_public_witness,
         }
     }
 
@@ -421,6 +430,7 @@ impl Program {
             witness_sources: self.witness_sources,
             num_inputs: self.num_inputs,
             slots: self.slots,
+            num_public_witness: self.num_public_witness,
         }
     }
 
@@ -496,6 +506,14 @@ impl Program {
         self.slots
     }
 
+    /// How many leading witness entries are the SNARK's public inputs - see the field doc on
+    /// `Program`'s private `num_public_witness`. Splits a `Vm::run` witness into a cleartext
+    /// prefix and a secret-shared remainder.
+    #[must_use]
+    pub fn num_public_witness(&self) -> u32 {
+        self.num_public_witness
+    }
+
     /// Summary counters over this program.
     #[must_use]
     pub fn statistics(&self) -> ProgramStatistics {
@@ -553,7 +571,7 @@ impl Program {
                 .count(),
         }
     }
-    /// One `BatchKind::PrecomputedPoseidon2` batch's shape, in the order `Machine::run_with_precomputation`
+    /// One `BatchKind::PrecomputedPoseidon2` batch's shape, in the order `Vm::run` with attached precomputation
     /// consumes it (`Program::precomputed_batches`).
     ///
     /// # Errors
@@ -911,6 +929,13 @@ impl Program {
                 .all(|source| *source != WitnessSource::One),
             "reserved constant-one source appears outside witness position zero"
         );
+        eyre::ensure!(
+            self.num_public_witness > 0
+                && self.num_public_witness as usize <= self.witness_sources.len(),
+            "num_public_witness ({}) must be positive and at most the witness length ({})",
+            self.num_public_witness,
+            self.witness_sources.len()
+        );
         for source in &self.witness_sources {
             match *source {
                 WitnessSource::One | WitnessSource::Zero => {}
@@ -970,6 +995,7 @@ mod tests {
                 shared: u32::from(bank == Bank::Shared),
                 local: 0,
             },
+            num_public_witness: 1,
         })
     }
 

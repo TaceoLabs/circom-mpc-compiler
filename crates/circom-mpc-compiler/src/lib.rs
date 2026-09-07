@@ -85,7 +85,7 @@ where
 }
 
 /// Parses, type-checks and lowers `file` into a `circom_mpc_program::Program`, runnable via
-/// `circom_mpc_vm::Machine::run` against the plain or rep3 driver.
+/// `circom_mpc_vm::Vm::run` against the plain or rep3 driver.
 ///
 /// # Errors
 ///

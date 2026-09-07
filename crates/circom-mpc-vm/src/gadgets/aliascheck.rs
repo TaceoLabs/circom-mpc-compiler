@@ -96,7 +96,7 @@ pub fn plain_trace(input: &[Fr]) -> Vec<Fr> {
     trace
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`).
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Vm::run_batch` call (dispatched at `Opcode::Gadget`).
 /// Ported from a reference `alias_check_trace_helper_rep3` implementation, generalized from one
 /// site to a batch and from that implementation's own (518-slot, zero-padded) trace convention
 /// to the real 519-slot layout above - `compConstant.in[0..254]` and `compConstant.out` are

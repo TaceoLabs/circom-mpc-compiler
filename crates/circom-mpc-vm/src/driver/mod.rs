@@ -1,4 +1,4 @@
-//! `VmDriver`: the pluggable backend `Machine::run` executes a `Program` against - either
+//! `VmDriver`: the pluggable backend `Vm::run` executes a `Program` against - either
 //! `plain::PlainDriver` (single-party, the reference driver) or a real three-party rep3 driver.
 
 pub mod plain;
@@ -9,33 +9,22 @@ use ark_bn254::Fr;
 /// What actually executes a compiled `Program`. Linear ops (`add_ss`/`sub_sp`/...) are infallible
 /// local computation - a plain field op for `PlainDriver`, a share-local op for a real MPC driver,
 /// never a network round. `mul_vec` executes one scheduled multiplication stage; the
-/// `*_traces` methods are the precomputation gadgets batched circuit-wide by `Machine::run`'s
+/// `*_traces` methods are the precomputation gadgets batched circuit-wide by `Vm::run`'s
 /// precompute services.
 pub trait VmDriver {
     /// A valid share any linear op may consume - `Fr` in `PlainDriver`, `Rep3PrimeFieldShare<Fr>` in
     /// a real rep3 driver.
     type Share: Clone + Default;
 
-    /// Marks the start of one [`crate::Machine::run`] attempt. The default is a no-op so plain
-    /// and third-party compatibility drivers remain reusable. Stateful drivers can make a prepared
-    /// instance one-shot; `Machine` calls this before even validating the program or inputs, so an
-    /// execution error still spends a successfully-started run.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the driver refuses to start a new run (e.g. it was already spent).
-    fn begin_run(&mut self) -> eyre::Result<()> {
-        Ok(())
-    }
-
-    /// Finishes a run after success or error, and during stack unwinding after a panic. Stateful
-    /// drivers should transition to their terminal state before performing fallible consistency
-    /// checks. The default is a no-op.
+    /// Runs once, on the success path, at the end of [`crate::Vm::run`] - a one-shot driver (e.g.
+    /// rep3, whose Poseidon2 mask pool must never be reused) performs its fallible consistency
+    /// checks here. The default is a no-op. Never called on an execution error or a panic: `Vm` is
+    /// simply dropped, taking any one-shot state with it.
     ///
     /// # Errors
     ///
     /// Returns an error if the driver's post-run consistency checks fail.
-    fn finish_run(&mut self) -> eyre::Result<()> {
+    fn finish(&mut self) -> eyre::Result<()> {
         Ok(())
     }
 
@@ -65,10 +54,9 @@ pub trait VmDriver {
 
     /// Reveals `shares` to every party, in one batched round.
     ///
-    /// Used by an explicit `TACEO_REVEAL` service and at the *proving* boundary: co-snarks'
-    /// `SharedWitness` splits into a cleartext `public_inputs` prefix and a secret-shared
-    /// remainder, so producing one from this VM's uniformly-shared witness means opening exactly
-    /// that prefix (see `vm::witness`).
+    /// Used by an explicit `TACEO_REVEAL` service and, internally, by `Vm::run`'s own closing
+    /// split of the witness into co-snarks' `SharedWitness` shape - a cleartext `public_inputs`
+    /// prefix and a secret-shared remainder (see [`crate::Witness`]).
     ///
     /// The identity for `PlainDriver`, whose `Share` is already `Fr`.
     ///

@@ -25,8 +25,8 @@ pub fn merces_mpc_public_inputs() -> Vec<String> {
 
 /// Host-precomputation for `TACEO_PRECOMPUTATION_Poseidon2` sites, e.g. the merces circuits'
 /// commit sites (`circuits/merces/oblivious_vector/hash.circom`). A circuit with no such sites
-/// gets an empty [`circom_mpc_vm::GadgetPrecomputation`], which `Machine::run_with_precomputation`
-/// treats exactly like `Machine::run` - so one code path covers both merces and non-merces cases.
+/// gets an empty [`circom_mpc_vm::GadgetPrecomputation`], which `Vm::run` treats the same either
+/// way - so one code path covers both merces and non-merces cases.
 ///
 /// Not gated on `feature = "local"` (unlike the [`rep3`] module) so a `--no-default-features
 /// --features tls` bench binary can use the `rep3` half over a real network too.
@@ -47,10 +47,9 @@ pub mod precomputation {
         Fr::from_be_bytes_mod_order(b"TACEO-Merces-Commit")
     }
 
-    /// Site counts per `BatchKind::PrecomputedPoseidon2` batch, in the order
-    /// `Machine::run_with_precomputation` consumes them (`Program::precomputed_batches` walks the
-    /// instruction stream). Errors if a batch isn't width-4 Poseidon2 - a width change must not be
-    /// silently mis-sized.
+    /// Site counts per `BatchKind::PrecomputedPoseidon2` batch, in the order `Vm::run` consumes
+    /// them (`Program::precomputed_batches` walks the instruction stream). Errors if a batch isn't
+    /// width-4 Poseidon2 - a width change must not be silently mis-sized.
     pub fn site_counts(program: &Program) -> eyre::Result<Vec<usize>> {
         program
             .precomputed_batches()?
@@ -128,14 +127,13 @@ pub mod precomputation {
 
     /// Plain-driver precomputation: `poseidon2::plain_trace` over seeded-random commit states,
     /// queued in `program`'s batch order. Needed even for the plain baseline - once a circuit's
-    /// commit sites are host-precomputed, `Machine::run` (without a precomputation queue) errors
-    /// on them.
+    /// commit sites are host-precomputed, a `Vm` with no attached precomputation errors on them.
     pub fn plain(program: &Program, rng: &mut impl Rng) -> eyre::Result<GadgetPrecomputation<Fr>> {
         let counts = site_counts(program)?;
         let sites: usize = counts.iter().sum();
         // `plain_trace`/`Poseidon2Service` both reject a zero-element call outright (there is no
         // width to check it against) - a circuit with no host-precomputed sites just gets an
-        // empty queue, which `run_with_precomputation` treats exactly like `Machine::run`.
+        // empty queue, which `Vm::run` treats the same either way.
         if sites == 0 {
             return Ok(GadgetPrecomputation::new());
         }
@@ -179,12 +177,29 @@ pub mod precomputation {
 pub mod rep3 {
     use ark_bn254::Fr;
     use circom_mpc_program::{Bank, Program};
-    use circom_mpc_vm::{Machine, driver::rep3::Rep3Driver};
+    use circom_mpc_vm::Vm;
     use mpc_core::protocols::rep3::{
         Rep3PrimeFieldShare, Rep3State, combine_field_elements, conversion::A2BType,
         share_field_element,
     };
     use mpc_net::local::LocalNetwork;
+
+    /// Stitches one party's opened `public_inputs` prefix (identical across parties) back together
+    /// with the three parties' secret-shared remainders, reconstructing the full flat witness in
+    /// original witness order.
+    fn combine_witness(
+        w0: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+        w1: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+        w2: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
+    ) -> Vec<Fr> {
+        let mut full = w0.public_inputs;
+        full.extend(combine_field_elements(
+            &w0.witness,
+            &w1.witness,
+            &w2.witness,
+        ));
+        full
+    }
 
     /// One `[share; 3]` triple per `Shared`-domain input, in the order `Program::classify_inputs`
     /// visits them - each party takes its own component.
@@ -211,15 +226,14 @@ pub mod rep3 {
         shares: &[[Rep3PrimeFieldShare<Fr>; 3]],
     ) -> Vec<Fr> {
         let networks = LocalNetwork::new(3);
-        let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+        let witnesses: Vec<_> = std::thread::scope(|scope| {
             networks
                 .into_iter()
                 .enumerate()
                 .map(|(party, net)| {
                     scope.spawn(move || {
                         let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                        let mut driver =
-                            Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                        let vm = Vm::rep3(program, &net, &mut state).unwrap();
                         let mut next = 0;
                         let inputs = program
                             .classify_inputs(values, |_v| {
@@ -228,7 +242,7 @@ pub mod rep3 {
                                 s
                             })
                             .unwrap();
-                        Machine::run(program, &mut driver, &inputs).unwrap()
+                        vm.run(&inputs).unwrap()
                     })
                 })
                 .collect::<Vec<_>>()
@@ -237,15 +251,17 @@ pub mod rep3 {
                 .collect()
         });
 
-        let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
-        combine_field_elements(&w0, &w1, &w2)
+        let [w0, w1, w2] = witnesses
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("exactly three parties"));
+        combine_witness(w0, w1, w2)
     }
 
     /// [`run_witness_with_shares`], for a program with host-precomputed `TACEO_PRECOMPUTATION_
     /// Poseidon2` sites (e.g. the merces circuits): each party also secret-shares
     /// `commit_triples`-worth of commit-site precomputation states, precomputes its own trace via
-    /// [`crate::fixtures::precomputation::rep3`], then runs `Machine::run_with_precomputation`
-    /// with the resulting queue.
+    /// [`crate::fixtures::precomputation::rep3`], then runs with the resulting queue attached via
+    /// `Vm::with_precomputation`.
     pub fn run_witness_with_precomputation(
         program: &Program,
         values: &[Fr],
@@ -258,7 +274,7 @@ pub mod rep3 {
         let total_sites: usize = site_counts.iter().sum();
 
         let networks = LocalNetwork::new(3);
-        let witnesses: Vec<Vec<Rep3PrimeFieldShare<Fr>>> = std::thread::scope(|scope| {
+        let witnesses: Vec<_> = std::thread::scope(|scope| {
             networks
                 .into_iter()
                 .enumerate()
@@ -273,8 +289,9 @@ pub mod rep3 {
                                 .unwrap();
                         let queue = precomputation::queue(site_counts, traces).unwrap();
 
-                        let mut driver =
-                            Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
+                        let vm = Vm::rep3(program, &net, &mut state)
+                            .unwrap()
+                            .with_precomputation(queue);
                         let mut next = 0;
                         let inputs = program
                             .classify_inputs(values, |_v| {
@@ -283,8 +300,7 @@ pub mod rep3 {
                                 s
                             })
                             .unwrap();
-                        Machine::run_with_precomputation(program, &mut driver, &inputs, queue)
-                            .unwrap()
+                        vm.run(&inputs).unwrap()
                     })
                 })
                 .collect::<Vec<_>>()
@@ -293,12 +309,15 @@ pub mod rep3 {
                 .collect()
         });
 
-        let [w0, w1, w2]: [Vec<Rep3PrimeFieldShare<Fr>>; 3] = witnesses.try_into().unwrap();
-        combine_field_elements(&w0, &w1, &w2)
+        let [w0, w1, w2] = witnesses
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("exactly three parties"));
+        combine_witness(w0, w1, w2)
     }
 
     /// [`run_witness`], additionally reporting each party's network rounds, split into
-    /// (driver preparation, online execution).
+    /// (driver preparation, online execution). Online now includes the closing `open` of the
+    /// public-witness prefix that `Vm::run` performs internally.
     pub fn run_witness_counted(
         program: &Program,
         values: &[Fr],
@@ -310,45 +329,39 @@ pub mod rep3 {
             .into_iter()
             .map(CountingNet::new)
             .collect();
-        let results: Vec<(Vec<Rep3PrimeFieldShare<Fr>>, usize, usize)> =
-            std::thread::scope(|scope| {
-                networks
-                    .into_iter()
-                    .enumerate()
-                    .map(|(party, net)| {
-                        let shares = &shares;
-                        scope.spawn(move || {
-                            let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                            net.reset();
-                            let mut driver =
-                                Rep3Driver::new_for_run(&net, &mut state, program).unwrap();
-                            let preparation = net.rounds();
-                            net.reset();
-                            let mut next = 0;
-                            let inputs = program
-                                .classify_inputs(values, |_v| {
-                                    let s = shares[next][party];
-                                    next += 1;
-                                    s
-                                })
-                                .unwrap();
-                            let witness = Machine::run(program, &mut driver, &inputs).unwrap();
-                            (witness, preparation, net.rounds())
-                        })
+        let results: Vec<_> = std::thread::scope(|scope| {
+            networks
+                .into_iter()
+                .enumerate()
+                .map(|(party, net)| {
+                    let shares = &shares;
+                    scope.spawn(move || {
+                        let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                        net.reset();
+                        let vm = Vm::rep3(program, &net, &mut state).unwrap();
+                        let preparation = net.rounds();
+                        net.reset();
+                        let mut next = 0;
+                        let inputs = program
+                            .classify_inputs(values, |_v| {
+                                let s = shares[next][party];
+                                next += 1;
+                                s
+                            })
+                            .unwrap();
+                        let witness = vm.run(&inputs).unwrap();
+                        (witness, preparation, net.rounds())
                     })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect()
-            });
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
 
-        let [(w0, p0, o0), (w1, p1, o1), (w2, p2, o2)]: [_; 3] = results
+        let [(w0, p0, o0), (w1, p1, o1), (w2, p2, o2)] = results
             .try_into()
             .unwrap_or_else(|_| unreachable!("exactly three parties"));
-        (
-            combine_field_elements(&w0, &w1, &w2),
-            [p0, p1, p2],
-            [o0, o1, o2],
-        )
+        (combine_witness(w0, w1, w2), [p0, p1, p2], [o0, o1, o2])
     }
 }

@@ -911,6 +911,30 @@ fn build_witness_sources(graph: &Graph, slot: &[Option<Loc>]) -> eyre::Result<Ve
         .collect())
 }
 
+/// The SNARK's public witness count: the reserved constant `1`, then the circuit's outputs, then
+/// its declared public inputs - circom's own main-component witness layout, and exactly the zkey's
+/// `num_instance_variables`. Deliberately independent of `Graph::mpc_public_inputs`, which only
+/// steers this compiler's own MPC domain analysis and must never affect what the SNARK proves.
+///
+/// # Errors
+///
+/// Returns an error if a name in `graph.public_inputs()` has no matching entry in `input_signals`.
+fn num_public_witness(graph: &Graph, input_signals: &[InputSignal]) -> eyre::Result<u32> {
+    let mut count: u32 = 1 + u32::try_from(graph.num_outputs())
+        .expect("num_outputs fits in u32 - an earlier pass already sized every slot as u32");
+    for name in graph.public_inputs() {
+        let signal = input_signals
+            .iter()
+            .find(|signal| &signal.name == name)
+            .ok_or_else(|| {
+                eyre::eyre!("declared public input `{name}` has no matching circuit input signal")
+            })?;
+        count += u32::try_from(signal.size)
+            .map_err(|_| eyre::eyre!("public input `{name}` size exceeds u32"))?;
+    }
+    Ok(count)
+}
+
 /// Compiles a fully lowered graph (`PassManager::run` has already run - see
 /// `circom_mpc_compiler::compile`) into a `Program`.
 ///
@@ -932,6 +956,7 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
     emitter.run(graph, &domain, &schedule, &reservation)?;
     let batches = assemble_batches(&schedule, &reservation, &emitter.out);
     let witness_sources = build_witness_sources(graph, &emitter.slot)?;
+    let num_public_witness = num_public_witness(graph, &reservation.input_signals)?;
 
     Ok(Program::new(ProgramParts {
         instructions: emitter.out.instructions,
@@ -950,6 +975,7 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
             shared: emitter.arena.s.next,
             local: emitter.arena.l.next,
         },
+        num_public_witness,
     }))
 }
 

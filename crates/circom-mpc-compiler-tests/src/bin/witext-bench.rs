@@ -7,8 +7,8 @@
 //! Cases come from `circom_mpc_compiler_tests::cases`; add a benchmark there, not here. Each case
 //! is compiled exactly once and then run `--runs` times - connection setup, the rep3
 //! correlated-randomness handshake, and every case's compile happen once, entirely outside every
-//! timed region below. Scope is witness extension only, no proving: `Machine::run` /
-//! `run_with_precomputation` is what's measured, nothing past it.
+//! timed region below. Scope is witness extension only, no proving: `Vm::run` is what's measured,
+//! nothing past it.
 //!
 //! Inputs are seeded-random field elements, not real protocol values - witness extension's cost is
 //! value-independent, and this binary never proves. Every party derives the same field elements
@@ -39,7 +39,7 @@ use circom_mpc_compiler_tests::{
     fixtures::precomputation,
 };
 use circom_mpc_program::Program;
-use circom_mpc_vm::{Machine, counting_net::CountingNet, driver::rep3::Rep3Driver};
+use circom_mpc_vm::{Vm, counting_net::CountingNet};
 use clap::Parser;
 use mpc_core::protocols::rep3::{
     Rep3PrimeFieldShare, Rep3State, conversion::A2BType, share_field_element,
@@ -360,11 +360,9 @@ fn bench_case(
         let traces = precomputation::rep3(total_sites, &commit_states, net, state)?;
         let precomputation = precomputation::queue(&site_counts, traces)?;
 
-        let mut driver = Rep3Driver::new_for_run(net, state, &program)?;
-        let witness =
-            Machine::run_with_precomputation(&program, &mut driver, &inputs, precomputation)?;
+        let vm = Vm::rep3(&program, net, state)?.with_precomputation(precomputation);
+        let witness = vm.run(&inputs)?;
         drop(witness);
-        drop(driver);
 
         let stats = run_end(net, begin, &stats0, rounds0)?;
         println!(

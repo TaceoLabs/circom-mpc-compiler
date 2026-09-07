@@ -91,7 +91,7 @@ impl WireIndex for ResultSlot {
 const MAGIC: &[u8; 8] = b"CMPCVM\0\0";
 /// Bumped on every layout change; `read` rejects anything else. Deliberately no compatibility
 /// shim: accepting an older layout could produce a plausible-looking wrong witness.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Caps [`Program::read`] enforces against an untrusted or corrupted input before it allocates
 /// anything, so a malformed length field can't drive an unbounded allocation.
@@ -425,6 +425,8 @@ impl Program {
         w.write_u32::<LittleEndian>(self.slots.shared)?;
         w.write_u32::<LittleEndian>(self.slots.local)?;
 
+        w.write_u32::<LittleEndian>(self.num_public_witness)?;
+
         Ok(())
     }
 
@@ -648,6 +650,8 @@ impl Program {
         let shared = r.read_u32::<LittleEndian>()?;
         let local = r.read_u32::<LittleEndian>()?;
 
+        let num_public_witness = r.read_u32::<LittleEndian>()?;
+
         let program = Program {
             instructions,
             constants,
@@ -665,6 +669,7 @@ impl Program {
                 shared,
                 local,
             },
+            num_public_witness,
         };
         program.validate_encoding()?;
         eyre::ensure!(limited.limit() > 0, "serialized program exceeds byte limit");

@@ -5,7 +5,7 @@
 
 use ark_bn254::Fr;
 use circom_mpc_compiler::CompilerConfig;
-use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
+use circom_mpc_vm::Vm;
 
 mod common;
 
@@ -46,8 +46,7 @@ fn unrecognized_gadget_compiles_its_body() {
     // And the compiled body is correct: Doubler(in) = in + in.
     let values = [Fr::from(21u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let mut driver = PlainDriver;
-    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap().into_full();
     assert_eq!(witness[1], Fr::from(42u64), "witness: {witness:?}");
 }
 
@@ -62,8 +61,9 @@ fn extract_mode_runs_end_to_end_through_the_plain_driver() {
             .unwrap_or_else(|e| panic!("{circuit}: {e}"));
         let values = vec![Fr::from(0u64); program.statistics().inputs];
         let inputs = program.classify_inputs(&values, |v| v);
-        let mut driver = PlainDriver;
-        Machine::run(&program, &mut driver, &inputs).unwrap_or_else(|e| panic!("{circuit}: {e}"));
+        Vm::plain(&program)
+            .run(&inputs)
+            .unwrap_or_else(|e| panic!("{circuit}: {e}"));
     }
 }
 
@@ -87,8 +87,7 @@ fn chained_same_kind_sites_are_staged_into_separate_batches() {
     // And it runs: a*b == 0 for these inputs, so the first IsZero returns 1.
     let values = vec![Fr::from(0u64), Fr::from(7u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let mut driver = PlainDriver;
-    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap().into_full();
     // p = 0*7 = 0, so z = IsZero(0) = 1; q = z*a = 1*0 = 0, so out = IsZero(0) = 1.
     assert_eq!(witness[1], Fr::from(1u64), "out should be 1: {witness:?}");
 }
@@ -110,7 +109,7 @@ fn num2bits_zero_returns_an_empty_trace_without_panicking() {
         circom_mpc_compiler::compile(circuit_path("gadget_num2bits_zero_test"), &config()).unwrap();
     let values = [Fr::from(0u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap().into_full();
     assert!(witness[1..].iter().all(ark_ff::Zero::is_zero));
 }
 
@@ -127,6 +126,6 @@ fn all_public_gadgets_stay_public_through_downstream_multiplication() {
     assert!(stats.public_gadget_results > 0);
     let values = [Fr::from(0u64), Fr::from(9u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let witness = Machine::run(&program, &mut PlainDriver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap().into_full();
     assert_eq!(witness[1], Fr::from(0u64));
 }

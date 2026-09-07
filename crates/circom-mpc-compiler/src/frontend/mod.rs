@@ -158,7 +158,7 @@ pub(crate) fn build_graph(file: String, config: &CompilerConfig) -> Result<ir::G
     // Rebasing here rather than at each consumer is what keeps them consistent: comparing the two
     // numberings directly (witness offset vs 0-based input index) would misclassify a public input
     // as `Shared` with one main output, or a secret input as public with more than one - which
-    // `Machine::run` then rejects outright.
+    // `Vm::run` then rejects outright.
     let input_base = 1 + main_outputs;
     let input_list = circuit
         .c_producer

@@ -64,7 +64,7 @@ fn non_constant_bitwise_operator_is_a_typed_error() {
 /// witness numbering (where the first input sits at `1 + num_outputs`, after the reserved constant
 /// and main's outputs). Comparing the two numberings directly would misclassify a declared-public
 /// input as `Shared` with one main output, or a secret input as public with more than one - which
-/// `Machine::run` rejects.
+/// `Vm::run` rejects.
 #[test]
 fn input_list_offsets_are_zero_based_and_public_inputs_are_classified_public() {
     let program = circom_mpc_compiler::compile(circuit_path("multiplier2_public"), &config())

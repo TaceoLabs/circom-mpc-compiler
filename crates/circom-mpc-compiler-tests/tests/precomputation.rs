@@ -1,5 +1,5 @@
 //! `TACEO_PRECOMPUTATION_Poseidon2` sites: the host precomputes Poseidon2's trace and hands it to
-//! `Machine::run_with_precomputation` instead of the driver computing it. Poseidon2 is the only
+//! `Vm::run` with attached precomputation instead of the driver computing it. Poseidon2 is the only
 //! gadget that can be host-precomputed. Covers batching (a host-precomputed site never shares a
 //! batch with a driver-serviced one), plain-driver equivalence against the unwrapped `Poseidon2`
 //! twin, and the error paths around a malformed or missing precomputation.
@@ -8,8 +8,7 @@ use ark_bn254::Fr;
 use circom_mpc_compiler::CompilerConfig;
 use circom_mpc_program::GadgetKind;
 use circom_mpc_vm::{
-    GadgetPrecomputation, InputValue, Machine, SiteTrace, driver::plain::PlainDriver,
-    gadgets::poseidon2, program::BatchKind,
+    GadgetPrecomputation, InputValue, SiteTrace, Vm, gadgets::poseidon2, program::BatchKind,
 };
 
 mod common;
@@ -83,19 +82,17 @@ fn precomputed_poseidon2_matches_the_gadget_twin() {
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let inputs = gadget_program.classify_inputs(&values, |v| v);
-        Machine::run(&gadget_program, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&gadget_program).run(&inputs).unwrap().into_full()
     };
 
     let inputs = precomputed_program.classify_inputs(&values, |v| v);
     let mut precomputation = GadgetPrecomputation::new();
     precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
-    let got = Machine::run_with_precomputation(
-        &precomputed_program,
-        &mut PlainDriver,
-        &inputs,
-        precomputation,
-    )
-    .unwrap();
+    let got = Vm::plain(&precomputed_program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
+        .unwrap()
+        .into_full();
     assert_eq!(got, expected);
 }
 
@@ -117,7 +114,7 @@ fn precomputed_poseidon2_with_a_mixed_public_and_shared_input_matches_the_gadget
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let expected = {
         let inputs = gadget_program.classify_inputs(&values, |v| v);
-        Machine::run(&gadget_program, &mut PlainDriver, &inputs).unwrap()
+        Vm::plain(&gadget_program).run(&inputs).unwrap().into_full()
     };
 
     let inputs = precomputed_program.classify_inputs(&values, |v| v);
@@ -128,24 +125,22 @@ fn precomputed_poseidon2_with_a_mixed_public_and_shared_input_matches_the_gadget
         InputValue::Secret(values[2]),
     ];
     precomputation.push_batch(poseidon2::plain_trace(3, &states).unwrap());
-    let got = Machine::run_with_precomputation(
-        &precomputed_program,
-        &mut PlainDriver,
-        &inputs,
-        precomputation,
-    )
-    .unwrap();
+    let got = Vm::plain(&precomputed_program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
+        .unwrap()
+        .into_full();
     assert_eq!(got, expected);
 }
 
 #[test]
-fn machine_run_errors_on_a_program_with_precomputed_batches() {
+fn vm_run_errors_on_a_program_with_precomputed_batches() {
     let program =
         circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config())
             .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let err = Machine::run(&program, &mut PlainDriver, &inputs).unwrap_err();
+    let err = Vm::plain(&program).run(&inputs).unwrap_err();
     assert!(
         err.to_string().contains("missing precomputed trace"),
         "{err}"
@@ -163,7 +158,9 @@ fn wrong_site_count_is_rejected() {
     let mut traces = poseidon2::plain_trace(3, &secret(&values)).unwrap();
     traces.push(traces[0].clone());
     precomputation.push_batch(traces);
-    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+    let err = Vm::plain(&program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
         .unwrap_err();
     assert!(err.to_string().contains("expected 1"), "{err}");
 }
@@ -178,7 +175,9 @@ fn short_intermediate_is_rejected() {
     let mut precomputation = GadgetPrecomputation::new();
     let traces = poseidon2::plain_trace(3, &secret(&values)).unwrap();
     precomputation.push_batch(vec![SiteTrace::new(traces[0].output.clone(), Vec::new())]);
-    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+    let err = Vm::plain(&program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
         .unwrap_err();
     assert!(
         err.to_string().contains("requested intermediate slot"),
@@ -196,7 +195,9 @@ fn leftover_precomputation_after_the_run_is_rejected() {
     let mut precomputation = GadgetPrecomputation::new();
     precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
     precomputation.push_batch(poseidon2::plain_trace(3, &secret(&values)).unwrap());
-    let err = Machine::run_with_precomputation(&program, &mut PlainDriver, &inputs, precomputation)
+    let err = Vm::plain(&program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
         .unwrap_err();
     assert!(err.to_string().contains("unconsumed batch"), "{err}");
 }

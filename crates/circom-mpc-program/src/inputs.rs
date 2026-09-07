@@ -137,7 +137,7 @@ impl<S: Clone, H: std::hash::BuildHasher> InputValues<S>
 }
 
 impl Program {
-    /// Builds `Machine::run`'s `inputs` array from a flat `&[Fr]` in circuit signal order,
+    /// Builds `Vm::run`'s `inputs` array from a flat `&[Fr]` in circuit signal order,
     /// consulting `Program::input_domains` to wrap each value as `Public` or `Secret`
     /// automatically. `share`
     /// is only invoked for `Secret`-destined values - e.g. `|v| v` for a driver whose `Share = Fr`
@@ -203,6 +203,7 @@ mod tests {
             witness_sources: Vec::new(),
             num_inputs: 3,
             slots: SlotCounts::default(),
+            num_public_witness: 1,
         })
     }
 

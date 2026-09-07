@@ -6,12 +6,7 @@
 //! `just gen-proving-artifacts`; missing keys are an error because these proof tests are mandatory.
 use ark_bn254::{Bn254, Fr};
 use circom_mpc_compiler::CompilerConfig;
-use circom_mpc_vm::{
-    Machine, Program,
-    driver::{plain::PlainDriver, rep3::Rep3Driver},
-    program::Bank,
-    split_witness,
-};
+use circom_mpc_vm::{Program, Vm, program::Bank};
 use circom_types::CheckElement;
 use co_groth16::{CircomReduction, ConstraintMatrices, Groth16, ProvingKey, Rep3CoGroth16};
 use mpc_core::protocols::rep3::{
@@ -50,21 +45,24 @@ fn zkey(name: &str) -> (ConstraintMatrices<Fr>, ProvingKey<Bn254>) {
 fn prove_and_verify(name: &str) {
     let (matrices, pkey) = zkey(name);
     let program = compiled(name);
-    // The authoritative split point between cleartext public inputs and the shared remainder - see
-    // `vm::witness`'s module doc for why this comes from the zkey and not from `input_domains`.
-    let n_pub = matrices.num_instance_variables;
     assert_eq!(
         program.statistics().witness_values,
         matrices.num_instance_variables + matrices.num_witness_variables,
         "{name}: this compiler's witness length disagrees with the zkey's - they were not built \
          from the same compilation"
     );
+    // The authoritative split point between cleartext public inputs and the shared remainder -
+    // `Vm::run` derives this from the program itself; cross-check it against the zkey's own count.
+    assert_eq!(
+        program.num_public_witness() as usize,
+        matrices.num_instance_variables,
+        "{name}: this compiler's public witness count disagrees with the zkey's"
+    );
 
     for (i, values) in inputs_from_test_name(name).into_iter().enumerate() {
         let plain = {
             let inputs = program.classify_inputs(&values, |v| v);
-            let mut driver = PlainDriver;
-            Machine::run(&program, &mut driver, &inputs).unwrap()
+            Vm::plain(&program).run(&inputs).unwrap().into_full()
         };
 
         let mut rng = thread_rng();
@@ -94,28 +92,26 @@ fn prove_and_verify(name: &str) {
                         let shares = &shares;
                         scope.spawn(move || {
                             let mut state = Rep3State::new(&ext, A2BType::default()).unwrap();
-                            let mut driver =
-                                Rep3Driver::new_for_run(&ext, &mut state, program).unwrap();
+                            let vm = Vm::rep3(program, &ext, &mut state).unwrap();
                             let mut next = 0;
                             let inputs = program.classify_inputs(values, |_v| {
                                 let s = shares[next][party];
                                 next += 1;
                                 s
                             });
-                            let witness = Machine::run(program, &mut driver, &inputs).unwrap();
-                            let full_witness = witness.clone();
-                            let (public_inputs, secret) =
-                                split_witness(&mut driver, witness, n_pub).unwrap();
+                            let witness = vm.run(&inputs).unwrap();
+                            let secret = witness.witness.clone();
+                            let public_inputs = witness.public_inputs.clone();
                             let shared = co_circom_types::SharedWitness {
                                 public_inputs: public_inputs.clone(),
-                                witness: secret,
+                                witness: witness.witness,
                             };
                             let proof =
                                 Rep3CoGroth16::prove_with_shamir_bridge::<_, CircomReduction>(
                                     &p, pkey, matrices, shared,
                                 )
                                 .unwrap();
-                            (full_witness, proof, public_inputs)
+                            (secret, proof, public_inputs)
                         })
                     })
                     .collect::<Vec<_>>()
@@ -128,7 +124,8 @@ fn prove_and_verify(name: &str) {
             .clone()
             .try_into()
             .unwrap_or_else(|_| panic!("{name}: expected 3 parties"));
-        let rep3 = combine_field_elements(&w0, &w1, &w2);
+        let mut rep3 = results[0].2.clone();
+        rep3.extend(combine_field_elements(&w0, &w1, &w2));
         assert_eq!(
             rep3, plain,
             "{name}: input {i}: rep3 reconstruction disagrees with plain"
@@ -175,23 +172,24 @@ prove_and_verify_test!(gadget_num2bits_test);
 prove_and_verify_test!(gadget_iszero_test);
 prove_and_verify_test!(gadget_aliascheck_test);
 
-/// The split itself, against the plain driver - isolates a bad `n_pub` from a networking or proving
-/// problem if a prove+verify test above ever fails.
+/// The split itself, against the plain driver - isolates a bad `num_public_witness` from a
+/// networking or proving problem if a prove+verify test above ever fails.
 #[test]
 fn plain_witness_splits_at_the_zkey_boundary() {
     let (matrices, _) = zkey("multiplier2_public");
     let program = compiled("multiplier2_public");
-    let n_pub = matrices.num_instance_variables;
+    assert_eq!(
+        program.num_public_witness() as usize,
+        matrices.num_instance_variables
+    );
 
     let values = vec![Fr::from(7u64), Fr::from(6u64)];
     let inputs = program.classify_inputs(&values, |v| v);
-    let mut driver = PlainDriver;
-    let witness = Machine::run(&program, &mut driver, &inputs).unwrap();
+    let witness = Vm::plain(&program).run(&inputs).unwrap();
 
-    let (public, secret) = split_witness(&mut driver, witness.clone(), n_pub).unwrap();
     assert_eq!(
-        public,
+        witness.public_inputs,
         vec![Fr::from(1u64), Fr::from(42u64), Fr::from(7u64)]
     );
-    assert_eq!(public.len() + secret.len(), witness.len());
+    assert_eq!(witness.len(), program.statistics().witness_values);
 }

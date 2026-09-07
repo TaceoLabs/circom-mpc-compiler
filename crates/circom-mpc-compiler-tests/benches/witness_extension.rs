@@ -1,4 +1,4 @@
-//! `Machine::run` under `PlainDriver` versus real 3-party `Rep3Driver` over an in-process
+//! `Vm::plain` versus real 3-party `Vm::rep3` over an in-process
 //! `LocalNetwork`: the gap between the two series is what MPC actually costs for a given circuit,
 //! and the `Program::statistics` line printed per circuit is what makes a number interpretable - a
 //! circuit's floor is its round count, not its instruction count. In-process, so rep3 numbers
@@ -22,7 +22,7 @@ use circom_mpc_compiler_tests::{
     fixtures::{self, precomputation},
 };
 use circom_mpc_program::Program;
-use circom_mpc_vm::{Machine, driver::plain::PlainDriver};
+use circom_mpc_vm::Vm;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mpc_core::protocols::rep3::{Rep3PrimeFieldShare, share_field_element};
 use rand::{SeedableRng, rngs::StdRng};
@@ -93,9 +93,11 @@ fn run_plain(p: &Prepared) -> Vec<Fr> {
         .program
         .classify_inputs(&p.values, |v| v)
         .expect("valid inputs");
-    let mut driver = PlainDriver;
-    Machine::run_with_precomputation(&p.program, &mut driver, &inputs, precomputation)
+    Vm::plain(&p.program)
+        .with_precomputation(precomputation)
+        .run(&inputs)
         .expect("plain run")
+        .into_full()
 }
 
 fn run_rep3(p: &Prepared) -> Vec<Fr> {

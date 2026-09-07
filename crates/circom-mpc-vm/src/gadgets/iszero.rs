@@ -22,7 +22,7 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
     }
 }
 
-/// The rep3 twin of [`plain_trace`], batched across every site in one `Machine::run_batch` call (dispatched at `Opcode::Gadget`)
+/// The rep3 twin of [`plain_trace`], batched across every site in one `Vm::run_batch` call (dispatched at `Opcode::Gadget`)
 /// (the same technique the co-snarks gadget uses, `circom-mpc-vm/src/gadget.rs`'s
 /// `register_iszero`, generalized from one value to a batch): convert every input to binary with
 /// the strategy selected on `Rep3State`, test the binary shares for zero, and inject the result
