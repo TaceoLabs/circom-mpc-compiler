@@ -10,7 +10,7 @@ use mpc_core::{
 };
 use mpc_net::Network;
 
-use super::VmDriver;
+use super::{IsZeroRevealTrace, VmDriver};
 use crate::gadgets;
 
 /// One freshly prepared rep3 VM execution. The network connection and [`Rep3State`] are borrowed so
@@ -124,7 +124,7 @@ impl<N: Network> VmDriver for Rep3Driver<'_, N> {
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],
-    ) -> eyre::Result<Vec<(Self::Share, Self::Share, Fr)>> {
+    ) -> eyre::Result<Vec<IsZeroRevealTrace<Self::Share>>> {
         gadgets::iszero::rep3_masked_reveal_trace(inputs, self.net, self.state)
     }
 

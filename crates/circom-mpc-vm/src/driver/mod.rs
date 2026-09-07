@@ -6,6 +6,17 @@ pub mod rep3;
 
 use ark_bn254::Fr;
 
+/// One fused `IsZero` trace together with its explicitly revealed result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsZeroRevealTrace<S> {
+    /// Secret-shared `1` when the input is zero, otherwise secret-shared `0`.
+    pub is_zero: S,
+    /// Secret-shared inverse helper used by the `IsZero` constraint.
+    pub inverse: S,
+    /// Publicly revealed value of `is_zero`.
+    pub revealed: Fr,
+}
+
 /// What actually executes a compiled `Program`. Linear ops (`add_ss`/`sub_sp`/...) are infallible
 /// local computation - a plain field op for `PlainDriver`, a share-local op for a real MPC driver,
 /// never a network round. `mul_vec` executes one scheduled multiplication stage; the
@@ -106,14 +117,10 @@ pub trait VmDriver {
     /// # Errors
     ///
     /// Returns an error if the underlying computation/network round fails.
-    #[allow(
-        clippy::type_complexity,
-        reason = "the tuple mirrors the fused IsZeroReveal batch's own three-value result shape; a named struct would only add ceremony for one call site"
-    )]
     fn is_zero_reveal_traces(
         &mut self,
         inputs: &[Self::Share],
-    ) -> eyre::Result<Vec<(Self::Share, Self::Share, Fr)>>;
+    ) -> eyre::Result<Vec<IsZeroRevealTrace<Self::Share>>>;
     /// `inputs` is `sites * 254` shares; returns `sites * 519` shares - see
     /// `ir::GadgetKind::AliasCheck`'s doc for the exact layout.
     ///

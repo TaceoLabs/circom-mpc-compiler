@@ -319,6 +319,198 @@ impl BatchKind {
     }
 }
 
+fn read_instructions<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<Instruction>> {
+    let count = checked_count::<Instruction>(r.read_u64::<LittleEndian>()?, limits, "instruction")?;
+    let mut instructions = Vec::with_capacity(count);
+    for _ in 0..count {
+        let op = Opcode::from_u8(r.read_u8()?)?;
+        let mut pad = [0u8; 3];
+        r.read_exact(&mut pad)?;
+        eyre::ensure!(pad == [0; 3], "instruction padding must be zero");
+        let dst = r.read_u32::<LittleEndian>()?;
+        let a = r.read_u32::<LittleEndian>()?;
+        let b = r.read_u32::<LittleEndian>()?;
+        instructions.push(match op {
+            Opcode::Reshare => Instruction::Reshare(RoundIdx::new(a)),
+            Opcode::Gadget => Instruction::Gadget(BatchIdx::new(a)),
+            op => Instruction::Arith {
+                op,
+                dst: Slot::new(dst),
+                a: Slot::new(a),
+                b: Slot::new(b),
+            },
+        });
+    }
+    Ok(instructions)
+}
+
+fn read_constants<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<Vec<Fr>> {
+    let count = checked_count::<Fr>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
+    let mut constants = Vec::with_capacity(count);
+    for _ in 0..count {
+        constants.push(Fr::deserialize_compressed(&mut *r)?);
+    }
+    Ok(constants)
+}
+
+fn read_input_domains<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<Vec<Bank>> {
+    let count = checked_count::<Bank>(r.read_u64::<LittleEndian>()?, limits, "input domain")?;
+    (0..count).map(|_| Bank::from_u8(r.read_u8()?)).collect()
+}
+
+fn read_input_bindings<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<InputBinding>> {
+    let count =
+        checked_count::<InputBinding>(r.read_u64::<LittleEndian>()?, limits, "input binding")?;
+    let mut inputs = Vec::with_capacity(count);
+    for _ in 0..count {
+        inputs.push(InputBinding {
+            bank: Bank::from_u8(r.read_u8()?)?,
+            slot: Slot::new(r.read_u32::<LittleEndian>()?),
+            input_index: InputIdx::new(r.read_u32::<LittleEndian>()?),
+        });
+    }
+    Ok(inputs)
+}
+
+fn read_input_signals<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<InputSignal>> {
+    let count = checked_count::<u64>(r.read_u64::<LittleEndian>()?, limits, "input signal")?;
+    let mut signals = Vec::with_capacity(count);
+    for _ in 0..count {
+        signals.push(InputSignal {
+            name: read_string(r, limits, "input signal name")?,
+            offset: checked_count::<()>(
+                r.read_u64::<LittleEndian>()?,
+                limits,
+                "input signal offset",
+            )?,
+            size: checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input signal size")?,
+        });
+    }
+    Ok(signals)
+}
+
+fn read_round_entries<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<RoundEntry>> {
+    let count = checked_count::<RoundEntry>(r.read_u64::<LittleEndian>()?, limits, "round")?;
+    let mut rounds = Vec::with_capacity(count);
+    for _ in 0..count {
+        rounds.push(RoundEntry {
+            operand_start: r.read_u32::<LittleEndian>()?,
+            len: r.read_u32::<LittleEndian>()?,
+            result_start: r.read_u32::<LittleEndian>()?,
+        });
+    }
+    Ok(rounds)
+}
+
+fn read_gadget_batch<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<GadgetBatch> {
+    let kind = BatchKind::read(r)?;
+    let sites = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "gadget site")?;
+    eyre::ensure!(sites > 0, "gadget batch has no sites");
+    let input_count =
+        checked_count::<SiteInput>(r.read_u64::<LittleEndian>()?, limits, "gadget input")?;
+    let mut input_slots = Vec::with_capacity(input_count);
+    for _ in 0..input_count {
+        let bank = Bank::from_u8(r.read_u8()?)?;
+        eyre::ensure!(bank != Bank::Local, "gadget input bank cannot be Local");
+        input_slots.push(SiteInput {
+            bank,
+            slot: Slot::new(r.read_u32::<LittleEndian>()?),
+        });
+    }
+    let result_requests = read_index_vec::<_, ResultSlot>(r, limits, "gadget result request")?;
+    let result_offsets = read_u32_vec(r, limits, "gadget result offset")?;
+    let target_count =
+        checked_count::<ResultTarget>(r.read_u64::<LittleEndian>()?, limits, "gadget target")?;
+    let mut result_targets = Vec::with_capacity(target_count);
+    for _ in 0..target_count {
+        let bank = Bank::from_u8(r.read_u8()?)?;
+        eyre::ensure!(bank != Bank::Local, "gadget result bank cannot be Local");
+        result_targets.push(ResultTarget {
+            bank,
+            slot: Slot::new(r.read_u32::<LittleEndian>()?),
+        });
+    }
+    let expected_offsets = sites
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("gadget batch site count overflows"))?;
+    eyre::ensure!(
+        result_offsets.len() == expected_offsets,
+        "gadget batch result_offsets has {} entries, expected sites + 1 = {}",
+        result_offsets.len(),
+        expected_offsets
+    );
+    eyre::ensure!(
+        result_requests.len() == result_targets.len(),
+        "gadget batch result_requests ({}) and result_targets ({}) must have the same \
+         length - one destination per requested slot",
+        result_requests.len(),
+        result_targets.len()
+    );
+    let result_request_count = u32::try_from(result_requests.len())
+        .map_err(|_| eyre::eyre!("gadget batch has too many result requests"))?;
+    eyre::ensure!(
+        result_offsets.first() == Some(&0)
+            && result_offsets.last().copied() == Some(result_request_count)
+            && result_offsets.windows(2).all(|w| w[0] <= w[1]),
+        "gadget batch has invalid CSR result offsets"
+    );
+    Ok(GadgetBatch {
+        kind,
+        sites,
+        input_slots,
+        result_requests,
+        result_offsets,
+        result_targets,
+    })
+}
+
+fn read_gadget_batches<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<GadgetBatch>> {
+    let count =
+        checked_count::<GadgetBatch>(r.read_u64::<LittleEndian>()?, limits, "gadget batch")?;
+    (0..count).map(|_| read_gadget_batch(r, limits)).collect()
+}
+
+fn read_witness_sources<R: Read>(
+    r: &mut R,
+    limits: ProgramReadLimits,
+) -> eyre::Result<Vec<WitnessSource>> {
+    let count =
+        checked_count::<WitnessSource>(r.read_u64::<LittleEndian>()?, limits, "witness source")?;
+    let mut sources = Vec::with_capacity(count);
+    for _ in 0..count {
+        let source = match r.read_u8()? {
+            0 => WitnessSource::One,
+            1 => WitnessSource::Input(InputIdx::new(r.read_u32::<LittleEndian>()?)),
+            2 => WitnessSource::Slot {
+                bank: Bank::from_u8(r.read_u8()?)?,
+                slot: Slot::new(r.read_u32::<LittleEndian>()?),
+            },
+            3 => WitnessSource::Zero,
+            other => eyre::bail!("unknown WitnessSource tag {other}"),
+        };
+        if let WitnessSource::Slot { bank, .. } = source {
+            eyre::ensure!(bank != Bank::Local, "witness source bank cannot be Local");
+        }
+        sources.push(source);
+    }
+    Ok(sources)
+}
+
 impl Program {
     /// Serializes this program. See the module doc for the exact format.
     ///
@@ -459,10 +651,6 @@ impl Program {
     ///
     /// Returns an error if `r` doesn't hold a validly-encoded program, if any table exceeds
     /// `limits`, or reading from `r` fails.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "a single sequential deserialization pass mirroring Program::write's field order; splitting it would not improve clarity"
-    )]
     pub fn read_with_limits<R: Read>(r: &mut R, limits: ProgramReadLimits) -> eyre::Result<Self> {
         let mut limited = r.take(limits.max_serialized_bytes.saturating_add(1));
         let r = &mut limited;
@@ -478,171 +666,16 @@ impl Program {
             "unsupported program format version {version}"
         );
 
-        let instr_count =
-            checked_count::<Instruction>(r.read_u64::<LittleEndian>()?, limits, "instruction")?;
-        let mut instructions = Vec::with_capacity(instr_count);
-        for _ in 0..instr_count {
-            let op = Opcode::from_u8(r.read_u8()?)?;
-            let mut pad = [0u8; 3];
-            r.read_exact(&mut pad)?;
-            eyre::ensure!(pad == [0; 3], "instruction padding must be zero");
-            let dst = r.read_u32::<LittleEndian>()?;
-            let a = r.read_u32::<LittleEndian>()?;
-            let b = r.read_u32::<LittleEndian>()?;
-            instructions.push(match op {
-                Opcode::Reshare => Instruction::Reshare(RoundIdx::new(a)),
-                Opcode::Gadget => Instruction::Gadget(BatchIdx::new(a)),
-                op => Instruction::Arith {
-                    op,
-                    dst: Slot::new(dst),
-                    a: Slot::new(a),
-                    b: Slot::new(b),
-                },
-            });
-        }
-
-        let const_count = checked_count::<Fr>(r.read_u64::<LittleEndian>()?, limits, "constant")?;
-        let mut constants = Vec::with_capacity(const_count);
-        for _ in 0..const_count {
-            constants.push(Fr::deserialize_compressed(&mut *r)?);
-        }
-
-        let domain_count =
-            checked_count::<Bank>(r.read_u64::<LittleEndian>()?, limits, "input domain")?;
-        let mut input_domains = Vec::with_capacity(domain_count);
-        for _ in 0..domain_count {
-            input_domains.push(Bank::from_u8(r.read_u8()?)?);
-        }
-
-        let binding_count =
-            checked_count::<InputBinding>(r.read_u64::<LittleEndian>()?, limits, "input binding")?;
-        let mut inputs = Vec::with_capacity(binding_count);
-        for _ in 0..binding_count {
-            let bank = Bank::from_u8(r.read_u8()?)?;
-            let slot = Slot::new(r.read_u32::<LittleEndian>()?);
-            let input_index = InputIdx::new(r.read_u32::<LittleEndian>()?);
-            inputs.push(InputBinding {
-                bank,
-                slot,
-                input_index,
-            });
-        }
-
-        let signal_count =
-            checked_count::<u64>(r.read_u64::<LittleEndian>()?, limits, "input signal")?;
-        let mut input_signals = Vec::with_capacity(signal_count);
-        for _ in 0..signal_count {
-            let name = read_string(r, limits, "input signal name")?;
-            let offset =
-                checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input signal offset")?;
-            let size =
-                checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input signal size")?;
-            input_signals.push(InputSignal { name, offset, size });
-        }
-
-        let round_count =
-            checked_count::<RoundEntry>(r.read_u64::<LittleEndian>()?, limits, "round")?;
-        let mut rounds = Vec::with_capacity(round_count);
-        for _ in 0..round_count {
-            let operand_start = r.read_u32::<LittleEndian>()?;
-            let len = r.read_u32::<LittleEndian>()?;
-            let result_start = r.read_u32::<LittleEndian>()?;
-            rounds.push(RoundEntry {
-                operand_start,
-                len,
-                result_start,
-            });
-        }
+        let instructions = read_instructions(r, limits)?;
+        let constants = read_constants(r, limits)?;
+        let input_domains = read_input_domains(r, limits)?;
+        let inputs = read_input_bindings(r, limits)?;
+        let input_signals = read_input_signals(r, limits)?;
+        let rounds = read_round_entries(r, limits)?;
         let round_operands = read_index_vec(r, limits, "round operand")?;
         let round_results = read_index_vec(r, limits, "round result")?;
-
-        let batch_count =
-            checked_count::<GadgetBatch>(r.read_u64::<LittleEndian>()?, limits, "gadget batch")?;
-        let mut batches = Vec::with_capacity(batch_count);
-        for _ in 0..batch_count {
-            let kind = BatchKind::read(r)?;
-            let sites = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "gadget site")?;
-            eyre::ensure!(sites > 0, "gadget batch has no sites");
-            let input_count =
-                checked_count::<SiteInput>(r.read_u64::<LittleEndian>()?, limits, "gadget input")?;
-            let mut input_slots = Vec::with_capacity(input_count);
-            for _ in 0..input_count {
-                let bank = Bank::from_u8(r.read_u8()?)?;
-                eyre::ensure!(bank != Bank::Local, "gadget input bank cannot be Local");
-                let slot = Slot::new(r.read_u32::<LittleEndian>()?);
-                input_slots.push(SiteInput { bank, slot });
-            }
-            let result_requests =
-                read_index_vec::<_, ResultSlot>(r, limits, "gadget result request")?;
-            let result_offsets = read_u32_vec(r, limits, "gadget result offset")?;
-            let target_count = checked_count::<ResultTarget>(
-                r.read_u64::<LittleEndian>()?,
-                limits,
-                "gadget target",
-            )?;
-            let mut result_targets = Vec::with_capacity(target_count);
-            for _ in 0..target_count {
-                let bank = Bank::from_u8(r.read_u8()?)?;
-                eyre::ensure!(bank != Bank::Local, "gadget result bank cannot be Local");
-                let slot = Slot::new(r.read_u32::<LittleEndian>()?);
-                result_targets.push(ResultTarget { bank, slot });
-            }
-            let expected_offsets = sites
-                .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("gadget batch site count overflows"))?;
-            eyre::ensure!(
-                result_offsets.len() == expected_offsets,
-                "gadget batch result_offsets has {} entries, expected sites + 1 = {}",
-                result_offsets.len(),
-                expected_offsets
-            );
-            eyre::ensure!(
-                result_requests.len() == result_targets.len(),
-                "gadget batch result_requests ({}) and result_targets ({}) must have the same \
-                 length - one destination per requested slot",
-                result_requests.len(),
-                result_targets.len()
-            );
-            let result_request_count = u32::try_from(result_requests.len())
-                .map_err(|_| eyre::eyre!("gadget batch has too many result requests"))?;
-            eyre::ensure!(
-                result_offsets.first() == Some(&0)
-                    && result_offsets.last().copied() == Some(result_request_count)
-                    && result_offsets.windows(2).all(|w| w[0] <= w[1]),
-                "gadget batch has invalid CSR result offsets"
-            );
-            batches.push(GadgetBatch {
-                kind,
-                sites,
-                input_slots,
-                result_requests,
-                result_offsets,
-                result_targets,
-            });
-        }
-
-        let witness_count = checked_count::<WitnessSource>(
-            r.read_u64::<LittleEndian>()?,
-            limits,
-            "witness source",
-        )?;
-        let mut witness_sources = Vec::with_capacity(witness_count);
-        for _ in 0..witness_count {
-            let source = match r.read_u8()? {
-                0 => WitnessSource::One,
-                1 => WitnessSource::Input(InputIdx::new(r.read_u32::<LittleEndian>()?)),
-                2 => WitnessSource::Slot {
-                    bank: Bank::from_u8(r.read_u8()?)?,
-                    slot: Slot::new(r.read_u32::<LittleEndian>()?),
-                },
-                3 => WitnessSource::Zero,
-                other => eyre::bail!("unknown WitnessSource tag {other}"),
-            };
-            if let WitnessSource::Slot { bank, .. } = source {
-                eyre::ensure!(bank != Bank::Local, "witness source bank cannot be Local");
-            }
-            witness_sources.push(source);
-        }
+        let batches = read_gadget_batches(r, limits)?;
+        let witness_sources = read_witness_sources(r, limits)?;
 
         let num_inputs = checked_count::<()>(r.read_u64::<LittleEndian>()?, limits, "input")?;
 

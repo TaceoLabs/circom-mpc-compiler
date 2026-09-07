@@ -7,12 +7,12 @@ use ark_bn254::Fr;
 use ark_ff::{One, Zero};
 use circom_mpc_program::{
     Bank, BatchKind, GadgetBatch, GadgetKind, InputValue, InputValues, Instruction, Opcode,
-    Program, Slot, WitnessSource,
+    Program, RoundIdx, Slot, WitnessSource,
 };
 use mpc_core::protocols::rep3::Rep3State;
 use mpc_net::Network;
 
-use crate::driver::{VmDriver, plain::PlainDriver, rep3::Rep3Driver};
+use crate::driver::{IsZeroRevealTrace, VmDriver, plain::PlainDriver, rep3::Rep3Driver};
 
 /// One physical bank (`public`/`shared`), indexed by [`Slot`] instead of a bare `usize` - the one
 /// place a `Slot` is finally cast down to index a `Vec`.
@@ -190,35 +190,32 @@ impl<'p, D: VmDriver> Vm<'p, D> {
     /// precomputation is short, mismatched, or has entries left over once the run finishes, the
     /// driver itself fails, or the program has an unattached `BatchKind::PrecomputedPoseidon2`
     /// batch.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "a single forward walk executing every opcode in the instruction stream; splitting it would not improve clarity"
-    )]
     pub fn run<I: InputValues<D::Share> + ?Sized>(
         mut self,
         inputs: &I,
     ) -> eyre::Result<Witness<D::Share>> {
-        // A plain reference copy, independent of `self` - lets every read below borrow `program`
-        // directly instead of `self.program`, so it never conflicts with the `&mut self` calls
-        // that follow.
-        let program: &'p Program = self.program;
-        let inputs = inputs.as_inputs(program)?;
+        let inputs = inputs.as_inputs(self.program)?;
         eyre::ensure!(
-            inputs.len() == program.num_inputs(),
+            inputs.len() == self.program.num_inputs(),
             "expected {} inputs, got {}",
-            program.num_inputs(),
+            self.program.num_inputs(),
             inputs.len()
         );
+        self.initialize_inputs(&inputs)?;
+        self.execute_instructions()?;
+        self.finish_witness(&inputs)
+    }
 
-        let slots = program.slots();
+    fn initialize_inputs(&mut self, inputs: &[InputValue<D::Share>]) -> eyre::Result<()> {
+        let slots = self.program.slots();
         self.public = SlotBank(vec![Fr::zero(); slots.public as usize]);
         self.shared = SlotBank(vec![D::Share::default(); slots.shared as usize]);
 
-        for (i, c) in program.constants().iter().enumerate() {
+        for (i, c) in self.program.constants().iter().enumerate() {
             self.public.0[i] = *c;
         }
 
-        for binding in program.inputs() {
+        for binding in self.program.inputs() {
             match (binding.bank, &inputs[binding.input_index.index()]) {
                 (Bank::Public, InputValue::Public(v)) => self.public[binding.slot] = *v,
                 (Bank::Shared, InputValue::Secret(v)) => self.shared[binding.slot] = v.clone(),
@@ -228,129 +225,19 @@ impl<'p, D: VmDriver> Vm<'p, D> {
                 ),
             }
         }
+        Ok(())
+    }
 
-        let rounds = program.rounds();
-        let round_operands = program.round_operands();
-        let round_results = program.round_results();
-        let gadget_batches = program.gadget_batches();
-
+    fn execute_instructions(&mut self) -> eyre::Result<()> {
+        // A plain reference copy, independent of `self`, avoids borrowing `self.program` across
+        // calls that mutate the VM's execution state.
+        let program: &'p Program = self.program;
         for instr in program.instructions() {
             match *instr {
-                Instruction::Arith {
-                    op: Opcode::AddPP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.public[dst] = self.public[a] + self.public[b];
-                }
-                Instruction::Arith {
-                    op: Opcode::SubPP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.public[dst] = self.public[a] - self.public[b];
-                }
-                Instruction::Arith {
-                    op: Opcode::MulPP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.public[dst] = self.public[a] * self.public[b];
-                }
-                Instruction::Arith {
-                    op: Opcode::AddSS,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.add_ss(&self.shared[a], &self.shared[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::SubSS,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.sub_ss(&self.shared[a], &self.shared[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::AddSP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.add_sp(&self.shared[a], self.public[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::SubSP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.sub_sp(&self.shared[a], self.public[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::SubPS,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.sub_ps(self.public[a], &self.shared[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::MulSP,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    self.shared[dst] = self.driver.mul_sp(&self.shared[a], self.public[b]);
-                }
-                Instruction::Arith {
-                    op: Opcode::MulLocal,
-                    dst,
-                    a,
-                    b,
-                } => {
-                    // Codegen may recycle these shared slots before the round boundary, so retain
-                    // the values rather than only their indices. The expensive masked product is
-                    // still delayed and vectorized across the complete round.
-                    self.pending_mul_lhs.push(self.shared[a].clone());
-                    self.pending_mul_rhs.push(self.shared[b].clone());
-                    self.pending_mul_dst.push(dst);
-                }
-                Instruction::Arith {
-                    op: Opcode::Reshare | Opcode::Gadget,
-                    ..
-                } => unreachable!("Reshare/Gadget never appear in an Arith instruction"),
-                Instruction::Reshare(round_idx) => {
-                    let entry = rounds[round_idx.index()];
-                    let start = entry.operand_start as usize;
-                    let len = entry.len as usize;
-                    eyre::ensure!(
-                        self.pending_mul_dst.as_slice() == &round_operands[start..start + len],
-                        "MulLocal instructions do not match the following round's operand table"
-                    );
-                    let results = self
-                        .driver
-                        .mul_vec(&self.pending_mul_lhs, &self.pending_mul_rhs)?;
-                    self.pending_mul_lhs.clear();
-                    self.pending_mul_rhs.clear();
-                    self.pending_mul_dst.clear();
-                    eyre::ensure!(
-                        results.len() == len,
-                        "reshare returned {} results, expected {len}",
-                        results.len()
-                    );
-                    let rstart = entry.result_start as usize;
-                    for (k, r) in results.into_iter().enumerate() {
-                        self.shared[round_results[rstart + k]] = r;
-                    }
-                }
+                Instruction::Arith { op, dst, a, b } => self.execute_arithmetic(op, dst, a, b),
+                Instruction::Reshare(round_idx) => self.execute_reshare(round_idx)?,
                 Instruction::Gadget(batch_idx) => {
-                    self.run_batch(&gadget_batches[batch_idx.index()])?;
+                    self.run_batch(&program.gadget_batches()[batch_idx.index()])?;
                 }
             }
         }
@@ -358,11 +245,80 @@ impl<'p, D: VmDriver> Vm<'p, D> {
             self.pending_mul_dst.is_empty(),
             "program ended with MulLocal instructions not followed by Reshare"
         );
+        Ok(())
+    }
 
+    fn execute_arithmetic(&mut self, op: Opcode, dst: Slot, a: Slot, b: Slot) {
+        match op {
+            Opcode::AddPP => self.public[dst] = self.public[a] + self.public[b],
+            Opcode::SubPP => self.public[dst] = self.public[a] - self.public[b],
+            Opcode::MulPP => self.public[dst] = self.public[a] * self.public[b],
+            Opcode::AddSS => {
+                self.shared[dst] = self.driver.add_ss(&self.shared[a], &self.shared[b]);
+            }
+            Opcode::SubSS => {
+                self.shared[dst] = self.driver.sub_ss(&self.shared[a], &self.shared[b]);
+            }
+            Opcode::AddSP => {
+                self.shared[dst] = self.driver.add_sp(&self.shared[a], self.public[b]);
+            }
+            Opcode::SubSP => {
+                self.shared[dst] = self.driver.sub_sp(&self.shared[a], self.public[b]);
+            }
+            Opcode::SubPS => {
+                self.shared[dst] = self.driver.sub_ps(self.public[a], &self.shared[b]);
+            }
+            Opcode::MulSP => {
+                self.shared[dst] = self.driver.mul_sp(&self.shared[a], self.public[b]);
+            }
+            Opcode::MulLocal => {
+                // Codegen may recycle these shared slots before the round boundary, so retain the
+                // values rather than only their indices. The expensive masked product is still
+                // delayed and vectorized across the complete round.
+                self.pending_mul_lhs.push(self.shared[a].clone());
+                self.pending_mul_rhs.push(self.shared[b].clone());
+                self.pending_mul_dst.push(dst);
+            }
+            Opcode::Reshare | Opcode::Gadget => {
+                unreachable!("Reshare/Gadget never appear in an Arith instruction")
+            }
+        }
+    }
+
+    fn execute_reshare(&mut self, round_idx: RoundIdx) -> eyre::Result<()> {
+        let entry = self.program.rounds()[round_idx.index()];
+        let start = entry.operand_start as usize;
+        let len = entry.len as usize;
+        eyre::ensure!(
+            self.pending_mul_dst.as_slice() == &self.program.round_operands()[start..start + len],
+            "MulLocal instructions do not match the following round's operand table"
+        );
+        let results = self
+            .driver
+            .mul_vec(&self.pending_mul_lhs, &self.pending_mul_rhs)?;
+        self.pending_mul_lhs.clear();
+        self.pending_mul_rhs.clear();
+        self.pending_mul_dst.clear();
+        eyre::ensure!(
+            results.len() == len,
+            "reshare returned {} results, expected {len}",
+            results.len()
+        );
+        let result_start = entry.result_start as usize;
+        for (offset, result) in results.into_iter().enumerate() {
+            self.shared[self.program.round_results()[result_start + offset]] = result;
+        }
+        Ok(())
+    }
+
+    fn finish_witness(
+        &mut self,
+        inputs: &[InputValue<D::Share>],
+    ) -> eyre::Result<Witness<D::Share>> {
         // Codegen has already projected circom's flat signal address space into witness order.
         // Build exactly the final witness: no `num_signals`-sized zero-fill and no second clone
         // pass over that temporary array.
-        let witness_sources = program.witness_sources();
+        let witness_sources = self.program.witness_sources();
         let mut witness = Vec::with_capacity(witness_sources.len());
         for source in witness_sources {
             witness.push(match *source {
@@ -397,7 +353,7 @@ impl<'p, D: VmDriver> Vm<'p, D> {
         // doc on `Witness`. `n_pub` comes from the circuit's declared public signals (via
         // `Program::num_public_witness`), never from the MPC domain analysis `input_domains`
         // reflects.
-        let n_pub = program.num_public_witness() as usize;
+        let n_pub = self.program.num_public_witness() as usize;
         eyre::ensure!(
             n_pub <= witness.len(),
             "witness has {} entries but the program declares {n_pub} public witness entries",
@@ -565,7 +521,15 @@ impl<'p, D: VmDriver> Vm<'p, D> {
                 && batch.result_requests.len() == batch.result_targets.len(),
             "malformed fused IsZero/Reveal CSR result table"
         );
-        for (site, (is_zero, inverse, revealed)) in traces.into_iter().enumerate() {
+        for (
+            site,
+            IsZeroRevealTrace {
+                is_zero,
+                inverse,
+                revealed,
+            },
+        ) in traces.into_iter().enumerate()
+        {
             let lo = batch.result_offsets[site] as usize;
             let hi = batch.result_offsets[site + 1] as usize;
             eyre::ensure!(

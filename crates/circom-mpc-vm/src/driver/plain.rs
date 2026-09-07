@@ -4,7 +4,7 @@
 
 use ark_bn254::Fr;
 
-use super::VmDriver;
+use super::{IsZeroRevealTrace, VmDriver};
 use crate::gadgets::{aliascheck, iszero, num2bits, poseidon2};
 
 /// Single-party reference [`VmDriver`]: every share is the plain field element itself.
@@ -74,12 +74,16 @@ impl VmDriver for PlainDriver {
             .collect())
     }
 
-    fn is_zero_reveal_traces(&mut self, inputs: &[Fr]) -> eyre::Result<Vec<(Fr, Fr, Fr)>> {
+    fn is_zero_reveal_traces(&mut self, inputs: &[Fr]) -> eyre::Result<Vec<IsZeroRevealTrace<Fr>>> {
         Ok(inputs
             .iter()
             .map(|&x| {
                 let [is_zero, inverse] = iszero::plain_trace(x);
-                (is_zero, inverse, is_zero)
+                IsZeroRevealTrace {
+                    is_zero,
+                    inverse,
+                    revealed: is_zero,
+                }
             })
             .collect())
     }
