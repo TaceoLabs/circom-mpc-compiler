@@ -7,6 +7,8 @@
 //! that specific curve's scalar field. Decoded with `PrimeField::from_be_bytes_mod_order`, so this
 //! module needs neither `num_bigint` nor `mpc-core`.
 
+use std::sync::OnceLock;
+
 use ark_bn254::Fr;
 use ark_ff::PrimeField;
 
@@ -672,14 +674,33 @@ pub(super) struct RoundConstants {
     pub(super) diag: Vec<Fr>,
 }
 
+/// One width's raw hex tables plus the cache cell `load` fills the first time it's requested.
+type RawTables = (
+    &'static OnceLock<RoundConstants>,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+);
+
 impl RoundConstants {
-    pub(super) fn load(t: usize) -> eyre::Result<Self> {
-        let (full1, partial, full2, diag): (&[&str], &[&str], &[&str], &[&str]) = match t {
-            2 => (RC_FULL1_T2, RC_PARTIAL_T2, RC_FULL2_T2, &[]),
-            3 => (RC_FULL1_T3, RC_PARTIAL_T3, RC_FULL2_T3, &[]),
-            4 => (RC_FULL1_T4, RC_PARTIAL_T4, RC_FULL2_T4, DIAG_T4),
-            8 => (RC_FULL1_T8, RC_PARTIAL_T8, RC_FULL2_T8, DIAG_T8),
-            16 => (RC_FULL1_T16, RC_PARTIAL_T16, RC_FULL2_T16, DIAG_T16),
+    /// Decodes and caches each width's tables the first time it's requested - every later call for
+    /// the same `t` reuses the same `&'static` instance instead of re-parsing ~4*`t+partial_rounds(t)`
+    /// hex literals (each a heap allocation plus a big-integer reduction) on every gadget-batch
+    /// invocation.
+    pub(super) fn load(t: usize) -> eyre::Result<&'static Self> {
+        static T2: OnceLock<RoundConstants> = OnceLock::new();
+        static T3: OnceLock<RoundConstants> = OnceLock::new();
+        static T4: OnceLock<RoundConstants> = OnceLock::new();
+        static T8: OnceLock<RoundConstants> = OnceLock::new();
+        static T16: OnceLock<RoundConstants> = OnceLock::new();
+
+        let (cell, full1, partial, full2, diag): RawTables = match t {
+            2 => (&T2, RC_FULL1_T2, RC_PARTIAL_T2, RC_FULL2_T2, &[]),
+            3 => (&T3, RC_FULL1_T3, RC_PARTIAL_T3, RC_FULL2_T3, &[]),
+            4 => (&T4, RC_FULL1_T4, RC_PARTIAL_T4, RC_FULL2_T4, DIAG_T4),
+            8 => (&T8, RC_FULL1_T8, RC_PARTIAL_T8, RC_FULL2_T8, DIAG_T8),
+            16 => (&T16, RC_FULL1_T16, RC_PARTIAL_T16, RC_FULL2_T16, DIAG_T16),
             other => eyre::bail!(
                 "Poseidon2 width t={other} is not supported - the vendored \
                  circuits/node_modules/@taceo/circom-lib/circuits/poseidon2.circom only defines constants for t in \
@@ -701,12 +722,12 @@ impl RoundConstants {
             partial_rounds(t),
             "wrong number of partial-round constants"
         );
-        Ok(Self {
+        Ok(cell.get_or_init(|| Self {
             full1: decode(full1),
             partial: decode(partial),
             full2: decode(full2),
             diag: decode(diag),
-        })
+        }))
     }
 }
 
