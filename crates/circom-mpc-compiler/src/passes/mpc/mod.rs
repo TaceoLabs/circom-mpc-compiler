@@ -8,14 +8,19 @@ pub(crate) mod gadget_schedule;
 pub(crate) mod level;
 mod mul_split;
 mod round_schedule;
+mod wide_schedule;
 
 use super::PassFn;
 
 /// The lowering pipeline, in order: split every secret multiplication into its local and network
-/// parts, then batch the resulting rounds by multiplicative depth.
+/// parts, batch the resulting rounds by multiplicative depth, then widen independent same-depth
+/// *public* gadget batches the same way - see `wide_schedule`'s module doc for why it must run
+/// last, after `round_schedule` has already established the `Round`/`RoundResult` adjacency it
+/// depends on.
 pub(super) fn pipeline() -> Vec<(&'static str, PassFn)> {
     vec![
         ("mpc::mul_split", mul_split::run),
         ("mpc::round_schedule", round_schedule::run),
+        ("mpc::wide_schedule", wide_schedule::run),
     ]
 }

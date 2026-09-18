@@ -109,7 +109,16 @@ fn plan_plain_batches(graph: &Graph, domains: &[Domain], index: &ScheduleIndex) 
     let stages = level::site_stages(graph, domains);
     let mut plans = Vec::<BatchPlan>::new();
     let mut active = FxHashMap::<(GadgetKind, usize, Domain, bool), usize>::default();
-    for (site_id, site) in sites.iter().enumerate() {
+    // Visit sites in *node* order, not raw `site_id` order. Those normally coincide (a site's id
+    // is assigned in the same pass that pushes its `Op::Gadget` node), so this has never mattered
+    // before - but `wide_schedule` reorders nodes without renumbering `gadget_sites`, and the
+    // admission window below is meaningless unless sites are discovered in the order their nodes
+    // now actually appear: two same-stage sites can only end up in the same window if the loop
+    // reaches them back to back, which raw `site_id` order no longer guarantees once nodes move.
+    let mut order: Vec<usize> = (0..sites.len()).collect();
+    order.sort_by_key(|&site_id| index.site_node[site_id]);
+    for &site_id in &order {
+        let site = &sites[site_id];
         let node = index.site_node[site_id];
         let stage = stages[site_id];
         let domain = domains[node];
