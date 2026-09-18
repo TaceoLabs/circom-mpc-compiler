@@ -646,7 +646,7 @@ fn walk<O: Ops>(
         state.full_round(round_rc, round, round + 1)?;
     }
     for round in 0..pr {
-        state.partial_round(round, rc.partial[round], &rc.diag)?;
+        state.partial_round(round, rc.partial[round], rc.diag)?;
     }
     for round in 0..4 {
         let round_rc = &rc.full2[round * t..(round + 1) * t];
@@ -1415,9 +1415,9 @@ mod tests {
             for c in rc
                 .full1
                 .iter()
-                .chain(&rc.full2)
-                .chain(&rc.partial)
-                .chain(&rc.diag)
+                .chain(rc.full2)
+                .chain(rc.partial)
+                .chain(rc.diag)
             {
                 let hex = format!("{:064x}", Into::<num_bigint::BigUint>::into(*c));
                 assert!(
