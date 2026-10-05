@@ -109,7 +109,11 @@ fn plan_plain_batches(graph: &Graph, domains: &[Domain], index: &ScheduleIndex) 
     let stages = level::site_stages(graph, domains);
     let mut plans = Vec::<BatchPlan>::new();
     let mut active = FxHashMap::<(GadgetKind, usize, Domain, bool), usize>::default();
-    for (site_id, site) in sites.iter().enumerate() {
+    // Node order, not site_id order: wide_schedule reorders nodes without renumbering sites.
+    let mut order: Vec<usize> = (0..sites.len()).collect();
+    order.sort_by_key(|&site_id| index.site_node[site_id]);
+    for &site_id in &order {
+        let site = &sites[site_id];
         let node = index.site_node[site_id];
         let stage = stages[site_id];
         let domain = domains[node];

@@ -3694,6 +3694,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
  "rand 0.8.8",
+ "rayon",
  "taceo-circom-mpc-program",
 ]
 

@@ -458,10 +458,12 @@ fn record_sbox_e<V: Clone>(
 struct WalkState<'ops, 'output, O: Ops> {
     ops: &'ops mut O,
     t: usize,
-    sites: usize,
     layout: Layout,
     current: Vec<Vec<O::V>>,
     outputs: Vec<SiteOutput<'output, O::V>>,
+    // Reused across rounds to avoid per-round allocation.
+    scratch_flat: Vec<O::V>,
+    scratch_sbox_out: Vec<O::V>,
 }
 
 impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
@@ -488,10 +490,11 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
         Self {
             ops,
             t,
-            sites,
             layout,
             current,
             outputs,
+            scratch_flat: Vec::with_capacity(sites * t),
+            scratch_sbox_out: Vec::with_capacity(t),
         }
     }
 
@@ -502,52 +505,59 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
         layout_round: usize,
         state_row: usize,
     ) -> eyre::Result<()> {
-        let mut linear: Vec<Vec<O::V>> = Vec::with_capacity(self.sites);
+        let t = self.t;
+        self.scratch_flat.clear();
         for state in &self.current {
-            linear.push(
+            self.scratch_flat.extend(
                 state
                     .iter()
                     .zip(round_rc)
-                    .map(|(x, &c)| self.ops.add_public(x, c))
-                    .collect(),
+                    .map(|(x, &c)| self.ops.add_public(x, c)),
             );
         }
-        let flat: Vec<O::V> = linear.iter().flatten().cloned().collect();
-        let sboxes = self.ops.sbox_layer(&flat)?;
+        let sboxes = self.ops.sbox_layer(&self.scratch_flat)?;
 
         for (site, state) in self.current.iter_mut().enumerate() {
-            let sbox_traces = &sboxes[site * self.t..(site + 1) * self.t];
-            let sbox_out: Vec<O::V> = sbox_traces.iter().map(|s| s.out.clone()).collect();
-            let base = self.layout.full + layout_round * full_round_signals(self.t);
-            let emm_base = base + 5 * self.t;
-            let out = external_matmul(self.ops, &sbox_out, &mut self.outputs[site], emm_base);
+            let linear_site = &self.scratch_flat[site * t..(site + 1) * t];
+            let sbox_traces = &sboxes[site * t..(site + 1) * t];
+            self.scratch_sbox_out.clear();
+            self.scratch_sbox_out
+                .extend(sbox_traces.iter().map(|s| s.out.clone()));
+            let base = self.layout.full + layout_round * full_round_signals(t);
+            let emm_base = base + 5 * t;
+            let out = external_matmul(
+                self.ops,
+                &self.scratch_sbox_out,
+                &mut self.outputs[site],
+                emm_base,
+            );
 
             // [out][in][RC][linear_layer][sbox] + ExternalMatMulT + Sbox
             self.outputs[site].record_slice(base, &out);
-            self.outputs[site].record_slice(base + self.t, state);
+            self.outputs[site].record_slice(base + t, state);
             for (i, &c) in round_rc.iter().enumerate() {
-                let logical = base + 2 * self.t + i;
+                let logical = base + 2 * t + i;
                 if self.outputs[site].wants(logical) {
                     let value = self.ops.public(c);
                     self.outputs[site].record_owned(logical, value);
                 }
             }
-            self.outputs[site].record_slice(base + 3 * self.t, &linear[site]);
-            self.outputs[site].record_slice(base + 4 * self.t, &sbox_out);
+            self.outputs[site].record_slice(base + 3 * t, linear_site);
+            self.outputs[site].record_slice(base + 4 * t, &self.scratch_sbox_out);
             // Sbox(t)'s own block: [out[t]][in[t]] + t x Sbox_e
-            let sbox_base = emm_base + external_matmul_signals(self.t);
-            self.outputs[site].record_slice(sbox_base, &sbox_out);
-            self.outputs[site].record_slice(sbox_base + self.t, &linear[site]);
+            let sbox_base = emm_base + external_matmul_signals(t);
+            self.outputs[site].record_slice(sbox_base, &self.scratch_sbox_out);
+            self.outputs[site].record_slice(sbox_base + t, linear_site);
             for (k, s) in sbox_traces.iter().enumerate() {
                 record_sbox_e(
                     &mut self.outputs[site],
-                    sbox_base + 2 * self.t + k * SBOX_E_SIGNALS,
-                    &linear[site][k],
+                    sbox_base + 2 * t + k * SBOX_E_SIGNALS,
+                    &linear_site[k],
                     s,
                 );
             }
 
-            self.outputs[site].record_slice(self.layout.states + state_row * self.t, &out);
+            self.outputs[site].record_slice(self.layout.states + state_row * t, &out);
             *state = out;
         }
         Ok(())
@@ -555,22 +565,25 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
 
     // RC and s-box on element 0 only, then the internal matrix.
     fn partial_round(&mut self, round: usize, c: Fr, diag: &[Fr]) -> eyre::Result<()> {
-        let linear: Vec<O::V> = self
-            .current
-            .iter()
-            .map(|state| self.ops.add_public(&state[0], c))
-            .collect();
-        let sboxes = self.ops.sbox_layer(&linear)?;
+        self.scratch_flat.clear();
+        self.scratch_flat.extend(
+            self.current
+                .iter()
+                .map(|state| self.ops.add_public(&state[0], c)),
+        );
+        let sboxes = self.ops.sbox_layer(&self.scratch_flat)?;
+        let linear = &self.scratch_flat;
 
         for (site, state) in self.current.iter_mut().enumerate() {
             let sbox = &sboxes[site];
-            let mut imm_input = vec![sbox.out.clone()];
-            imm_input.extend_from_slice(&state[1..]);
+            self.scratch_sbox_out.clear();
+            self.scratch_sbox_out.push(sbox.out.clone());
+            self.scratch_sbox_out.extend_from_slice(&state[1..]);
             let base = self.layout.partial + round * partial_round_signals(self.t);
             let imm_base = base + 2 * self.t + 3 + SBOX_E_SIGNALS;
             let out = internal_matmul(
                 self.ops,
-                &imm_input,
+                &self.scratch_sbox_out,
                 diag,
                 &mut self.outputs[site],
                 imm_base,
@@ -631,7 +644,7 @@ fn walk<O: Ops>(
         state.full_round(round_rc, round, round + 1)?;
     }
     for round in 0..pr {
-        state.partial_round(round, rc.partial[round], &rc.diag)?;
+        state.partial_round(round, rc.partial[round], rc.diag)?;
     }
     for round in 0..4 {
         let round_rc = &rc.full2[round * t..(round + 1) * t];
@@ -721,11 +734,51 @@ pub(crate) fn plain_trace_requested(
     result_requests: &[u32],
     result_offsets: &[u32],
 ) -> eyre::Result<Vec<Fr>> {
+    use eyre::WrapErr;
+    use rayon::prelude::*;
+
+    // Parallelize whole permutations across sites; per-round fork/join costs more than the work.
+    // The minimum chunk size keeps small batches from splitting into tiny tasks.
+    const MIN_SITES_PER_CHUNK: usize = 4;
+
     let sites = check_width(t, states.len())?;
     let capacity = result_slots(t);
     let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
     let rc = RoundConstants::load(t)?;
-    walk(&mut PlainOps, t, states, &rc, outputs)
+
+    let num_chunks = (sites / MIN_SITES_PER_CHUNK)
+        .max(1)
+        .min(rayon::current_num_threads());
+    if num_chunks <= 1 {
+        return walk(&mut PlainOps, t, states, rc, outputs);
+    }
+
+    let chunk_size = sites.div_ceil(num_chunks);
+    let mut chunks = Vec::with_capacity(num_chunks);
+    let mut remaining_outputs = outputs.into_iter();
+    let mut site_start = 0;
+    while site_start < sites {
+        let site_end = (site_start + chunk_size).min(sites);
+        let chunk_outputs: Vec<_> = remaining_outputs
+            .by_ref()
+            .take(site_end - site_start)
+            .collect();
+        chunks.push((
+            site_start,
+            &states[site_start * t..site_end * t],
+            chunk_outputs,
+        ));
+        site_start = site_end;
+    }
+
+    let results: Vec<Vec<Fr>> = chunks
+        .into_par_iter()
+        .map(|(first_site, chunk_states, chunk_outputs)| {
+            walk(&mut PlainOps, t, chunk_states, rc, chunk_outputs)
+                .wrap_err_with(|| format!("Poseidon2 chunk starting at site {first_site}"))
+        })
+        .collect::<eyre::Result<_>>()?;
+    Ok(results.concat())
 }
 
 /// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
@@ -977,6 +1030,7 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
     /// *full* trace at no extra round cost (mpc-core only ever needed `x^5`).
     fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>> {
         use mpc_core::protocols::rep3::arithmetic;
+        use rayon::prelude::*;
 
         let n = xs.len();
         self.pool.ensure_available(n)?;
@@ -999,41 +1053,50 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
             .map(|(x, r)| arithmetic::sub(*x, *r))
             .collect();
         let y = arithmetic::open_vec(&masked, self.net)?;
+        let id = self.state.id;
 
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let (y, r, r2, r3, r4, r5) = (y[i], r[i], r2[i], r3[i], r4[i], r5[i]);
-            let y2 = y * y;
-            let y3 = y2 * y;
-            let y4 = y3 * y;
-            let y5 = y4 * y;
+        // Every index is an independent local linear combination (see the doc above - the one
+        // network round already happened in `open_vec`), so this is embarrassingly parallel.
+        // `with_min_len` keeps small batches (the common case: `sites * t` is usually a handful of
+        // elements) on the calling thread instead of paying rayon's dispatch overhead, matching
+        // `mpc-core`'s own `local_mul_vec` threshold.
+        let out: Vec<SboxTrace<Self::V>> = (0..n)
+            .into_par_iter()
+            .with_min_len(1024)
+            .map(|i| {
+                let (y, r, r2, r3, r4, r5) = (y[i], r[i], r2[i], r3[i], r4[i], r5[i]);
+                let y2 = y * y;
+                let y3 = y2 * y;
+                let y4 = y3 * y;
+                let y5 = y4 * y;
 
-            // x^2 = y^2 + 2yr + r2
-            let mut square = arithmetic::mul_public(r, y.double());
-            square = arithmetic::add(square, r2);
-            square = arithmetic::add_public(square, y2, self.state.id);
+                // x^2 = y^2 + 2yr + r2
+                let mut square = arithmetic::mul_public(r, y.double());
+                square = arithmetic::add(square, r2);
+                square = arithmetic::add_public(square, y2, id);
 
-            // x^4 = y^4 + 4y^3 r + 6y^2 r2 + 4y r3 + r4
-            let mut pow4 = arithmetic::mul_public(r, y3 * Fr::from(4u64));
-            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, y2 * Fr::from(6u64)));
-            pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, y * Fr::from(4u64)));
-            pow4 = arithmetic::add(pow4, r4);
-            pow4 = arithmetic::add_public(pow4, y4, self.state.id);
+                // x^4 = y^4 + 4y^3 r + 6y^2 r2 + 4y r3 + r4
+                let mut pow4 = arithmetic::mul_public(r, y3 * Fr::from(4u64));
+                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, y2 * Fr::from(6u64)));
+                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, y * Fr::from(4u64)));
+                pow4 = arithmetic::add(pow4, r4);
+                pow4 = arithmetic::add_public(pow4, y4, id);
 
-            // x^5 = y^5 + 5y^4 r + 10y^3 r2 + 10y^2 r3 + 5y r4 + r5
-            let mut fifth = arithmetic::mul_public(r, y4 * Fr::from(5u64));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, y3 * Fr::from(10u64)));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, y2 * Fr::from(10u64)));
-            fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, y * Fr::from(5u64)));
-            fifth = arithmetic::add(fifth, r5);
-            fifth = arithmetic::add_public(fifth, y5, self.state.id);
+                // x^5 = y^5 + 5y^4 r + 10y^3 r2 + 10y^2 r3 + 5y r4 + r5
+                let mut fifth = arithmetic::mul_public(r, y4 * Fr::from(5u64));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, y3 * Fr::from(10u64)));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, y2 * Fr::from(10u64)));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, y * Fr::from(5u64)));
+                fifth = arithmetic::add(fifth, r5);
+                fifth = arithmetic::add_public(fifth, y5, id);
 
-            out.push(SboxTrace {
-                square,
-                pow4,
-                out: fifth,
-            });
-        }
+                SboxTrace {
+                    square,
+                    pow4,
+                    out: fifth,
+                }
+            })
+            .collect();
         Ok(out)
     }
 }
@@ -1062,7 +1125,7 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
         state: rep3_state,
         pool: preprocessing,
     };
-    let out = walk(&mut ops, t, states, &rc, outputs)?;
+    let out = walk(&mut ops, t, states, rc, outputs)?;
     eyre::ensure!(
         ops.pool.consumed - consumed_before == required,
         "Poseidon2(t={t}) consumed {} masks, expected {required}",
@@ -1390,9 +1453,9 @@ mod tests {
             for c in rc
                 .full1
                 .iter()
-                .chain(&rc.full2)
-                .chain(&rc.partial)
-                .chain(&rc.diag)
+                .chain(rc.full2)
+                .chain(rc.partial)
+                .chain(rc.diag)
             {
                 let hex = format!("{:064x}", Into::<num_bigint::BigUint>::into(*c));
                 assert!(

@@ -28,20 +28,10 @@
 use super::domain::Domain;
 use crate::ir::{Graph, Op};
 
-/// The network level of every value in `graph`, indexed by [`crate::ir::ValueId`]. `domains` is
-/// the graph's [`super::domain::compute_domains`] result.
-///
-/// Relies only on the graph's topological order: every node's inputs have
-/// smaller indices, so one forward pass suffices. Every rule is `max(inputs)` or `max(inputs) + 1`,
-/// so the result is non-decreasing along every edge. `round_schedule` preserves source order within
-/// a level, keeping same-level public gadget dependencies topological.
-pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
+/// Shared forward pass for [`network_levels`] and [`full_levels`]. With `Some(domains)` a public
+/// gadget result stays at its producer's level; with `None` every gadget result advances one level.
+fn levels_with(graph: &Graph, domains: Option<&[Domain]>) -> Vec<usize> {
     let nodes = graph.nodes();
-    debug_assert_eq!(
-        nodes.len(),
-        domains.len(),
-        "domains must have one entry per node"
-    );
     let mut level = vec![0usize; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let max_input = || {
@@ -61,30 +51,57 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
                 max_input()
             }
             Op::RoundResult(_) => level[node.inputs[0].index()] + 1,
-            // A public gadget is ordinary deterministic local work. Its result must remain after
-            // its producer in graph order, but it must not advance the communication axis or split
-            // otherwise batchable shared work. Shared gadgets remain real network events.
-            //
-            // Keyed on the *producing* `Op::Gadget` node's own domain (`domains[gadget_idx]`),
-            // not the result's own (`domains[i]`). For every kind but `Reveal` the two coincide -
-            // `passes::mpc::domain::compute_domains` copies a site's domain straight onto its
-            // results - so this is unobservable there. `Reveal` is the one kind whose *result*
-            // domain is unconditionally `Public` (that is its entire purpose) while its *site* can
-            // still genuinely be `Shared` - and a genuine open is a real network event that must
-            // still charge a level, exactly as if the result stayed `Shared`.
             Op::GadgetResult(_) => {
                 let gadget_idx = node.inputs[0].index();
-                match domains[gadget_idx] {
-                    Domain::Public => level[gadget_idx],
-                    // `Local` is an invalid lowered graph, rejected later with a proper codegen
-                    // error; charging it the same level as `Shared` keeps this analysis total so
-                    // diagnostics never turn that rejection into a panic.
-                    Domain::Shared | Domain::Local => level[gadget_idx] + 1,
+                match domains {
+                    // A public gadget is ordinary deterministic local work. Its result must
+                    // remain after its producer in graph order, but it must not advance the
+                    // communication axis or split otherwise batchable shared work. Shared gadgets
+                    // remain real network events.
+                    //
+                    // Keyed on the *producing* `Op::Gadget` node's own domain
+                    // (`domains[gadget_idx]`), not the result's own (`domains[i]`). For every kind
+                    // but `Reveal` the two coincide - `passes::mpc::domain::compute_domains`
+                    // copies a site's domain straight onto its results - so this is unobservable
+                    // there. `Reveal` is the one kind whose *result* domain is unconditionally
+                    // `Public` (that is its entire purpose) while its *site* can still genuinely
+                    // be `Shared` - and a genuine open is a real network event that must still
+                    // charge a level, exactly as if the result stayed `Shared`.
+                    Some(domains) => match domains[gadget_idx] {
+                        Domain::Public => level[gadget_idx],
+                        // `Local` is an invalid lowered graph, rejected later with a proper
+                        // codegen error; charging it the same level as `Shared` keeps this
+                        // analysis total so diagnostics never turn that rejection into a panic.
+                        Domain::Shared | Domain::Local => level[gadget_idx] + 1,
+                    },
+                    None => level[gadget_idx] + 1,
                 }
             }
         };
     }
     level
+}
+
+/// The network level of every value in `graph`, indexed by [`crate::ir::ValueId`]. `domains` is
+/// the graph's [`super::domain::compute_domains`] result.
+///
+/// Relies only on the graph's topological order: every node's inputs have
+/// smaller indices, so one forward pass suffices. Every rule is `max(inputs)` or `max(inputs) + 1`,
+/// so the result is non-decreasing along every edge. `round_schedule` preserves source order within
+/// a level, keeping same-level public gadget dependencies topological.
+pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
+    debug_assert_eq!(
+        graph.nodes().len(),
+        domains.len(),
+        "domains must have one entry per node"
+    );
+    levels_with(graph, Some(domains))
+}
+
+/// Like [`network_levels`], but every `GadgetResult` advances the level, public or not. Used by
+/// [`super::wide_schedule`] to tell the depth of public chains apart.
+pub(crate) fn full_levels(graph: &Graph) -> Vec<usize> {
+    levels_with(graph, None)
 }
 
 /// The **stage** of every gadget site, indexed by [`crate::ir::GadgetId`] - the level of
@@ -241,6 +258,59 @@ mod tests {
             super::super::gadget_schedule::ScheduledBatch::Gadget(plan)
                 if plan.domain == Domain::Shared && plan.sites.len() == 2
         )));
+    }
+
+    /// `full_levels` climbs through an all-public chain that `network_levels` keeps at zero.
+    #[test]
+    fn full_levels_climbs_through_an_all_public_chain() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0: public
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(1)]), // 2
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 3
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
+        ];
+        let graph = graph_of(
+            nodes,
+            ValueId::new(4),
+            vec![site(GadgetKind::IsZero), site(GadgetKind::IsZero)],
+        );
+        assert_eq!(
+            network_levels(&graph, &compute_domains(&graph)),
+            vec![0, 0, 0, 0, 0]
+        );
+        assert_eq!(full_levels(&graph), vec![0, 0, 1, 1, 2]);
+    }
+
+    /// Independent public chains of equal length agree on `full_levels` at corresponding steps.
+    #[test]
+    fn full_levels_agree_across_independent_public_chains_of_equal_length() {
+        let nodes = vec![
+            Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0: chain A's leaf, public
+            Node::new(Op::Constant(Fr::from(1u64)), vec![]), // 1: chain B's leaf, public
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 2: A level 1
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(2)]), // 3
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(1)]), // 4: B level 1
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(4)]), // 5
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(3)]), // 6: A level 2
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Gadget(GadgetId::new(3)), vec![ValueId::new(5)]), // 8: B level 2
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
+        ];
+        let graph = graph_of(
+            nodes,
+            ValueId::new(9),
+            vec![
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
+                site(GadgetKind::IsZero),
+            ],
+        );
+        let full = full_levels(&graph);
+        assert_eq!(full[3], full[5]);
+        assert_eq!(full[7], full[9]);
+        assert!(full[3] < full[7]);
     }
 
     /// A round costs a level exactly as a batch service does, and linear ops cost nothing.

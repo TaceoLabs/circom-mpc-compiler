@@ -28,3 +28,6 @@ target/
 
 # circom dependencies (@taceo/circom-lib, circomlib), pulled via `pnpm -C circuits install`
 /circuits/node_modules
+
+# Local git worktrees used for isolated experimental work
+/.worktrees
