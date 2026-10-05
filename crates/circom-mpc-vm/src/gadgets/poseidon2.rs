@@ -776,7 +776,10 @@ pub(crate) fn plain_trace_requested(
     let mut site_start = 0;
     while site_start < sites {
         let site_end = (site_start + chunk_size).min(sites);
-        let chunk_outputs: Vec<_> = remaining_outputs.by_ref().take(site_end - site_start).collect();
+        let chunk_outputs: Vec<_> = remaining_outputs
+            .by_ref()
+            .take(site_end - site_start)
+            .collect();
         chunks.push((&states[site_start * t..site_end * t], chunk_outputs));
         site_start = site_end;
     }
