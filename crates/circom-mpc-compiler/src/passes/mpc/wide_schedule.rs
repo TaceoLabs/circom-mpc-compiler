@@ -14,7 +14,7 @@
 //! ends up in its own singleton batch instead of joining its counterparts in every *other*
 //! independent chain at the same depth.
 //!
-//! This pass reorders the graph by [`level::full_levels`] - the same shape of metric as
+//! This pass reorders the graph by [`full_levels`] - the same shape of metric as
 //! `network_levels`, but one that does climb through public `GadgetResult`s - so that independent
 //! same-depth public sites (and everything else at that depth) become adjacent in node order,
 //! exactly the arrangement `gadget_schedule.rs` already needs to merge them. It changes no
