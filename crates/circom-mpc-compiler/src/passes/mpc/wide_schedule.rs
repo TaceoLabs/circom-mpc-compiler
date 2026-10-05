@@ -1,39 +1,16 @@
-//! Widens independent same-depth **public** gadget batches that `gadget_schedule.rs` would
-//! otherwise see one at a time.
+//! Reorders the graph by `(network_level, full_level)` so independent same-depth public gadget
+//! sites become adjacent and `gadget_schedule` merges them into one batch. `network_levels` keeps
+//! public chains at one level, so two independent public chains are otherwise indistinguishable
+//! from one long chain.
 //!
-//! `round_schedule.rs` already merges independent *shared* computations at the same
-//! `network_levels` depth into one round (see its `independent_products_at_same_depth_merge`
-//! test) - two unrelated secret Merkle-path hashes at the same tree level already end up
-//! batched together today. Public chains get no such treatment: `network_levels` deliberately
-//! keeps every public `GadgetResult` at its producer's level (see `level.rs`'s module doc), so an
-//! entire public chain - e.g. a 13-level Merkle hash whose leaf has already been revealed - sits
-//! at level 0 from top to bottom. Two independent public chains are therefore indistinguishable,
-//! by that metric, from ten levels of one single chain, and `gadget_schedule.rs`'s
-//! `append_to`/deadline window (correctly) refuses to merge a site with the very next site in
-//! *source* order once that next site turns out to be the chain's own next level - so every site
-//! ends up in its own singleton batch instead of joining its counterparts in every *other*
-//! independent chain at the same depth.
-//!
-//! This pass reorders the graph by [`full_levels`] - the same shape of metric as
-//! `network_levels`, but one that does climb through public `GadgetResult`s - so that independent
-//! same-depth public sites (and everything else at that depth) become adjacent in node order,
-//! exactly the arrangement `gadget_schedule.rs` already needs to merge them. It changes no
-//! scheduling logic there or in codegen: once nodes are in the right order, the existing
-//! `(kind, stage, domain, precomputed)` batch key and admission window do the rest, the same way
-//! they already do for the shared case.
-//!
-//! Run after `round_schedule`, not before: `round_schedule` is the pass that establishes the
-//! final invariant codegen's `emit_round` relies on (a `Round` node immediately followed by
-//! exactly its own `RoundResult(0..len)` block) - reordering by a *different* depth metric would
-//! break that adjacency unless every such block is moved as one atomic unit, which is exactly what
-//! this pass does, but only because it can rely on that invariant already holding when it starts.
-//! (`Op::Gadget`/`Op::GadgetResult` carry no equivalent contiguity contract - `gadget_schedule.rs`
-//! already tolerates them landing anywhere valid, which is what makes reordering them the point of
-//! this pass instead of a hazard.)
+//! Runs after `round_schedule`: each `Round` and its `RoundResult` block move as one unit,
+//! preserving the adjacency codegen relies on. Sorting on the pair keeps every stage-s shared site
+//! ahead of every stage-s+1 node, so shared batches never split.
 
+use std::ops::Range;
+
+use super::{domain::compute_domains, level};
 use crate::ir::{Graph, Node, Op, ValueId};
-
-use super::level::full_levels;
 
 pub(crate) fn run(graph: &mut Graph) -> bool {
     let nodes = graph.nodes();
@@ -41,18 +18,11 @@ pub(crate) fn run(graph: &mut Graph) -> bool {
         return false;
     }
 
-    let depth = full_levels(graph);
-    let max_depth = depth.iter().copied().max().unwrap_or(0);
+    let net = level::network_levels(graph, &compute_domains(graph));
+    let full = level::full_levels(graph);
 
-    // One "unit" per (start, len): len 1 for an ordinary node, or `1 + slots` for a `Round` and
-    // its immediately-following `RoundResult(0..slots)` block, moved together so codegen's
-    // adjacency contract survives the reorder. Bucketed by the depth of the unit's first node
-    // (for a `Round` group, the `Round` node's own depth - `RoundResult`s are never bucketed on
-    // their own, so they cannot end up separated from it).
-    let mut units_by_depth: Vec<Vec<(usize, usize)>> =
-        (0..=max_depth).map(|_| Vec::new()).collect();
-    let mut already_depth_sorted = true;
-    let mut prev_depth = 0;
+    // A `Round` and its `RoundResult` block form one unit.
+    let mut units: Vec<Range<usize>> = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
         let len = match &nodes[i].op {
@@ -64,47 +34,36 @@ pub(crate) fn run(graph: &mut Graph) -> bool {
                             nodes[i + 1 + k].op,
                             Op::RoundResult(slot) if slot as usize == k
                         )),
-                    "wide_schedule: Round at {i} not immediately followed by its own \
-                     RoundResult(0..{slots}) block - this pass must run after round_schedule"
+                    "wide_schedule: Round at {i} not followed by its RoundResult block"
                 );
                 1 + slots
             }
-            Op::RoundResult(_) => {
-                unreachable!("consumed as part of the RoundResult block its own Round starts")
-            }
+            Op::RoundResult(_) => unreachable!("consumed with its Round"),
             _ => 1,
         };
-        let unit_depth = depth[i];
-        if unit_depth < prev_depth {
-            already_depth_sorted = false;
-        }
-        prev_depth = unit_depth;
-        units_by_depth[unit_depth].push((i, len));
+        units.push(i..i + len);
         i += len;
     }
 
-    if already_depth_sorted {
+    let key = |unit: &Range<usize>| (net[unit.start], full[unit.start]);
+    if units.is_sorted_by_key(key) {
         return false;
     }
+    units.sort_by_key(key);
 
     let old_len = nodes.len();
     let mut remap: Vec<Option<ValueId>> = vec![None; old_len];
     let mut new_nodes: Vec<Node> = Vec::with_capacity(old_len);
 
-    for bucket in &units_by_depth {
-        for &(start, len) in bucket {
-            for offset in 0..len {
-                let idx = start + offset;
-                let node = &nodes[idx];
-                let remapped_inputs = node
-                    .inputs
-                    .iter()
-                    .map(|v| remap[v.index()].expect("wide_schedule: input not yet placed"))
-                    .collect();
-                remap[idx] = Some(ValueId::new(new_nodes.len()));
-                new_nodes.push(Node::new(node.op.clone(), remapped_inputs));
-            }
-        }
+    for idx in units.into_iter().flatten() {
+        let node = &nodes[idx];
+        let remapped_inputs = node
+            .inputs
+            .iter()
+            .map(|v| remap[v.index()].expect("wide_schedule: input not yet placed"))
+            .collect();
+        remap[idx] = Some(ValueId::new(new_nodes.len()));
+        new_nodes.push(Node::new(node.op.clone(), remapped_inputs));
     }
 
     graph.rebuild_nodes(new_nodes, &remap);
@@ -116,8 +75,14 @@ mod tests {
     use ark_bn254::Fr;
 
     use super::*;
-    use crate::ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, RoundId, SignalIdx};
-    use crate::passes::mpc::{domain::compute_domains, gadget_schedule, level, round_schedule};
+    use crate::{
+        ir::{GadgetId, GadgetKind, GadgetSite, GraphParts, RoundId, SignalIdx},
+        passes::mpc::{
+            domain::{Domain, compute_domains},
+            gadget_schedule::{self, ScheduledBatch},
+            round_schedule,
+        },
+    };
 
     fn site(kind: GadgetKind) -> GadgetSite {
         GadgetSite {
@@ -138,14 +103,20 @@ mod tests {
         })
     }
 
-    /// Two independent public chains (the shape a revealed-leaf Merkle hash has), each emitted
-    /// *fully depth-first* before the next starts - exactly how circom emits N structurally
-    /// identical component instances, and exactly the shape that defeats `gadget_schedule.rs`'s
-    /// admission window today: chain A's own level-2 site (its result's only reader) appears
-    /// immediately after A's level-1 site, in source order, long before chain B's level-1 site
-    /// is even reached, so A's batch closes before it can ever meet B's.
+    fn batches(graph: &Graph, domain: Domain) -> Vec<usize> {
+        let domains = compute_domains(graph);
+        gadget_schedule::plan_gadget_batches(graph, &domains)
+            .iter()
+            .filter_map(|plan| match plan {
+                ScheduledBatch::Gadget(plan) if plan.domain == domain => Some(plan.sites.len()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Two independent public chains emitted depth-first merge level by level.
     #[test]
-    fn widens_independent_public_chains_that_gadget_schedule_could_not_merge_before() {
+    fn widens_independent_public_chains() {
         let nodes = vec![
             Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 0: chain A leaf
             Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 1: A level 1
@@ -159,55 +130,14 @@ mod tests {
             Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
             Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(9)]), // 10
         ];
-        let sites = vec![
-            site(GadgetKind::IsZero),
-            site(GadgetKind::IsZero),
-            site(GadgetKind::IsZero),
-            site(GadgetKind::IsZero),
-        ];
+        let sites = vec![site(GadgetKind::IsZero); 4];
         let mut graph = graph_of(nodes, ValueId::new(10), sites);
 
-        // Before: `network_levels` (what `gadget_schedule.rs` actually keys on) puts this entire
-        // all-public shape at stage 0, so gadget_schedule has no notion of "layer" here at all -
-        // it merges whatever fits its anchor/deadline window regardless of which chain or level a
-        // site belongs to. That happens to fold A's level-2 site together with B's level-1 site
-        // (a valid merge - they truly are independent - but not an organized-by-layer one), for 3
-        // batches rather than 4 clean singletons. The point of this pass is to replace that
-        // incidental grouping with a deliberate one.
-        let domains_before = compute_domains(&graph);
-        let plans_before = gadget_schedule::plan_gadget_batches(&graph, &domains_before);
-        assert_eq!(
-            plans_before.len(),
-            3,
-            "gadget_schedule already merges by happenstance here"
-        );
-
-        let changed = run(&mut graph);
-        assert!(changed);
-
-        let domains_after = compute_domains(&graph);
-        let plans_after = gadget_schedule::plan_gadget_batches(&graph, &domains_after);
-        assert_eq!(
-            plans_after.len(),
-            2,
-            "level 1 (A+B) and level 2 (A+B) should now each be one two-site batch, cleanly \
-             separated by layer instead of merged by happenstance"
-        );
-        for plan in &plans_after {
-            let gadget_schedule::ScheduledBatch::Gadget(plan) = plan else {
-                panic!("expected an ordinary Gadget batch");
-            };
-            assert_eq!(
-                plan.sites.len(),
-                2,
-                "each widened batch should hold both chains' sites"
-            );
-        }
+        assert_eq!(batches(&graph, Domain::Public).len(), 3);
+        assert!(run(&mut graph));
+        assert_eq!(batches(&graph, Domain::Public), vec![2, 2]);
     }
 
-    /// A single public chain (no independent sibling) must stay exactly as sequential as it always
-    /// was - `full_levels` strictly increases along it, so there is nothing to widen, and the pass
-    /// should report no change.
     #[test]
     fn leaves_a_lone_public_chain_untouched() {
         let nodes = vec![
@@ -222,20 +152,44 @@ mod tests {
         assert!(!run(&mut graph));
     }
 
-    /// A `Round` (post `round_schedule`) must move as one atomic block with its `RoundResult`s -
-    /// this is the hazard the module doc calls out. Shape: two secret products at depth 0 (merged
-    /// into one round by `round_schedule`), each product's local part interleaved with an
-    /// unrelated *public* chain long enough to force `full_levels` to place the round's own depth
-    /// below some of the public chain's later levels, so this pass must actually move the round
-    /// forward, not just leave it where `round_schedule` put it.
+    /// Sorting by `full_levels` alone would move X's reader ahead of Y (stage 0, full depth 2)
+    /// and split the shared batch.
+    #[test]
+    fn keeps_same_stage_shared_sites_in_one_batch() {
+        let nodes = vec![
+            Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: secret a
+            Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: secret b
+            Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 2: public c
+            Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(0)]), // 3: X
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(3)]), // 4
+            Node::new(Op::Add, vec![ValueId::new(4), ValueId::new(4)]), // 5: X's reader
+            Node::new(Op::Gadget(GadgetId::new(1)), vec![ValueId::new(2)]), // 6: P1
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(6)]), // 7
+            Node::new(Op::Gadget(GadgetId::new(2)), vec![ValueId::new(7)]), // 8: P2
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(8)]), // 9
+            Node::new(Op::Add, vec![ValueId::new(1), ValueId::new(9)]), // 10
+            Node::new(Op::Gadget(GadgetId::new(3)), vec![ValueId::new(10)]), // 11: Y
+            Node::new(Op::GadgetResult(0), vec![ValueId::new(11)]), // 12
+            Node::new(Op::Add, vec![ValueId::new(5), ValueId::new(12)]), // 13
+        ];
+        let sites = vec![site(GadgetKind::IsZero); 4];
+        let mut graph = graph_of(nodes, ValueId::new(13), sites);
+        round_schedule::run(&mut graph);
+
+        assert_eq!(batches(&graph, Domain::Shared), vec![2]);
+        run(&mut graph);
+        assert_eq!(batches(&graph, Domain::Shared), vec![2]);
+    }
+
+    /// A `Round` moves together with its `RoundResult`s.
     #[test]
     fn moves_a_round_and_its_results_as_one_block() {
         let nodes = vec![
             Node::new(Op::Input(SignalIdx::new(1)), vec![]), // 0: secret a
             Node::new(Op::Input(SignalIdx::new(2)), vec![]), // 1: secret b
-            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]), // 2: a*b local part
+            Node::new(Op::MulLocal, vec![ValueId::new(0), ValueId::new(1)]), // 2
             Node::new(Op::Round(RoundId::new(0)), vec![ValueId::new(2)]), // 3
-            Node::new(Op::RoundResult(0), vec![ValueId::new(3)]), // 4: a*b shared
+            Node::new(Op::RoundResult(0), vec![ValueId::new(3)]), // 4
             Node::new(Op::Constant(Fr::from(0u64)), vec![]), // 5: public chain leaf
             Node::new(Op::Gadget(GadgetId::new(0)), vec![ValueId::new(5)]), // 6
             Node::new(Op::GadgetResult(0), vec![ValueId::new(6)]), // 7
@@ -245,33 +199,14 @@ mod tests {
         ];
         let sites = vec![site(GadgetKind::IsZero), site(GadgetKind::IsZero)];
         let mut graph = graph_of(nodes, ValueId::new(10), sites);
-        // Normalizes the graph into "post round_schedule" form (its own `Round`/`RoundResult`
-        // adjacency contract) - this pass must run after it regardless of whether round_schedule
-        // itself reports a change, which it always does whenever any round exists at all.
         round_schedule::run(&mut graph);
-
-        // The round's own inputs are raw `Input` nodes (depth 0), well below the public chain's
-        // second level - so this pass's bucketing genuinely moves the round relative to the
-        // public chain's tail, not a no-op that happens to leave it in place.
-        let round_before = graph
-            .nodes()
-            .iter()
-            .position(|n| matches!(n.op, Op::Round(_)))
-            .expect("a Round node must exist before reordering");
-        let full = level::full_levels(&graph);
-        let last_depth = *full.last().expect("graph has at least one node");
-        assert!(full[round_before] < last_depth);
-
         run(&mut graph);
 
-        let moved_round_idx = graph
+        let round = graph
             .nodes()
             .iter()
             .position(|n| matches!(n.op, Op::Round(_)))
-            .expect("a Round node must still exist");
-        assert!(
-            matches!(graph.nodes()[moved_round_idx + 1].op, Op::RoundResult(0)),
-            "Round must still be immediately followed by its RoundResult(0) after reordering"
-        );
+            .expect("Round must survive reordering");
+        assert!(matches!(graph.nodes()[round + 1].op, Op::RoundResult(0)));
     }
 }

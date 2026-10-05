@@ -28,10 +28,8 @@
 use super::domain::Domain;
 use crate::ir::{Graph, Op};
 
-/// Shared skeleton for [`network_levels`] and [`full_levels`]: both are one forward pass where
-/// every rule is `max(inputs)` or `max(inputs) + 1`, and differ only in how much a `GadgetResult`
-/// costs. `domains` selects that difference: `Some` exempts a `Domain::Public` producer from
-/// crossing a level ([`network_levels`]' rule), `None` always charges one ([`full_levels`]' rule).
+/// Shared forward pass for [`network_levels`] and [`full_levels`]. With `Some(domains)` a public
+/// gadget result stays at its producer's level; with `None` every gadget result advances one level.
 fn levels_with(graph: &Graph, domains: Option<&[Domain]>) -> Vec<usize> {
     let nodes = graph.nodes();
     let mut level = vec![0usize; nodes.len()];
@@ -100,17 +98,8 @@ pub(crate) fn network_levels(graph: &Graph, domains: &[Domain]) -> Vec<usize> {
     levels_with(graph, Some(domains))
 }
 
-/// Like [`network_levels`], but does not exempt `Domain::Public` gadget results from crossing a
-/// level - every `GadgetResult` advances the counter, regardless of its producing site's domain.
-///
-/// `network_levels`' Public exemption is deliberate (see the module doc) and stays exactly as is
-/// for round scheduling. But it means two independent same-shape *public* gadget chains - e.g. two
-/// unrelated Merkle-path hashes - both sit at level 0 for their entire length, since public work
-/// never advances that axis. That makes `network_levels` useless for telling "these two public
-/// sites are at the same dependency depth" apart from "these two public sites are ten levels
-/// apart in the same chain" - a distinction [`super::wide_schedule`] needs to find independent
-/// same-depth public work worth widening into one batch, without touching the round-scheduling
-/// metric everything else already relies on.
+/// Like [`network_levels`], but every `GadgetResult` advances the level, public or not. Used by
+/// [`super::wide_schedule`] to tell the depth of public chains apart.
 pub(crate) fn full_levels(graph: &Graph) -> Vec<usize> {
     levels_with(graph, None)
 }
@@ -271,9 +260,7 @@ mod tests {
         )));
     }
 
-    /// `full_levels` climbs one per `GadgetResult` even when every site along the chain is
-    /// public - the exact case `network_levels` collapses to all-zero (see
-    /// `chained_sites_with_no_multiplication_get_distinct_stages`, which uses this same shape).
+    /// `full_levels` climbs through an all-public chain that `network_levels` keeps at zero.
     #[test]
     fn full_levels_climbs_through_an_all_public_chain() {
         let nodes = vec![
@@ -288,8 +275,6 @@ mod tests {
             ValueId::new(4),
             vec![site(GadgetKind::IsZero), site(GadgetKind::IsZero)],
         );
-        // Every site here is public (no `Shared` input anywhere), so `network_levels` puts
-        // everything at 0 - the point of this test is that `full_levels` does not.
         assert_eq!(
             network_levels(&graph, &compute_domains(&graph)),
             vec![0, 0, 0, 0, 0]
@@ -297,10 +282,7 @@ mod tests {
         assert_eq!(full_levels(&graph), vec![0, 0, 1, 1, 2]);
     }
 
-    /// Two independent public chains of the same length reach the same `full_levels` depth at
-    /// their corresponding step, mirroring `independent_products_at_same_depth_merge`
-    /// (`round_schedule.rs`) for the public case: that is exactly the signal `wide_schedule` needs
-    /// to recognize them as batchable together.
+    /// Independent public chains of equal length agree on `full_levels` at corresponding steps.
     #[test]
     fn full_levels_agree_across_independent_public_chains_of_equal_length() {
         let nodes = vec![
@@ -326,9 +308,6 @@ mod tests {
             ],
         );
         let full = full_levels(&graph);
-        // A's level-1 result (node 3) and B's level-1 result (node 5) agree; so do A's level-2
-        // (node 7) and B's level-2 (node 9) - despite chain A and chain B being interleaved
-        // one-node-apart in source order, not adjacent.
         assert_eq!(full[3], full[5]);
         assert_eq!(full[7], full[9]);
         assert!(full[3] < full[7]);

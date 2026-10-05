@@ -139,10 +139,6 @@ impl Ops for PlainOps {
         *a * c
     }
     fn sbox_layer(&mut self, xs: &[Fr]) -> eyre::Result<Vec<SboxTrace<Fr>>> {
-        // Measured, not assumed: rayon here is a net loss even at `wide_schedule`'s widest
-        // batches (up to ~500 elements) - each element is only 3 cheap field multiplications, so
-        // fork/join overhead dominates before there's enough work to amortize it. Left
-        // sequential; see the perf investigation for the A/B numbers.
         Ok(xs
             .iter()
             .map(|&x| {
@@ -465,9 +461,7 @@ struct WalkState<'ops, 'output, O: Ops> {
     layout: Layout,
     current: Vec<Vec<O::V>>,
     outputs: Vec<SiteOutput<'output, O::V>>,
-    // Reused across every round instead of freshly heap-allocated: cleared and refilled in place,
-    // so a `t`/`sites`-sized permutation only ever allocates these once (in `new`) rather than once
-    // per round per batch.
+    // Reused across rounds to avoid per-round allocation.
     scratch_flat: Vec<O::V>,
     scratch_sbox_out: Vec<O::V>,
 }
@@ -740,22 +734,11 @@ pub(crate) fn plain_trace_requested(
     result_requests: &[u32],
     result_offsets: &[u32],
 ) -> eyre::Result<Vec<Fr>> {
+    use eyre::WrapErr;
     use rayon::prelude::*;
 
-    // Splitting *within* one round (parallelizing `Ops::sbox_layer`'s per-element loop) was
-    // measured to be a net loss here: each round's work is too small (a few hundred field
-    // multiplications) to be worth a fork/join, and a `t`-wide batch pays that cost once per
-    // round - 64 times per permutation. Plain sites have no network dependency between them at
-    // all, though (unlike rep3, which must keep every site in lock-step for the masked-open
-    // protocol), so instead this splits *whole permutations* across sites: each chunk runs every
-    // round of its own sites' permutation sequentially, start to finish, and the only
-    // synchronization is one join per batch instead of one per round - the same total field
-    // arithmetic, ~64x fewer synchronization points.
-    //
-    // Capping chunk count by `sites / MIN_SITES_PER_CHUNK` (not just by thread count) matters in
-    // practice: splitting a merely-dozens-of-sites batch into as many chunks as there are threads
-    // still measurably regresses versus fewer, larger chunks - each chunk's fork/join is cheap,
-    // but it isn't free, and a 1-2 site chunk doesn't do enough work to be worth its own task.
+    // Parallelize whole permutations across sites; per-round fork/join costs more than the work.
+    // The minimum chunk size keeps small batches from splitting into tiny tasks.
     const MIN_SITES_PER_CHUNK: usize = 4;
 
     let sites = check_width(t, states.len())?;
@@ -780,14 +763,19 @@ pub(crate) fn plain_trace_requested(
             .by_ref()
             .take(site_end - site_start)
             .collect();
-        chunks.push((&states[site_start * t..site_end * t], chunk_outputs));
+        chunks.push((
+            site_start,
+            &states[site_start * t..site_end * t],
+            chunk_outputs,
+        ));
         site_start = site_end;
     }
 
     let results: Vec<Vec<Fr>> = chunks
         .into_par_iter()
-        .map(|(chunk_states, chunk_outputs)| {
+        .map(|(first_site, chunk_states, chunk_outputs)| {
             walk(&mut PlainOps, t, chunk_states, rc, chunk_outputs)
+                .wrap_err_with(|| format!("Poseidon2 chunk starting at site {first_site}"))
         })
         .collect::<eyre::Result<_>>()?;
     Ok(results.concat())
