@@ -156,45 +156,70 @@ impl Ops for PlainOps {
 
 // --- The permutation, layer-major over every site ---
 
-/// Index-addressed output for one site, recording only the requested logical result slots. The
-/// witness layout is not execution ordered: the second full-round group executes after the partial
-/// rounds but precedes them in signal order. Directly addressing requested logical slots preserves
-/// that layout without retaining whole round blocks.
+/// Marks a logical slot a sparse site did not request in its [`SiteOutput`] lookup table.
+const NOT_REQUESTED: u32 = u32::MAX;
+
+/// Index-addressed output for one site, writing only the requested logical result slots straight
+/// into that site's row of the caller's flat result buffer. The witness layout is not execution
+/// ordered: the second full-round group executes after the partial rounds but precedes them in
+/// signal order. Directly addressing requested logical slots preserves that layout without
+/// retaining whole round blocks.
 struct SiteOutput<'a, V> {
-    requests: &'a [u32],
-    values: Vec<Option<V>>,
-    capacity: usize,
+    /// `logical -> position in values` for a sparse row (shared by every site with the same row);
+    /// `None` for a full row, where a logical slot is its own position.
+    positions: Option<&'a [u32]>,
+    values: &'a mut [V],
+    /// The walk records every logical slot exactly once, so `written == values.len()` at the end
+    /// proves no requested slot was missed.
+    written: usize,
+    #[cfg(debug_assertions)]
+    seen: Vec<bool>,
 }
 
 impl<'a, V: Clone> SiteOutput<'a, V> {
-    fn requested(capacity: usize, requests: &'a [u32]) -> Self {
+    fn new(positions: Option<&'a [u32]>, values: &'a mut [V]) -> Self {
         Self {
-            requests,
-            values: vec![None; requests.len()],
-            capacity,
+            positions,
+            #[cfg(debug_assertions)]
+            seen: vec![false; values.len()],
+            values,
+            written: 0,
         }
     }
 
     fn destination(&self, logical: usize) -> Option<usize> {
-        debug_assert!(logical < self.capacity, "logical result slot out of range");
-        let logical =
-            u32::try_from(logical).expect("Poseidon2 result count never approaches u32::MAX");
-        self.requests.binary_search(&logical).ok()
+        match self.positions {
+            None => Some(logical),
+            Some(positions) => {
+                let position = positions[logical];
+                (position != NOT_REQUESTED).then_some(position as usize)
+            }
+        }
     }
 
     fn wants(&self, logical: usize) -> bool {
         self.destination(logical).is_some()
     }
 
+    fn write(&mut self, destination: usize, value: V) {
+        #[cfg(debug_assertions)]
+        assert!(
+            !std::mem::replace(&mut self.seen[destination], true),
+            "Poseidon2 result position {destination} recorded twice"
+        );
+        self.values[destination] = value;
+        self.written += 1;
+    }
+
     fn record(&mut self, logical: usize, value: &V) {
         if let Some(destination) = self.destination(logical) {
-            self.values[destination] = Some(value.clone());
+            self.write(destination, value.clone());
         }
     }
 
     fn record_owned(&mut self, logical: usize, value: V) {
         if let Some(destination) = self.destination(logical) {
-            self.values[destination] = Some(value);
+            self.write(destination, value);
         }
     }
 
@@ -204,18 +229,14 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
         }
     }
 
-    fn finish(self, site: usize) -> eyre::Result<Vec<V>> {
-        self.values
-            .into_iter()
-            .enumerate()
-            .map(|(position, value)| {
-                value.ok_or_else(|| {
-                    eyre::eyre!(
-                        "Poseidon2 site {site} did not emit requested result position {position}"
-                    )
-                })
-            })
-            .collect()
+    fn finish(&self, site: usize) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.written == self.values.len(),
+            "Poseidon2 site {site} emitted {} of its {} requested result slots",
+            self.written,
+            self.values.len()
+        );
+        Ok(())
     }
 }
 
@@ -612,18 +633,13 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
         Ok(())
     }
 
-    fn finish(mut self) -> eyre::Result<Vec<O::V>> {
+    fn finish(mut self) -> eyre::Result<()> {
         // Top-level `[out[t]]`, known only after the second full-round group.
         for (site, state) in self.current.iter().enumerate() {
             self.outputs[site].record_slice(0, state);
+            self.outputs[site].finish(site)?;
         }
-
-        let expected = self.outputs.iter().map(|output| output.values.len()).sum();
-        let mut result = Vec::with_capacity(expected);
-        for (site, output) in self.outputs.into_iter().enumerate() {
-            result.extend(output.finish(site)?);
-        }
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -635,7 +651,7 @@ fn walk<O: Ops>(
     states: &[O::V],
     rc: &RoundConstants,
     outputs: Vec<SiteOutput<'_, O::V>>,
-) -> eyre::Result<Vec<O::V>> {
+) -> eyre::Result<()> {
     let pr = partial_rounds(t);
     let mut state = WalkState::new(ops, t, states, outputs);
 
@@ -667,53 +683,103 @@ fn check_width(t: usize, states: usize) -> eyre::Result<usize> {
     Ok(states / t)
 }
 
-fn requested_outputs<'a, V: Clone>(
-    sites: usize,
-    capacity: usize,
-    requests: &'a [u32],
-    offsets: &[u32],
-) -> eyre::Result<Vec<SiteOutput<'a, V>>> {
-    eyre::ensure!(
-        offsets.len() == sites + 1,
-        "Poseidon2 request offsets has length {}, expected {} for {sites} sites",
-        offsets.len(),
-        sites + 1
-    );
-    eyre::ensure!(
-        offsets[0] == 0,
-        "Poseidon2 request offsets must start at zero"
-    );
-    eyre::ensure!(
-        offsets[sites] as usize == requests.len(),
-        "Poseidon2 final request offset is {}, but there are {} requests",
-        offsets[sites],
-        requests.len()
-    );
+/// A validated CSR request table, with one dense `logical -> position` lookup per distinct sparse
+/// row. Codegen gives every site of a batch the same row in practice, so consecutive identical rows
+/// share one table instead of each paying `capacity` entries.
+struct RequestPlan<'a> {
+    offsets: &'a [u32],
+    tables: Vec<Vec<u32>>,
+    /// Per site: an index into `tables`, or `None` for a full `0..capacity` row.
+    site_tables: Vec<Option<usize>>,
+}
 
-    let mut outputs = Vec::with_capacity(sites);
-    for site in 0..sites {
-        let lo = offsets[site] as usize;
-        let hi = offsets[site + 1] as usize;
+impl<'a> RequestPlan<'a> {
+    fn new(
+        sites: usize,
+        capacity: usize,
+        requests: &[u32],
+        offsets: &'a [u32],
+    ) -> eyre::Result<Self> {
         eyre::ensure!(
-            lo <= hi && hi <= requests.len(),
-            "Poseidon2 site {site} has invalid request range {lo}..{hi}"
+            offsets.len() == sites + 1,
+            "Poseidon2 request offsets has length {}, expected {} for {sites} sites",
+            offsets.len(),
+            sites + 1
         );
-        let site_requests = &requests[lo..hi];
-        for pair in site_requests.windows(2) {
+        eyre::ensure!(
+            offsets[0] == 0,
+            "Poseidon2 request offsets must start at zero"
+        );
+        eyre::ensure!(
+            offsets[sites] as usize == requests.len(),
+            "Poseidon2 final request offset is {}, but there are {} requests",
+            offsets[sites],
+            requests.len()
+        );
+
+        let mut tables: Vec<Vec<u32>> = Vec::new();
+        let mut site_tables = Vec::with_capacity(sites);
+        let mut previous_sparse: Option<&[u32]> = None;
+        for site in 0..sites {
+            let lo = offsets[site] as usize;
+            let hi = offsets[site + 1] as usize;
             eyre::ensure!(
-                pair[0] < pair[1],
-                "Poseidon2 site {site} result requests must be strictly ascending"
+                lo <= hi && hi <= requests.len(),
+                "Poseidon2 site {site} has invalid request range {lo}..{hi}"
             );
+            let site_requests = &requests[lo..hi];
+            for pair in site_requests.windows(2) {
+                eyre::ensure!(
+                    pair[0] < pair[1],
+                    "Poseidon2 site {site} result requests must be strictly ascending"
+                );
+            }
+            if let Some(&last) = site_requests.last() {
+                eyre::ensure!(
+                    (last as usize) < capacity,
+                    "Poseidon2 site {site} requested result slot {last}, but capacity is {capacity}"
+                );
+            }
+            // Strictly ascending and below `capacity`, so `capacity` entries is exactly `0..capacity`.
+            if site_requests.len() == capacity {
+                site_tables.push(None);
+                continue;
+            }
+            if previous_sparse != Some(site_requests) {
+                let mut table = vec![NOT_REQUESTED; capacity];
+                for (position, &logical) in (0u32..).zip(site_requests) {
+                    table[logical as usize] = position;
+                }
+                tables.push(table);
+                previous_sparse = Some(site_requests);
+            }
+            site_tables.push(Some(tables.len() - 1));
         }
-        if let Some(&last) = site_requests.last() {
-            eyre::ensure!(
-                (last as usize) < capacity,
-                "Poseidon2 site {site} requested result slot {last}, but capacity is {capacity}"
-            );
-        }
-        outputs.push(SiteOutput::requested(capacity, site_requests));
+        Ok(Self {
+            offsets,
+            tables,
+            site_tables,
+        })
     }
-    Ok(outputs)
+
+    /// One [`SiteOutput`] per site, each writing into its own CSR row of `values`.
+    fn outputs<'p, V: Clone>(&'p self, mut values: &'p mut [V]) -> Vec<SiteOutput<'p, V>> {
+        debug_assert_eq!(
+            values.len(),
+            *self.offsets.last().expect("offsets has sites + 1 entries") as usize,
+            "one value per request"
+        );
+        self.site_tables
+            .iter()
+            .zip(self.offsets.windows(2))
+            .map(|(table, row)| {
+                let (site_values, rest) =
+                    std::mem::take(&mut values).split_at_mut((row[1] - row[0]) as usize);
+                values = rest;
+                SiteOutput::new(table.map(|i| self.tables[i].as_slice()), site_values)
+            })
+            .collect()
+    }
 }
 
 /// Computes only the requested logical trace slots for each site. `result_offsets` is a CSR row
@@ -742,15 +808,17 @@ pub(crate) fn plain_trace_requested(
     const MIN_SITES_PER_CHUNK: usize = 4;
 
     let sites = check_width(t, states.len())?;
-    let capacity = result_slots(t);
-    let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
+    let plan = RequestPlan::new(sites, result_slots(t), result_requests, result_offsets)?;
     let rc = RoundConstants::load(t)?;
+    let mut values = vec![Fr::ZERO; result_requests.len()];
+    let outputs = plan.outputs(&mut values);
 
     let num_chunks = (sites / MIN_SITES_PER_CHUNK)
         .max(1)
         .min(rayon::current_num_threads());
     if num_chunks <= 1 {
-        return walk(&mut PlainOps, t, states, rc, outputs);
+        walk(&mut PlainOps, t, states, rc, outputs)?;
+        return Ok(values);
     }
 
     let chunk_size = sites.div_ceil(num_chunks);
@@ -771,14 +839,13 @@ pub(crate) fn plain_trace_requested(
         site_start = site_end;
     }
 
-    let results: Vec<Vec<Fr>> = chunks
+    chunks
         .into_par_iter()
-        .map(|(first_site, chunk_states, chunk_outputs)| {
+        .try_for_each(|(first_site, chunk_states, chunk_outputs)| {
             walk(&mut PlainOps, t, chunk_states, rc, chunk_outputs)
                 .wrap_err_with(|| format!("Poseidon2 chunk starting at site {first_site}"))
-        })
-        .collect::<eyre::Result<_>>()?;
-    Ok(results.concat())
+        })?;
+    Ok(values)
 }
 
 /// The full canonical trace for a batch of sites, split per site into `output` (the permutation's
@@ -1117,15 +1184,16 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
     let required = mask_elements(t, sites)?;
     preprocessing.ensure_available(required)?;
     let consumed_before = preprocessing.consumed;
-    let capacity = result_slots(t);
-    let outputs = requested_outputs(sites, capacity, result_requests, result_offsets)?;
+    let plan = RequestPlan::new(sites, result_slots(t), result_requests, result_offsets)?;
     let rc = RoundConstants::load(t)?;
+    let mut out =
+        vec![mpc_core::protocols::rep3::Rep3PrimeFieldShare::default(); result_requests.len()];
     let mut ops = Rep3Ops {
         net,
         state: rep3_state,
         pool: preprocessing,
     };
-    let out = walk(&mut ops, t, states, rc, outputs)?;
+    walk(&mut ops, t, states, rc, plan.outputs(&mut out))?;
     eyre::ensure!(
         ops.pool.consumed - consumed_before == required,
         "Poseidon2(t={t}) consumed {} masks, expected {required}",
@@ -1375,6 +1443,40 @@ mod tests {
             expected.extend(sparse_site.iter().map(|&slot| full[capacity + slot]));
             assert_eq!(got, expected, "t={t}");
         }
+    }
+
+    /// Rows A, A, B, A: a repeated row reuses its lookup table, and a row that changes back must
+    /// get a fresh one rather than the previous site's.
+    #[test]
+    fn sparse_rows_differing_between_sites_select_their_own_slots() {
+        let t = 4;
+        let sites = 4;
+        let states: Vec<Fr> = (0..sites * t)
+            .map(|i| Fr::from((5 * i + 1) as u64))
+            .collect();
+        let full = plain_full(t, &states);
+        let capacity = result_slots(t);
+        let row_a: Vec<u32> = (0..capacity)
+            .step_by(7)
+            .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32"))
+            .collect();
+        let row_b: Vec<u32> = (3..capacity)
+            .step_by(11)
+            .map(|slot| u32::try_from(slot).expect("test fixture slot fits in u32"))
+            .collect();
+        let rows = [&row_a, &row_a, &row_b, &row_a];
+
+        let mut requests = Vec::new();
+        let mut offsets = vec![0u32];
+        let mut expected = Vec::new();
+        for (site, row) in rows.iter().enumerate() {
+            requests.extend_from_slice(row);
+            offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
+            expected.extend(row.iter().map(|&slot| full[site * capacity + slot as usize]));
+        }
+        let got = plain_trace_requested(t, &states, &requests, &offsets)
+            .expect("a well-formed CSR over a supported width must succeed");
+        assert_eq!(got, expected);
     }
 
     #[test]
