@@ -26,9 +26,10 @@ pub struct Rep3Driver<'a, N: Network> {
 }
 
 impl<'a, N: Network> Rep3Driver<'a, N> {
-    /// Validates `program`, derives its checked mask budget from executable shared-Poseidon2
-    /// instructions, and prepares the complete fresh pool in three rounds (or zero rounds when the
-    /// budget is zero). The derived budget is runtime state and is not part of program serialization.
+    /// Validates `program` (cached on it after the first pass), derives its checked mask budget
+    /// from executable shared-Poseidon2 instructions, and prepares the complete fresh pool in three
+    /// rounds (or zero rounds when the budget is zero). The derived budget is runtime state and is
+    /// not part of program serialization.
     ///
     /// # Errors
     ///

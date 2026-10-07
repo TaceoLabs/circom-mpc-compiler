@@ -703,6 +703,7 @@ impl Program {
                 local,
             },
             num_public_witness,
+            validated: std::sync::OnceLock::new(),
         };
         program.validate_encoding()?;
         eyre::ensure!(limited.limit() > 0, "serialized program exceeds byte limit");

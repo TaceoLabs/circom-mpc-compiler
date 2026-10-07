@@ -307,6 +307,9 @@ pub struct Program {
     /// back to `Shared` conservatively), it comes directly from the circuit's declared public
     /// signals and must never be re-derived from `mpc_public_inputs`.
     pub(crate) num_public_witness: u32,
+    /// Set once [`Program::validate_encoding`] has passed. A `Program` is immutable after
+    /// construction, so a pass stays valid; a failure is not cached and re-checks every call.
+    pub(crate) validated: std::sync::OnceLock<()>,
 }
 
 /// [`Program`]'s fields, laid bare for construction (by the compiler crate's `codegen::compile`)
@@ -410,6 +413,7 @@ impl Program {
             num_inputs: parts.num_inputs,
             slots: parts.slots,
             num_public_witness: parts.num_public_witness,
+            validated: std::sync::OnceLock::new(),
         }
     }
 
@@ -607,11 +611,16 @@ impl Program {
     /// Returns an error describing the first inconsistency found - an out-of-range slot, a
     /// malformed side table, or a reference to a missing round/gadget batch.
     pub fn validate_encoding(&self) -> eyre::Result<()> {
+        if self.validated.get().is_some() {
+            return Ok(());
+        }
         self.validate_inputs()?;
         self.validate_instructions()?;
         self.validate_rounds()?;
         self.validate_gadget_batches()?;
-        self.validate_witness()
+        self.validate_witness()?;
+        self.validated.get_or_init(|| ());
+        Ok(())
     }
 
     fn check_slot(&self, bank: Bank, slot: Slot, what: &str) -> eyre::Result<()> {
