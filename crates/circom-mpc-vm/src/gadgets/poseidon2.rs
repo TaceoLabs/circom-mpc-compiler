@@ -170,21 +170,16 @@ struct SiteOutput<'a, V> {
     /// `None` for a full row, where a logical slot is its own position.
     positions: Option<&'a [u32]>,
     values: &'a mut [V],
-    /// The walk records every logical slot exactly once, so `written == values.len()` at the end
-    /// proves no requested slot was missed.
-    written: usize,
-    #[cfg(debug_assertions)]
-    seen: Vec<bool>,
+    /// Which positions of `values` have been written; `finish` rejects any left unwritten.
+    written: Vec<bool>,
 }
 
 impl<'a, V: Clone> SiteOutput<'a, V> {
     fn new(positions: Option<&'a [u32]>, values: &'a mut [V]) -> Self {
         Self {
             positions,
-            #[cfg(debug_assertions)]
-            seen: vec![false; values.len()],
+            written: vec![false; values.len()],
             values,
-            written: 0,
         }
     }
 
@@ -203,13 +198,12 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
     }
 
     fn write(&mut self, destination: usize, value: V) {
-        #[cfg(debug_assertions)]
-        assert!(
-            !std::mem::replace(&mut self.seen[destination], true),
+        let already_written = std::mem::replace(&mut self.written[destination], true);
+        debug_assert!(
+            !already_written,
             "Poseidon2 result position {destination} recorded twice"
         );
         self.values[destination] = value;
-        self.written += 1;
     }
 
     fn record(&mut self, logical: usize, value: &V) {
@@ -231,12 +225,9 @@ impl<'a, V: Clone> SiteOutput<'a, V> {
     }
 
     fn finish(&self, site: usize) -> eyre::Result<()> {
-        eyre::ensure!(
-            self.written == self.values.len(),
-            "Poseidon2 site {site} emitted {} of its {} requested result slots",
-            self.written,
-            self.values.len()
-        );
+        if let Some(position) = self.written.iter().position(|&written| !written) {
+            eyre::bail!("Poseidon2 site {site} did not emit requested result position {position}");
+        }
         Ok(())
     }
 }
