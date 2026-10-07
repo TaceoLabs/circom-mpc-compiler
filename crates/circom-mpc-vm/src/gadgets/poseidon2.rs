@@ -109,7 +109,7 @@ struct SboxTrace<V> {
 /// The field operations the walker needs. Everything except [`Self::sbox_layer`] is local work, free
 /// in every domain.
 trait Ops {
-    type V: Clone;
+    type V: Clone + 'static;
 
     /// A known constant as a value. The circuit's `RC[..]` signals are real witness positions, so
     /// these must be representable in `V`, not just used as scalars.
@@ -117,8 +117,10 @@ trait Ops {
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Self::V;
     fn add_public(&mut self, a: &Self::V, c: Fr) -> Self::V;
     fn mul_public(&mut self, a: &Self::V, c: Fr) -> Self::V;
-    /// One s-box layer for a whole batch at once - the only step that communicates.
-    fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>>;
+    /// One s-box layer for a whole batch at once, into `out` (reused across rounds) - the only
+    /// step that communicates.
+    fn sbox_layer(&mut self, xs: &[Self::V], out: &mut Vec<SboxTrace<Self::V>>)
+    -> eyre::Result<()>;
 }
 
 struct PlainOps;
@@ -138,19 +140,18 @@ impl Ops for PlainOps {
     fn mul_public(&mut self, a: &Fr, c: Fr) -> Fr {
         *a * c
     }
-    fn sbox_layer(&mut self, xs: &[Fr]) -> eyre::Result<Vec<SboxTrace<Fr>>> {
-        Ok(xs
-            .iter()
-            .map(|&x| {
-                let square = x * x;
-                let pow4 = square * square;
-                SboxTrace {
-                    square,
-                    pow4,
-                    out: pow4 * x,
-                }
-            })
-            .collect())
+    fn sbox_layer(&mut self, xs: &[Fr], out: &mut Vec<SboxTrace<Fr>>) -> eyre::Result<()> {
+        out.clear();
+        out.extend(xs.iter().map(|&x| {
+            let square = x * x;
+            let pow4 = square * square;
+            SboxTrace {
+                square,
+                pow4,
+                out: pow4 * x,
+            }
+        }));
+        Ok(())
     }
 }
 
@@ -272,12 +273,23 @@ impl Layout {
 
 /// `Acc(n)` over `input`. Records `[out][in[n]][sums[n]]` at `base`, while retaining only the
 /// running sum needed by state evolution.
-fn acc<O: Ops>(ops: &mut O, input: &[O::V], trace: &mut SiteOutput<'_, O::V>, base: usize) -> O::V {
+fn acc<'v, O: Ops>(
+    ops: &mut O,
+    input: impl ExactSizeIterator<Item = &'v O::V> + Clone,
+    trace: &mut SiteOutput<'_, O::V>,
+    base: usize,
+) -> O::V {
     let n = input.len();
-    trace.record_slice(base + 1, input);
-    let mut sum = input[0].clone();
+    for (i, x) in input.clone().enumerate() {
+        trace.record(base + 1 + i, x);
+    }
+    let mut input = input;
+    let mut sum = input
+        .next()
+        .expect("Acc takes at least one element")
+        .clone();
     trace.record(base + 1 + n, &sum);
-    for (i, x) in input[1..].iter().enumerate() {
+    for (i, x) in input.enumerate() {
         sum = ops.add(&sum, x);
         trace.record(base + 1 + n + i + 1, &sum);
     }
@@ -285,27 +297,29 @@ fn acc<O: Ops>(ops: &mut O, input: &[O::V], trace: &mut SiteOutput<'_, O::V>, ba
     sum
 }
 
-/// `ExternalMatMul2`/`3`/`4` over exactly 2, 3 or 4 elements.
+/// `ExternalMatMul2`/`3`/`4` over exactly 2, 3 or 4 elements, writing its outputs into `out`.
 fn external_matmul_leaf<O: Ops>(
     ops: &mut O,
     input: &[O::V],
+    out: &mut [O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
-) -> Vec<O::V> {
+) {
     let two = Fr::from(2u64);
     let four = Fr::from(4u64);
     let t = input.len();
     trace.record_slice(base + t, input);
-    let out = match t {
+    match t {
         2 | 3 => {
             // out[i] = in[i] + sum
             let mut sum = input[0].clone();
             for x in &input[1..] {
                 sum = ops.add(&sum, x);
             }
-            let out: Vec<O::V> = input.iter().map(|x| ops.add(x, &sum)).collect();
+            for (o, x) in out.iter_mut().zip(input) {
+                *o = ops.add(x, &sum);
+            }
             trace.record(base + 2 * t, &sum);
-            out
         }
         4 => {
             let double_in1 = ops.mul_public(&input[1], two);
@@ -318,12 +332,10 @@ fn external_matmul_leaf<O: Ops>(
             let t_3 = ops.add(&double_in3, &t_0);
             let t_4 = ops.add(&quad_t_1, &t_3);
             let t_5 = ops.add(&quad_t_0, &t_2);
-            let out = vec![
-                ops.add(&t_3, &t_5),
-                t_5.clone(),
-                ops.add(&t_2, &t_4),
-                t_4.clone(),
-            ];
+            out[0] = ops.add(&t_3, &t_5);
+            out[1] = t_5.clone();
+            out[2] = ops.add(&t_2, &t_4);
+            out[3] = t_4.clone();
             // Source-declaration order of the 10 named intermediates.
             for (i, value) in [
                 &double_in1,
@@ -342,25 +354,26 @@ fn external_matmul_leaf<O: Ops>(
             {
                 trace.record(base + 2 * t + i, value);
             }
-            out
         }
         n => unreachable!("external_matmul_leaf takes 2, 3 or 4 elements, got {n}"),
-    };
-    trace.record_slice(base, &out);
-    out
+    }
+    trace.record_slice(base, out);
 }
 
-/// `ExternalMatMulT(t)`: `[out[t]][in[t]][subtree]`.
+/// `ExternalMatMulT(t)`: `[out[t]][in[t]][subtree]`, writing its outputs into `out`. For `t >= 8`,
+/// `mds_out` (length `t`) holds the `ExternalMatMul4` outputs.
 fn external_matmul<O: Ops>(
     ops: &mut O,
     input: &[O::V],
+    out: &mut [O::V],
+    mds_out: &mut [O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
-) -> Vec<O::V> {
+) {
     let t = input.len();
     trace.record_slice(base + t, input);
-    let out = if t <= 4 {
-        external_matmul_leaf(ops, input, trace, base + 2 * t)
+    if t <= 4 {
+        external_matmul_leaf(ops, input, out, trace, base + 2 * t);
     } else {
         let m = t / 4;
         // `mds[]` is created textually before `accs[]` in `ExternalMatMulT`'s source, but circom
@@ -369,34 +382,30 @@ fn external_matmul<O: Ops>(
         // `template ExternalMatMul4` in `poseidon2.circom`, so every `accs[]` instance is numbered
         // before every `mds[]` instance. Cross-checked against a real circom witness
         // (`main.Poseidon2_..ExternalMatMulT_...accs[0].out` precedes `.mds[0].out[0]`).
-        let mut mds_out = Vec::with_capacity(m);
         let accs_base = base + 2 * t;
         let mds_base = accs_base + 4 * acc_signals(m);
         for i in 0..m {
-            let o = external_matmul_leaf(
+            external_matmul_leaf(
                 ops,
                 &input[4 * i..4 * i + 4],
+                &mut mds_out[4 * i..4 * i + 4],
                 trace,
                 mds_base + i * external_matmul_leaf_signals(4),
             );
-            mds_out.push(o);
         }
-        let mut acc_out = Vec::with_capacity(4);
-        for l in 0..4 {
-            let column: Vec<O::V> = mds_out.iter().map(|row| row[l].clone()).collect();
-            let o = acc(ops, &column, trace, accs_base + l * acc_signals(m));
-            acc_out.push(o);
+        // Column `l` is every `mds` output's element `l`.
+        let acc_out: [O::V; 4] = std::array::from_fn(|l| {
+            let column = mds_out.iter().skip(l).step_by(4);
+            acc(ops, column, trace, accs_base + l * acc_signals(m))
+        });
+        for (o, (x, a)) in out
+            .iter_mut()
+            .zip(mds_out.iter().zip(acc_out.iter().cycle()))
+        {
+            *o = ops.add(x, a);
         }
-        let mut out = Vec::with_capacity(t);
-        for row in &mds_out {
-            for (j, value) in row.iter().enumerate() {
-                out.push(ops.add(value, &acc_out[j]));
-            }
-        }
-        out
-    };
-    trace.record_slice(base, &out);
-    out
+    }
+    trace.record_slice(base, out);
 }
 
 /// `InternalMatMul2`/`3` - a genuine nested subcomponent for those widths, hence its own block
@@ -404,9 +413,10 @@ fn external_matmul<O: Ops>(
 fn internal_matmul_leaf<O: Ops>(
     ops: &mut O,
     input: &[O::V],
+    out: &mut [O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
-) -> Vec<O::V> {
+) {
     let t = input.len();
     let two = Fr::from(2u64);
     let mut sum = input[0].clone();
@@ -414,53 +424,44 @@ fn internal_matmul_leaf<O: Ops>(
         sum = ops.add(&sum, x);
     }
     // The last element is doubled; the rest pass through.
-    let out: Vec<O::V> = input
-        .iter()
-        .enumerate()
-        .map(|(i, x)| {
-            let scaled = if i == t - 1 {
-                ops.mul_public(x, two)
-            } else {
-                x.clone()
-            };
+    for (i, (o, x)) in out.iter_mut().zip(input).enumerate() {
+        *o = if i == t - 1 {
+            let scaled = ops.mul_public(x, two);
             ops.add(&scaled, &sum)
-        })
-        .collect();
-    trace.record_slice(base, &out);
+        } else {
+            ops.add(x, &sum)
+        };
+    }
+    trace.record_slice(base, out);
     trace.record_slice(base + t, input);
     trace.record(base + 2 * t, &sum);
-    out
 }
 
 /// `InternalMatMulT(t)`: `[out[t]][in[t]]` plus either a nested `InternalMatMul2`/`3` subcomponent, or
-/// (for `t >= 4`) the own intermediate `acc` followed by its `Acc(t)` subtree.
+/// (for `t >= 4`) the own intermediate `acc` followed by its `Acc(t)` subtree. Writes its outputs
+/// into `out`.
 fn internal_matmul<O: Ops>(
     ops: &mut O,
     input: &[O::V],
     diag: &[Fr],
+    out: &mut [O::V],
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
-) -> Vec<O::V> {
+) {
     let t = input.len();
     trace.record_slice(base + t, input);
-    let out = if let 2..=3 = t {
-        internal_matmul_leaf(ops, input, trace, base + 2 * t)
+    if let 2..=3 = t {
+        internal_matmul_leaf(ops, input, out, trace, base + 2 * t);
     } else {
-        let acc_value = acc(ops, input, trace, base + 2 * t + 1);
-        let out: Vec<O::V> = input
-            .iter()
-            .zip(diag)
-            .map(|(x, &d)| {
-                let scaled = ops.mul_public(x, d);
-                ops.add(&scaled, &acc_value)
-            })
-            .collect();
+        let acc_value = acc(ops, input.iter(), trace, base + 2 * t + 1);
+        for (o, (x, &d)) in out.iter_mut().zip(input.iter().zip(diag)) {
+            let scaled = ops.mul_public(x, d);
+            *o = ops.add(&scaled, &acc_value);
+        }
         // Own intermediate `acc` precedes the `Acc(t)` subtree.
         trace.record(base + 2 * t, &acc_value);
-        out
-    };
-    trace.record_slice(base, &out);
-    out
+    }
+    trace.record_slice(base, out);
 }
 
 /// Records `Sbox_e`'s block: `[out][in][square][pow_4]`.
@@ -476,15 +477,120 @@ fn record_sbox_e<V: Clone>(
     output.record(base + 3, &trace.pow4);
 }
 
+/// One site's evolving permutation state, its output sink, and buffers reused across rounds.
+struct Site<'a, V> {
+    state: Vec<V>,
+    /// The round's matrix-layer output; swapped into `state` once the round is recorded.
+    next: Vec<V>,
+    sbox_out: Vec<V>,
+    /// `ExternalMatMulT`'s `ExternalMatMul4` outputs; empty for `t <= 4`.
+    mds_out: Vec<V>,
+    output: SiteOutput<'a, V>,
+}
+
+/// A full round's local work for one site, after the batch-wide s-box layer: external matrix,
+/// then the round's `[out][in][RC][linear_layer][sbox]` + `ExternalMatMulT` + `Sbox` blocks.
+fn full_round_site<O: Ops>(
+    ops: &mut O,
+    site: &mut Site<'_, O::V>,
+    round_rc: &[Fr],
+    linear: &[O::V],
+    sboxes: &[SboxTrace<O::V>],
+    base: usize,
+    states_base: usize,
+) {
+    let t = linear.len();
+    for (o, s) in site.sbox_out.iter_mut().zip(sboxes) {
+        o.clone_from(&s.out);
+    }
+    let emm_base = base + 5 * t;
+    external_matmul(
+        ops,
+        &site.sbox_out,
+        &mut site.next,
+        &mut site.mds_out,
+        &mut site.output,
+        emm_base,
+    );
+
+    let output = &mut site.output;
+    output.record_slice(base, &site.next);
+    output.record_slice(base + t, &site.state);
+    for (i, &c) in round_rc.iter().enumerate() {
+        let logical = base + 2 * t + i;
+        if output.wants(logical) {
+            let value = ops.public(c);
+            output.record_owned(logical, value);
+        }
+    }
+    output.record_slice(base + 3 * t, linear);
+    output.record_slice(base + 4 * t, &site.sbox_out);
+    // Sbox(t)'s own block: [out[t]][in[t]] + t x Sbox_e
+    let sbox_base = emm_base + external_matmul_signals(t);
+    output.record_slice(sbox_base, &site.sbox_out);
+    output.record_slice(sbox_base + t, linear);
+    for (k, s) in sboxes.iter().enumerate() {
+        record_sbox_e(
+            output,
+            sbox_base + 2 * t + k * SBOX_E_SIGNALS,
+            &linear[k],
+            s,
+        );
+    }
+
+    output.record_slice(states_base, &site.next);
+    std::mem::swap(&mut site.state, &mut site.next);
+}
+
+/// A partial round's local work for one site, after the batch-wide s-box layer: internal matrix,
+/// then `[out][in][RC][linear_layer][sbox]` + `Sbox_e` + `InternalMatMulT`. `sbox` is element 0's
+/// s-box input and trace.
+fn partial_round_site<O: Ops>(
+    ops: &mut O,
+    site: &mut Site<'_, O::V>,
+    c: Fr,
+    diag: &[Fr],
+    (linear, sbox): (&O::V, &SboxTrace<O::V>),
+    base: usize,
+    states_base: usize,
+) {
+    let t = site.state.len();
+    site.sbox_out[0].clone_from(&sbox.out);
+    site.sbox_out[1..].clone_from_slice(&site.state[1..]);
+    let imm_base = base + 2 * t + 3 + SBOX_E_SIGNALS;
+    internal_matmul(
+        ops,
+        &site.sbox_out,
+        diag,
+        &mut site.next,
+        &mut site.output,
+        imm_base,
+    );
+
+    let output = &mut site.output;
+    output.record_slice(base, &site.next);
+    output.record_slice(base + t, &site.state);
+    let rc_slot = base + 2 * t;
+    if output.wants(rc_slot) {
+        let rc_value = ops.public(c);
+        output.record_owned(rc_slot, rc_value);
+    }
+    output.record(base + 2 * t + 1, linear);
+    output.record(base + 2 * t + 2, &sbox.out);
+    record_sbox_e(output, base + 2 * t + 3, linear, sbox);
+
+    output.record_slice(states_base, &site.next);
+    std::mem::swap(&mut site.state, &mut site.next);
+}
+
 struct WalkState<'ops, 'output, O: Ops> {
     ops: &'ops mut O,
     t: usize,
     layout: Layout,
-    current: Vec<Vec<O::V>>,
-    outputs: Vec<SiteOutput<'output, O::V>>,
+    sites: Vec<Site<'output, O::V>>,
     // Reused across rounds to avoid per-round allocation.
-    scratch_flat: Vec<O::V>,
-    scratch_sbox_out: Vec<O::V>,
+    linear: Vec<O::V>,
+    sboxes: Vec<SboxTrace<O::V>>,
 }
 
 impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
@@ -492,30 +598,45 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
         ops: &'ops mut O,
         t: usize,
         states: &[O::V],
-        mut outputs: Vec<SiteOutput<'output, O::V>>,
+        outputs: Vec<SiteOutput<'output, O::V>>,
     ) -> Self {
-        let sites = states.len() / t;
         let layout = Layout::new(t);
-        debug_assert_eq!(outputs.len(), sites, "one SiteOutput per site");
+        debug_assert_eq!(outputs.len(), states.len() / t, "one SiteOutput per site");
 
-        // Current state per site. Witness values are recorded directly into `outputs`; no round or
-        // subcomponent trace blocks are materialized.
-        let mut current = Vec::with_capacity(sites);
-        for site in 0..sites {
-            let input = &states[site * t..(site + 1) * t];
-            let out = external_matmul(ops, input, &mut outputs[site], layout.initial_matmul);
-            outputs[site].record_slice(layout.states, &out);
-            current.push(out);
-        }
+        // Witness values are recorded directly into each site's output; no round or subcomponent
+        // trace blocks are materialized.
+        let sites: Vec<_> = states
+            .chunks_exact(t)
+            .zip(outputs)
+            .map(|(input, mut output)| {
+                let mut state = input.to_vec();
+                let mut mds_out = if t > 4 { input.to_vec() } else { Vec::new() };
+                external_matmul(
+                    ops,
+                    input,
+                    &mut state,
+                    &mut mds_out,
+                    &mut output,
+                    layout.initial_matmul,
+                );
+                output.record_slice(layout.states, &state);
+                Site {
+                    next: state.clone(),
+                    sbox_out: state.clone(),
+                    state,
+                    mds_out,
+                    output,
+                }
+            })
+            .collect();
 
         Self {
             ops,
             t,
             layout,
-            current,
-            outputs,
-            scratch_flat: Vec::with_capacity(sites * t),
-            scratch_sbox_out: Vec::with_capacity(t),
+            linear: Vec::with_capacity(sites.len() * t),
+            sboxes: Vec::with_capacity(sites.len() * t),
+            sites,
         }
     }
 
@@ -527,117 +648,58 @@ impl<'ops, 'output, O: Ops> WalkState<'ops, 'output, O> {
         state_row: usize,
     ) -> eyre::Result<()> {
         let t = self.t;
-        self.scratch_flat.clear();
-        for state in &self.current {
-            self.scratch_flat.extend(
-                state
+        self.linear.clear();
+        for site in &self.sites {
+            self.linear.extend(
+                site.state
                     .iter()
                     .zip(round_rc)
                     .map(|(x, &c)| self.ops.add_public(x, c)),
             );
         }
-        let sboxes = self.ops.sbox_layer(&self.scratch_flat)?;
+        self.ops.sbox_layer(&self.linear, &mut self.sboxes)?;
 
-        for (site, state) in self.current.iter_mut().enumerate() {
-            let linear_site = &self.scratch_flat[site * t..(site + 1) * t];
-            let sbox_traces = &sboxes[site * t..(site + 1) * t];
-            self.scratch_sbox_out.clear();
-            self.scratch_sbox_out
-                .extend(sbox_traces.iter().map(|s| s.out.clone()));
-            let base = self.layout.full + layout_round * full_round_signals(t);
-            let emm_base = base + 5 * t;
-            let out = external_matmul(
-                self.ops,
-                &self.scratch_sbox_out,
-                &mut self.outputs[site],
-                emm_base,
-            );
-
-            // [out][in][RC][linear_layer][sbox] + ExternalMatMulT + Sbox
-            self.outputs[site].record_slice(base, &out);
-            self.outputs[site].record_slice(base + t, state);
-            for (i, &c) in round_rc.iter().enumerate() {
-                let logical = base + 2 * t + i;
-                if self.outputs[site].wants(logical) {
-                    let value = self.ops.public(c);
-                    self.outputs[site].record_owned(logical, value);
-                }
-            }
-            self.outputs[site].record_slice(base + 3 * t, linear_site);
-            self.outputs[site].record_slice(base + 4 * t, &self.scratch_sbox_out);
-            // Sbox(t)'s own block: [out[t]][in[t]] + t x Sbox_e
-            let sbox_base = emm_base + external_matmul_signals(t);
-            self.outputs[site].record_slice(sbox_base, &self.scratch_sbox_out);
-            self.outputs[site].record_slice(sbox_base + t, linear_site);
-            for (k, s) in sbox_traces.iter().enumerate() {
-                record_sbox_e(
-                    &mut self.outputs[site],
-                    sbox_base + 2 * t + k * SBOX_E_SIGNALS,
-                    &linear_site[k],
-                    s,
-                );
-            }
-
-            self.outputs[site].record_slice(self.layout.states + state_row * t, &out);
-            *state = out;
+        let base = self.layout.full + layout_round * full_round_signals(t);
+        let states_base = self.layout.states + state_row * t;
+        for ((site, linear), sboxes) in self
+            .sites
+            .iter_mut()
+            .zip(self.linear.chunks_exact(t))
+            .zip(self.sboxes.chunks_exact(t))
+        {
+            full_round_site(self.ops, site, round_rc, linear, sboxes, base, states_base);
         }
         Ok(())
     }
 
     // RC and s-box on element 0 only, then the internal matrix.
     fn partial_round(&mut self, round: usize, c: Fr, diag: &[Fr]) -> eyre::Result<()> {
-        self.scratch_flat.clear();
-        self.scratch_flat.extend(
-            self.current
+        let t = self.t;
+        self.linear.clear();
+        self.linear.extend(
+            self.sites
                 .iter()
-                .map(|state| self.ops.add_public(&state[0], c)),
+                .map(|site| self.ops.add_public(&site.state[0], c)),
         );
-        let sboxes = self.ops.sbox_layer(&self.scratch_flat)?;
-        let linear = &self.scratch_flat;
+        self.ops.sbox_layer(&self.linear, &mut self.sboxes)?;
 
-        for (site, state) in self.current.iter_mut().enumerate() {
-            let sbox = &sboxes[site];
-            self.scratch_sbox_out.clear();
-            self.scratch_sbox_out.push(sbox.out.clone());
-            self.scratch_sbox_out.extend_from_slice(&state[1..]);
-            let base = self.layout.partial + round * partial_round_signals(self.t);
-            let imm_base = base + 2 * self.t + 3 + SBOX_E_SIGNALS;
-            let out = internal_matmul(
-                self.ops,
-                &self.scratch_sbox_out,
-                diag,
-                &mut self.outputs[site],
-                imm_base,
-            );
-
-            // [out][in][RC][linear_layer][sbox] + Sbox_e + InternalMatMulT
-            self.outputs[site].record_slice(base, &out);
-            self.outputs[site].record_slice(base + self.t, state);
-            let rc_slot = base + 2 * self.t;
-            if self.outputs[site].wants(rc_slot) {
-                let rc_value = self.ops.public(c);
-                self.outputs[site].record_owned(rc_slot, rc_value);
-            }
-            self.outputs[site].record(base + 2 * self.t + 1, &linear[site]);
-            self.outputs[site].record(base + 2 * self.t + 2, &sbox.out);
-            record_sbox_e(
-                &mut self.outputs[site],
-                base + 2 * self.t + 3,
-                &linear[site],
-                sbox,
-            );
-
-            self.outputs[site].record_slice(self.layout.states + (5 + round) * self.t, &out);
-            *state = out;
+        let base = self.layout.partial + round * partial_round_signals(t);
+        let states_base = self.layout.states + (5 + round) * t;
+        for (site, sbox) in self
+            .sites
+            .iter_mut()
+            .zip(self.linear.iter().zip(&self.sboxes))
+        {
+            partial_round_site(self.ops, site, c, diag, sbox, base, states_base);
         }
         Ok(())
     }
 
-    fn finish(mut self) -> eyre::Result<()> {
+    fn finish(self) -> eyre::Result<()> {
         // Top-level `[out[t]]`, known only after the second full-round group.
-        for (site, state) in self.current.iter().enumerate() {
-            self.outputs[site].record_slice(0, state);
-            self.outputs[site].finish(site)?;
+        for (i, mut site) in self.sites.into_iter().enumerate() {
+            site.output.record_slice(0, &site.state);
+            site.output.finish(i)?;
         }
         Ok(())
     }
@@ -1067,6 +1129,8 @@ struct Rep3Ops<'a, N: mpc_net::Network> {
     net: &'a N,
     state: &'a mut mpc_core::protocols::rep3::Rep3State,
     pool: &'a mut Rep3Poseidon2Preprocessing,
+    /// `sbox_layer`'s `x - r`, reused across rounds.
+    masked: Vec<mpc_core::protocols::rep3::Rep3PrimeFieldShare<Fr>>,
 }
 
 impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
@@ -1095,7 +1159,11 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
     /// uniform and unknown, so nothing about `x` leaks. This is mpc-core's own `sbox_rep3_precomp`
     /// trick, extended to also emit `square` and `pow_4` - which is exactly why it composes with a
     /// *full* trace at no extra round cost (mpc-core only ever needed `x^5`).
-    fn sbox_layer(&mut self, xs: &[Self::V]) -> eyre::Result<Vec<SboxTrace<Self::V>>> {
+    fn sbox_layer(
+        &mut self,
+        xs: &[Self::V],
+        out: &mut Vec<SboxTrace<Self::V>>,
+    ) -> eyre::Result<()> {
         use mpc_core::protocols::rep3::arithmetic;
         use rayon::prelude::*;
 
@@ -1114,12 +1182,10 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
         );
 
         // The one round that scales with the layer.
-        let masked: Vec<Self::V> = xs
-            .iter()
-            .zip(r)
-            .map(|(x, r)| arithmetic::sub(*x, *r))
-            .collect();
-        let y = arithmetic::open_vec(&masked, self.net)?;
+        self.masked.clear();
+        self.masked
+            .extend(xs.iter().zip(r).map(|(x, r)| arithmetic::sub(*x, *r)));
+        let y = arithmetic::open_vec(&self.masked, self.net)?;
         let id = self.state.id;
 
         // Every index is an independent local linear combination (see the doc above - the one
@@ -1127,7 +1193,7 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
         // `with_min_len` keeps small batches (the common case: `sites * t` is usually a handful of
         // elements) on the calling thread instead of paying rayon's dispatch overhead, matching
         // `mpc-core`'s own `local_mul_vec` threshold.
-        let out: Vec<SboxTrace<Self::V>> = (0..n)
+        (0..n)
             .into_par_iter()
             .with_min_len(1024)
             .map(|i| {
@@ -1163,8 +1229,8 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
                     out: fifth,
                 }
             })
-            .collect();
-        Ok(out)
+            .collect_into_vec(out);
+        Ok(())
     }
 }
 
@@ -1192,6 +1258,7 @@ pub(crate) fn rep3_trace_requested_preprocessed<N: mpc_net::Network>(
         net,
         state: rep3_state,
         pool: preprocessing,
+        masked: Vec::new(),
     };
     walk(&mut ops, t, states, rc, plan.outputs(&mut out))?;
     eyre::ensure!(
@@ -1472,7 +1539,10 @@ mod tests {
         for (site, row) in rows.iter().enumerate() {
             requests.extend_from_slice(row);
             offsets.push(u32::try_from(requests.len()).expect("test fixture length fits in u32"));
-            expected.extend(row.iter().map(|&slot| full[site * capacity + slot as usize]));
+            expected.extend(
+                row.iter()
+                    .map(|&slot| full[site * capacity + slot as usize]),
+            );
         }
         let got = plain_trace_requested(t, &states, &requests, &offsets)
             .expect("a well-formed CSR over a supported width must succeed");
