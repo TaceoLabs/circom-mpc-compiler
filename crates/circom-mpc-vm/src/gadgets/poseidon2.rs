@@ -290,6 +290,11 @@ fn acc<O: Ops>(ops: &mut O, input: &[O::V], trace: &mut SiteOutput<'_, O::V>, ba
     sum
 }
 
+/// `2 * x` as an addition - cheaper than a `mul_public` by 2 in every domain.
+fn double<O: Ops>(ops: &mut O, x: &O::V) -> O::V {
+    ops.add(x, x)
+}
+
 /// `ExternalMatMul2`/`3`/`4` over exactly 2, 3 or 4 elements.
 fn external_matmul_leaf<O: Ops>(
     ops: &mut O,
@@ -297,8 +302,6 @@ fn external_matmul_leaf<O: Ops>(
     trace: &mut SiteOutput<'_, O::V>,
     base: usize,
 ) -> Vec<O::V> {
-    let two = Fr::from(2u64);
-    let four = Fr::from(4u64);
     let t = input.len();
     trace.record_slice(base + t, input);
     let out = match t {
@@ -313,12 +316,14 @@ fn external_matmul_leaf<O: Ops>(
             out
         }
         4 => {
-            let double_in1 = ops.mul_public(&input[1], two);
-            let double_in3 = ops.mul_public(&input[3], two);
+            let double_in1 = double(ops, &input[1]);
+            let double_in3 = double(ops, &input[3]);
             let t_0 = ops.add(&input[0], &input[1]);
             let t_1 = ops.add(&input[2], &input[3]);
-            let quad_t_0 = ops.mul_public(&t_0, four);
-            let quad_t_1 = ops.mul_public(&t_1, four);
+            let quad_t_0 = double(ops, &t_0);
+            let quad_t_0 = double(ops, &quad_t_0);
+            let quad_t_1 = double(ops, &t_1);
+            let quad_t_1 = double(ops, &quad_t_1);
             let t_2 = ops.add(&double_in1, &t_1);
             let t_3 = ops.add(&double_in3, &t_0);
             let t_4 = ops.add(&quad_t_1, &t_3);
@@ -413,7 +418,6 @@ fn internal_matmul_leaf<O: Ops>(
     base: usize,
 ) -> Vec<O::V> {
     let t = input.len();
-    let two = Fr::from(2u64);
     let mut sum = input[0].clone();
     for x in &input[1..] {
         sum = ops.add(&sum, x);
@@ -424,7 +428,7 @@ fn internal_matmul_leaf<O: Ops>(
         .enumerate()
         .map(|(i, x)| {
             let scaled = if i == t - 1 {
-                ops.mul_public(x, two)
+                double(ops, x)
             } else {
                 x.clone()
             };
@@ -1136,6 +1140,10 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
                 let y3 = y2 * y;
                 let y4 = y3 * y;
                 let y5 = y4 * y;
+                // The binomial coefficients as doublings and additions, each cheaper than the
+                // field multiplication by a constant it replaces.
+                let times4 = |v: Fr| v.double().double();
+                let times5 = |v: Fr| times4(v) + v;
 
                 // x^2 = y^2 + 2yr + r2
                 let mut square = arithmetic::mul_public(r, y.double());
@@ -1143,17 +1151,17 @@ impl<N: mpc_net::Network> Ops for Rep3Ops<'_, N> {
                 square = arithmetic::add_public(square, y2, id);
 
                 // x^4 = y^4 + 4y^3 r + 6y^2 r2 + 4y r3 + r4
-                let mut pow4 = arithmetic::mul_public(r, y3 * Fr::from(4u64));
-                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, y2 * Fr::from(6u64)));
-                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, y * Fr::from(4u64)));
+                let mut pow4 = arithmetic::mul_public(r, times4(y3));
+                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r2, times4(y2) + y2.double()));
+                pow4 = arithmetic::add(pow4, arithmetic::mul_public(r3, times4(y)));
                 pow4 = arithmetic::add(pow4, r4);
                 pow4 = arithmetic::add_public(pow4, y4, id);
 
                 // x^5 = y^5 + 5y^4 r + 10y^3 r2 + 10y^2 r3 + 5y r4 + r5
-                let mut fifth = arithmetic::mul_public(r, y4 * Fr::from(5u64));
-                fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, y3 * Fr::from(10u64)));
-                fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, y2 * Fr::from(10u64)));
-                fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, y * Fr::from(5u64)));
+                let mut fifth = arithmetic::mul_public(r, times5(y4));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r2, times5(y3).double()));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r3, times5(y2).double()));
+                fifth = arithmetic::add(fifth, arithmetic::mul_public(r4, times5(y)));
                 fifth = arithmetic::add(fifth, r5);
                 fifth = arithmetic::add_public(fifth, y5, id);
 
