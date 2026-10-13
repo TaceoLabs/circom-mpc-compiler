@@ -315,12 +315,65 @@ impl<'p, D: VmDriver> Vm<'p, D> {
         &mut self,
         inputs: &[InputValue<D::Share>],
     ) -> eyre::Result<Witness<D::Share>> {
-        // Codegen has already projected circom's flat signal address space into witness order.
-        // Build exactly the final witness: no `num_signals`-sized zero-fill and no second clone
-        // pass over that temporary array.
+        // Neither check depends on the witness itself, so run them first: they usually point at
+        // the real preprocessing bug, and must not be masked by a malformed witness split below.
+        eyre::ensure!(
+            self.precomputation.is_empty(),
+            "GadgetPrecomputation has {} unconsumed batch(es) after the run",
+            self.precomputation.len()
+        );
+        self.driver.finish()?;
+
+        // Split at the program's own public-witness count and open the prefix - see the module
+        // doc on `Witness`. `n_pub` comes from the circuit's declared public signals (via
+        // `Program::num_public_witness`), never from the MPC domain analysis `input_domains`
+        // reflects.
         let witness_sources = self.program.witness_sources();
-        let mut witness = Vec::with_capacity(witness_sources.len());
-        for source in witness_sources {
+        let n_pub = self.program.num_public_witness() as usize;
+        eyre::ensure!(
+            n_pub <= witness_sources.len(),
+            "witness has {} entries but the program declares {n_pub} public witness entries",
+            witness_sources.len()
+        );
+        eyre::ensure!(
+            n_pub > 0,
+            "num_public_witness must count the reserved constant-1 witness entry, so it is never 0"
+        );
+
+        // Codegen has already projected circom's flat signal address space into witness order.
+        // Build the public prefix and the secret remainder as two separate vectors, so the
+        // (large) secret part is written exactly once - no `num_signals`-sized zero-fill, and no
+        // `split_off` copying everything past the (tiny) prefix into a second allocation.
+        let (public_sources, secret_sources) = witness_sources.split_at(n_pub);
+        let public_shares = self.collect_witness(public_sources, inputs);
+        let secret = self.collect_witness(secret_sources, inputs);
+
+        let public_inputs = self.driver.open(&public_shares)?;
+        debug_assert_eq!(
+            public_inputs.len(),
+            n_pub,
+            "open must return one value per opened share"
+        );
+        eyre::ensure!(
+            public_inputs[0] == Fr::one(),
+            "witness position 0 must be the reserved constant 1, got something else - either the \
+             program is malformed or num_public_witness is misaligned"
+        );
+
+        Ok(Witness {
+            public_inputs,
+            witness: secret,
+        })
+    }
+
+    /// Resolves `sources` (a contiguous run of the program's witness sources) into shares.
+    fn collect_witness(
+        &mut self,
+        sources: &[WitnessSource],
+        inputs: &[InputValue<D::Share>],
+    ) -> Vec<D::Share> {
+        let mut witness = Vec::with_capacity(sources.len());
+        for source in sources {
             witness.push(match *source {
                 WitnessSource::One => self.driver.promote(Fr::one()),
                 WitnessSource::Zero => self.driver.promote(Fr::zero()),
@@ -341,45 +394,7 @@ impl<'p, D: VmDriver> Vm<'p, D> {
                 } => unreachable!("codegen never emits a Local witness source"),
             });
         }
-
-        eyre::ensure!(
-            self.precomputation.is_empty(),
-            "GadgetPrecomputation has {} unconsumed batch(es) after the run",
-            self.precomputation.len()
-        );
-        self.driver.finish()?;
-
-        // Split at the program's own public-witness count and open the prefix - see the module
-        // doc on `Witness`. `n_pub` comes from the circuit's declared public signals (via
-        // `Program::num_public_witness`), never from the MPC domain analysis `input_domains`
-        // reflects.
-        let n_pub = self.program.num_public_witness() as usize;
-        eyre::ensure!(
-            n_pub <= witness.len(),
-            "witness has {} entries but the program declares {n_pub} public witness entries",
-            witness.len()
-        );
-        eyre::ensure!(
-            n_pub > 0,
-            "num_public_witness must count the reserved constant-1 witness entry, so it is never 0"
-        );
-        let secret = witness.split_off(n_pub);
-        let public_inputs = self.driver.open(&witness)?;
-        debug_assert_eq!(
-            public_inputs.len(),
-            n_pub,
-            "open must return one value per opened share"
-        );
-        eyre::ensure!(
-            public_inputs[0] == Fr::one(),
-            "witness position 0 must be the reserved constant 1, got something else - either the \
-             program is malformed or num_public_witness is misaligned"
-        );
-
-        Ok(Witness {
-            public_inputs,
-            witness: secret,
-        })
+        witness
     }
 
     /// Services one batched gadget site group at its point in the instruction stream. A
