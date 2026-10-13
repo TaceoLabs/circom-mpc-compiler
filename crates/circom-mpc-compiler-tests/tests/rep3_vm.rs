@@ -306,6 +306,80 @@ fn execution_error_costs_no_communication() {
     }
 }
 
+/// The network rounds each phase of one party's [`run_precomputed`] run cost.
+struct PrecomputedParty {
+    precompute_rounds: usize,
+    online_rounds: usize,
+}
+
+/// Runs `program` on `values` over real 3-party rep3 in two phases: `precompute` gets each party's
+/// input shares (in `share_inputs` order) and builds its [`circom_mpc_vm::GadgetPrecomputation`]
+/// over its own network rounds - exactly what a host would do before the values it hashes even
+/// exist as circuit inputs - then `Vm::run` consumes it. Returns the reconstructed witness and
+/// every party's [`PrecomputedParty`].
+fn run_precomputed(
+    program: &circom_mpc_program::Program,
+    values: &[Fr],
+    precompute: impl Fn(
+        &[Rep3PrimeFieldShare<Fr>],
+        &circom_mpc_vm::counting_net::CountingNet<LocalNetwork>,
+        &mut Rep3State,
+    ) -> circom_mpc_vm::GadgetPrecomputation<Rep3PrimeFieldShare<Fr>>
+    + Sync,
+) -> (Vec<Fr>, Vec<PrecomputedParty>) {
+    let shares = share_inputs(program, values);
+    let runs: Vec<_> = std::thread::scope(|scope| {
+        LocalNetwork::new(3)
+            .into_iter()
+            .map(circom_mpc_vm::counting_net::CountingNet::new)
+            .enumerate()
+            .map(|(party, net)| {
+                let shares = &shares;
+                let precompute = &precompute;
+                scope.spawn(move || {
+                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
+                    let my_shares: Vec<_> = shares.iter().map(|s| s[party]).collect();
+
+                    net.reset();
+                    let precomputation = precompute(&my_shares, &net, &mut state);
+                    let precompute_rounds = net.rounds();
+
+                    net.reset();
+                    let vm = Vm::rep3(program, &net, &mut state)
+                        .unwrap()
+                        .with_precomputation(precomputation);
+                    let mut my_shares = my_shares.into_iter();
+                    let inputs = program
+                        .classify_inputs(values, |_v| my_shares.next().unwrap())
+                        .unwrap();
+                    let witness = vm.run(&inputs).unwrap();
+                    let party = PrecomputedParty {
+                        precompute_rounds,
+                        online_rounds: net.rounds(),
+                    };
+                    (witness, party)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    let (witnesses, parties): (Vec<_>, Vec<_>) = runs.into_iter().unzip();
+    let [w0, w1, w2] = witnesses
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("exactly three parties"));
+    (combine_witness(w0, w1, w2), parties)
+}
+
+/// `circuit`'s full witness for `values` under `PlainDriver` - the reference a precomputed rep3
+/// run must reconstruct.
+fn plain_witness(circuit: &str, values: &[Fr]) -> Vec<Fr> {
+    let program = circom_mpc_compiler::compile(circuit_path(circuit), &config()).unwrap();
+    let inputs = program.classify_inputs(values, |v| v);
+    Vm::plain(&program).run(&inputs).unwrap().into_full()
+}
+
 /// Precomputing a Poseidon2 permutation with [`circom_mpc_vm::gadgets::poseidon2::Poseidon2Service`]
 /// and handing the trace to the host removes that permutation's rounds from the proof run
 /// entirely, which is the whole point of `TACEO_PRECOMPUTATION_Poseidon2`. The precompute phase
@@ -316,115 +390,38 @@ fn execution_error_costs_no_communication() {
 /// circuit run under `PlainDriver`.
 #[test]
 fn precomputing_poseidon2_removes_its_rounds_from_the_proof_run() {
-    use circom_mpc_vm::{
-        GadgetPrecomputation, counting_net::CountingNet, gadgets::poseidon2::Poseidon2Service,
-    };
+    use circom_mpc_vm::{GadgetPrecomputation, InputValue, gadgets::poseidon2::Poseidon2Service};
 
     let program =
         circom_mpc_compiler::compile(circuit_path("precomputation_poseidon2_test"), &config())
             .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
-    let expected = {
-        let baseline =
-            circom_mpc_compiler::compile(circuit_path("gadget_poseidon2_test"), &config()).unwrap();
-        let inputs = baseline.classify_inputs(&values, |v| v);
-        Vm::plain(&baseline).run(&inputs).unwrap().into_full()
-    };
 
-    let shares = share_inputs(&program, &values);
-    let networks: Vec<_> = LocalNetwork::new(3)
-        .into_iter()
-        .map(CountingNet::new)
-        .collect();
-
-    struct PartyRun {
-        witness: circom_mpc_vm::Witness<Rep3PrimeFieldShare<Fr>>,
-        precompute_rounds: usize,
-        online_rounds: usize,
-    }
-
-    let runs: Vec<PartyRun> = std::thread::scope(|scope| {
-        networks
-            .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
-                let program = &program;
-                let shares = &shares;
-                let values = &values;
-                scope.spawn(move || {
-                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let my_shares: Vec<Rep3PrimeFieldShare<Fr>> =
-                        shares.iter().map(|s| s[party]).collect();
-
-                    // Precompute phase: run the permutation once, up front, over its own network
-                    // rounds - exactly what a host would do before the values it hashes even
-                    // exist as circuit inputs (e.g. before revealing a new leaf commitment to
-                    // build a Merkle path from).
-                    net.reset();
-                    let mut service = Poseidon2Service::new(3, 1, &net, &mut state).unwrap();
-                    let states: Vec<_> = my_shares
-                        .iter()
-                        .copied()
-                        .map(circom_mpc_vm::InputValue::Secret)
-                        .collect();
-                    let traces = service.trace(3, &states, &net, &mut state).unwrap();
-                    service.finish().unwrap();
-                    let precompute_rounds = net.rounds();
-
-                    let mut precomputation = GadgetPrecomputation::new();
-                    precomputation.push_batch(traces);
-
-                    // The proof run: preparing `Rep3Driver` derives a zero Poseidon2 mask budget
-                    // (its only Poseidon2 batch is host-precomputed, not driver-serviced), and
-                    // running it makes no further network calls for that site at all.
-                    net.reset();
-                    let vm = Vm::rep3(program, &net, &mut state)
-                        .unwrap()
-                        .with_precomputation(precomputation);
-                    let mut next = 0;
-                    let inputs = program
-                        .classify_inputs(values, |_v| {
-                            let s = shares[next][party];
-                            next += 1;
-                            s
-                        })
-                        .unwrap();
-                    let witness = vm.run(&inputs).unwrap();
-                    let online_rounds = net.rounds();
-
-                    PartyRun {
-                        witness,
-                        precompute_rounds,
-                        online_rounds,
-                    }
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
+    // The proof run: preparing `Rep3Driver` derives a zero Poseidon2 mask budget (its only
+    // Poseidon2 batch is host-precomputed, not driver-serviced), and running it makes no further
+    // network calls for that site at all.
+    let (witness, parties) = run_precomputed(&program, &values, |shares, net, state| {
+        let mut service = Poseidon2Service::new(3, 1, net, state).unwrap();
+        let states: Vec<_> = shares.iter().copied().map(InputValue::Secret).collect();
+        let mut precomputation = GadgetPrecomputation::new();
+        precomputation.push_batch(service.trace(3, &states, net, state).unwrap());
+        service.finish().unwrap();
+        precomputation
     });
 
-    for run in &runs {
+    for party in &parties {
         assert_eq!(
-            run.precompute_rounds,
+            party.precompute_rounds,
             3 + 8 + 56,
             "Poseidon2(t=3) has 56 partial rounds"
         );
         assert_eq!(
-            run.online_rounds, 1,
+            party.online_rounds, 1,
             "no driver-serviced Poseidon2 batch should remain in the proof run - the one round \
              left is Vm::run's own closing witness-split open"
         );
     }
-    let [w0, w1, w2] = runs
-        .into_iter()
-        .map(|run| run.witness)
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("exactly three parties"));
-    let got = combine_witness(w0, w1, w2);
-    assert_eq!(got, expected);
+    assert_eq!(witness, plain_witness("gadget_poseidon2_test", &values));
 }
 
 /// The same setup as [`precomputing_poseidon2_removes_its_rounds_from_the_proof_run`], but the
@@ -439,69 +436,24 @@ fn precomputed_poseidon2_promotes_a_public_input_to_a_trivial_share() {
         circom_mpc_compiler::compile(circuit_path("precomputation_mixed_domain_test"), &config())
             .unwrap();
     let values = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
-    let expected = {
-        let baseline = circom_mpc_compiler::compile(
-            circuit_path("gadget_poseidon2_mixed_domain_test"),
-            &config(),
-        )
-        .unwrap();
-        let inputs = baseline.classify_inputs(&values, |v| v);
-        Vm::plain(&baseline).run(&inputs).unwrap().into_full()
-    };
 
-    // `share_inputs` only secret-shares `Bank::Shared` inputs - `a` is `Bank::Public`, so `shares`
-    // covers just `b` and `c`, in that order.
-    let shares = share_inputs(&program, &values);
-    assert_eq!(shares.len(), 2, "only b and c are Shared");
-
-    let runs: Vec<_> = std::thread::scope(|scope| {
-        LocalNetwork::new(3)
-            .into_iter()
-            .enumerate()
-            .map(|(party, net)| {
-                let program = &program;
-                let shares = &shares;
-                let values = &values;
-                scope.spawn(move || {
-                    let mut state = Rep3State::new(&net, A2BType::default()).unwrap();
-                    let my_shares: Vec<Rep3PrimeFieldShare<Fr>> =
-                        shares.iter().map(|s| s[party]).collect();
-
-                    let mut service = Poseidon2Service::new(3, 1, &net, &mut state).unwrap();
-                    let states = [
-                        InputValue::Public(values[0]),
-                        InputValue::Secret(my_shares[0]),
-                        InputValue::Secret(my_shares[1]),
-                    ];
-                    let traces = service.trace(3, &states, &net, &mut state).unwrap();
-                    service.finish().unwrap();
-
-                    let mut precomputation = GadgetPrecomputation::new();
-                    precomputation.push_batch(traces);
-
-                    let vm = Vm::rep3(program, &net, &mut state)
-                        .unwrap()
-                        .with_precomputation(precomputation);
-                    let mut next = 0;
-                    let inputs = program
-                        .classify_inputs(values, |_v| {
-                            let s = shares[next][party];
-                            next += 1;
-                            s
-                        })
-                        .unwrap();
-                    vm.run(&inputs).unwrap()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
+    // `share_inputs` only secret-shares `Bank::Shared` inputs - `a` is `Bank::Public`, so each
+    // party's shares cover just `b` and `c`, in that order.
+    let (witness, _) = run_precomputed(&program, &values, |shares, net, state| {
+        assert_eq!(shares.len(), 2, "only b and c are Shared");
+        let mut service = Poseidon2Service::new(3, 1, net, state).unwrap();
+        let states = [
+            InputValue::Public(values[0]),
+            InputValue::Secret(shares[0]),
+            InputValue::Secret(shares[1]),
+        ];
+        let mut precomputation = GadgetPrecomputation::new();
+        precomputation.push_batch(service.trace(3, &states, net, state).unwrap());
+        service.finish().unwrap();
+        precomputation
     });
-
-    let [w0, w1, w2] = runs
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("exactly three parties"));
-    let got = combine_witness(w0, w1, w2);
-    assert_eq!(got, expected);
+    assert_eq!(
+        witness,
+        plain_witness("gadget_poseidon2_mixed_domain_test", &values)
+    );
 }
