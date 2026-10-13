@@ -57,8 +57,8 @@ impl<R: Read + ?Sized> ReadLeExt for R {}
 
 use crate::{
     Bank, BatchIdx, BatchKind, GadgetBatch, GadgetKind, InputBinding, InputIdx, InputSignal,
-    Instruction, Opcode, Poseidon2Width, Program, ResultSlot, ResultTarget, RoundEntry, RoundIdx,
-    SiteInput, Slot, SlotCounts, WitnessSource,
+    Instruction, Opcode, Poseidon2Width, Program, ProgramParts, ResultSlot, ResultTarget,
+    RoundEntry, RoundIdx, SiteInput, Slot, SlotCounts, WitnessSource,
 };
 
 /// A wire-format index newtype: a thin, checked wrapper over `u32`. Lets [`write_index_vec`]/
@@ -516,10 +516,8 @@ impl Program {
     ///
     /// # Errors
     ///
-    /// Returns an error if the program fails [`Program::validate_encoding`], or if writing to
-    /// `w` fails.
+    /// Returns an error if writing to `w` fails.
     pub fn write<W: Write>(&self, w: &mut W) -> eyre::Result<()> {
-        self.validate_encoding()?;
         w.write_all(MAGIC)?;
         w.write_u32::<LittleEndian>(VERSION)?;
 
@@ -685,7 +683,7 @@ impl Program {
 
         let num_public_witness = r.read_u32::<LittleEndian>()?;
 
-        let program = Program {
+        let program = Program::new(ProgramParts {
             instructions,
             constants,
             input_domains,
@@ -703,8 +701,7 @@ impl Program {
                 local,
             },
             num_public_witness,
-        };
-        program.validate_encoding()?;
+        })?;
         eyre::ensure!(limited.limit() > 0, "serialized program exceeds byte limit");
         Ok(program)
     }

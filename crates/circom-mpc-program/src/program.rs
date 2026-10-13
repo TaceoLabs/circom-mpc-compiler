@@ -6,7 +6,7 @@
 
 use ark_bn254::Fr;
 
-use crate::{BatchIdx, GadgetKind, InputIdx, ResultSlot, RoundIdx, Slot};
+use crate::{BatchIdx, GadgetKind, InputIdx, Poseidon2Width, ResultSlot, RoundIdx, Slot};
 
 /// Poseidon2 widths every gadget and the VM's batch-shape validation support (`t` in the
 /// permutation's state size).
@@ -157,7 +157,7 @@ pub enum BatchKind {
     /// `Vm::run` with attached precomputation.
     PrecomputedPoseidon2 {
         /// The Poseidon2 state width.
-        t: crate::Poseidon2Width,
+        t: Poseidon2Width,
     },
 }
 
@@ -392,11 +392,17 @@ pub struct ProgramStatistics {
 }
 
 impl Program {
-    /// Builds a `Program` from its raw parts - the constructor `codegen::compile` uses, and the
-    /// escape hatch tests use to build or mutate a program without going through it.
-    #[must_use]
-    pub fn new(parts: ProgramParts) -> Self {
-        Self {
+    /// Builds a `Program` from its raw parts - the constructor `codegen::compile` and
+    /// [`Program::read`] use, and the escape hatch tests use to build or mutate a program without
+    /// going through codegen. Every `Program` is valid by construction: `Vm::run` relies on the
+    /// encoding invariants checked here and never re-checks them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the first inconsistency found - an out-of-range slot, a
+    /// malformed side table, or a reference to a missing round/gadget batch.
+    pub fn new(parts: ProgramParts) -> eyre::Result<Self> {
+        let program = Self {
             instructions: parts.instructions,
             constants: parts.constants,
             input_domains: parts.input_domains,
@@ -410,11 +416,13 @@ impl Program {
             num_inputs: parts.num_inputs,
             slots: parts.slots,
             num_public_witness: parts.num_public_witness,
-        }
+        };
+        program.validate_encoding()?;
+        Ok(program)
     }
 
     /// The inverse of [`Program::new`] - unwraps a program back into its mutable parts, e.g. to
-    /// build a deliberately malformed program for a `validate_encoding` negative test.
+    /// build a deliberately malformed program for a [`Program::new`] negative test.
     #[must_use]
     pub fn into_parts(self) -> ProgramParts {
         ProgramParts {
@@ -573,40 +581,28 @@ impl Program {
     }
     /// One `BatchKind::PrecomputedPoseidon2` batch's shape, in the order `Vm::run` with attached precomputation
     /// consumes it (`Program::precomputed_batches`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an instruction references a gadget batch index that doesn't exist.
-    pub fn precomputed_batches(&self) -> eyre::Result<Vec<PrecomputedBatch>> {
-        let mut batches = Vec::new();
-        for (instruction_index, instruction) in self.instructions.iter().enumerate() {
-            let Instruction::Gadget(batch_idx) = instruction else {
-                continue;
-            };
-            let batch = self.gadget_batches.get(batch_idx.index()).ok_or_else(|| {
-                eyre::eyre!(
-                    "instruction {instruction_index} references missing gadget batch {batch_idx}"
-                )
-            })?;
-            if let BatchKind::PrecomputedPoseidon2 { t } = batch.kind {
-                batches.push(PrecomputedBatch {
+    #[must_use]
+    pub fn precomputed_batches(&self) -> Vec<PrecomputedBatch> {
+        self.instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                // Every gadget index is in range: `Program::new` checked it.
+                Instruction::Gadget(batch_idx) => Some(&self.gadget_batches[batch_idx.index()]),
+                _ => None,
+            })
+            .filter_map(|batch| match batch.kind {
+                BatchKind::PrecomputedPoseidon2 { t } => Some(PrecomputedBatch {
                     kind: GadgetKind::Poseidon2 { t },
                     sites: batch.sites,
-                });
-            }
-        }
-        Ok(batches)
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Checks every side-table and slot reference before execution. This is intentionally usable
-    /// both after deserialization and by any caller that built a `Program` via [`Program::new`]
-    /// without going through codegen.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error describing the first inconsistency found - an out-of-range slot, a
-    /// malformed side table, or a reference to a missing round/gadget batch.
-    pub fn validate_encoding(&self) -> eyre::Result<()> {
+    /// Checks every side-table and slot reference - [`Program::new`]'s half that makes every
+    /// `Program` valid by construction.
+    fn validate_encoding(&self) -> eyre::Result<()> {
         self.validate_inputs()?;
         self.validate_instructions()?;
         self.validate_rounds()?;
@@ -981,7 +977,7 @@ mod tests {
     use super::*;
     use crate::Poseidon2Width;
 
-    /// A minimal program with one Poseidon2 gadget batch, for `validate_encoding` tests that
+    /// A minimal program with one Poseidon2 gadget batch, for validation tests that
     /// don't need a real circuit.
     fn poseidon_budget_program(bank: Bank, sites: usize, executions: usize) -> Program {
         let t = Poseidon2Width::new(3).expect("3 is a supported width");
@@ -1020,12 +1016,14 @@ mod tests {
             },
             num_public_witness: 1,
         })
+        .expect("the fixture program is well formed")
     }
 
     #[test]
     fn rejects_a_malformed_witness_source_table() {
         let mut parts = poseidon_budget_program(Bank::Public, 1, 1).into_parts();
         parts.witness_sources[0] = WitnessSource::Zero;
-        assert!(Program::new(parts).validate_encoding().is_err());
+        let err = Program::new(parts).expect_err("a Zero constant-1 witness entry is malformed");
+        assert!(err.to_string().contains("reserved constant one"), "{err}");
     }
 }

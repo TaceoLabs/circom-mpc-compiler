@@ -565,10 +565,9 @@ impl<'p, D: VmDriver> Vm<'p, D> {
     /// Services a `BatchKind::PrecomputedPoseidon2` batch: instead of calling the driver, pops the
     /// next queued [`SiteTrace`] group off `self.precomputation` and writes it straight into the
     /// `Shared` bank through the batch's own CSR result table - the same request/target machinery
-    /// every other batch kind uses. `Program::validate_encoding` already guarantees every result
+    /// every other batch kind uses. [`Program::new`] already guarantees every result
     /// target here is `Bank::Shared`, so this never touches `public`.
     fn run_precomputed_batch(&mut self, t: usize, batch: &GadgetBatch) -> eyre::Result<()> {
-        let num_outputs = t;
         let sites = self.precomputation.pop().ok_or_else(|| {
             eyre::eyre!(
                 "missing precomputed trace for a Poseidon2{{t={t}}} batch ({} sites) - \
@@ -582,37 +581,28 @@ impl<'p, D: VmDriver> Vm<'p, D> {
             sites.len(),
             batch.sites
         );
-        eyre::ensure!(
-            batch.result_offsets.len() == batch.sites + 1
-                && batch.result_requests.len() == batch.result_targets.len(),
-            "malformed precomputed batch CSR result table"
-        );
-        for (site, trace) in sites.iter().enumerate() {
+        // The CSR table itself - row bounds, `Shared` targets - holds by `Program::new`; only the
+        // caller-supplied traces are checked here.
+        for (site, (trace, row)) in sites
+            .iter()
+            .zip(batch.result_offsets.windows(2))
+            .enumerate()
+        {
             eyre::ensure!(
-                trace.output.len() == num_outputs,
-                "precomputed Poseidon2{{t={t}}} site {site} supplied {} outputs, expected \
-                 {num_outputs}",
+                trace.output.len() == t,
+                "precomputed Poseidon2{{t={t}}} site {site} supplied {} outputs, expected {t}",
                 trace.output.len()
             );
-            let lo = batch.result_offsets[site] as usize;
-            let hi = batch.result_offsets[site + 1] as usize;
-            eyre::ensure!(
-                lo <= hi && hi <= batch.result_requests.len(),
-                "invalid precomputed batch CSR row"
-            );
+            let (lo, hi) = (row[0] as usize, row[1] as usize);
             for (&logical, target) in batch.result_requests[lo..hi]
                 .iter()
                 .zip(&batch.result_targets[lo..hi])
             {
-                eyre::ensure!(
-                    target.bank == Bank::Shared,
-                    "precomputed Poseidon2{{t={t}}} result must target Shared"
-                );
                 let logical = logical.index();
-                let value = if logical < num_outputs {
+                let value = if logical < t {
                     trace.output[logical].clone()
                 } else {
-                    let idx = logical - num_outputs;
+                    let idx = logical - t;
                     trace.intermediate.get(idx).cloned().ok_or_else(|| {
                         eyre::eyre!(
                             "precomputed Poseidon2{{t={t}}} site {site} requested intermediate slot \

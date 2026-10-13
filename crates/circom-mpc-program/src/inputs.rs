@@ -174,7 +174,7 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProgramParts, SlotCounts, program::InputSignal};
+    use crate::{ProgramParts, SlotCounts, WitnessSource, program::InputSignal};
 
     /// A program with three `Fr` inputs, `a` (1 element) and `b` (2 elements), all `Public` -
     /// enough for `InputValues`, which never touches instructions, rounds, or gadgets.
@@ -200,11 +200,12 @@ mod tests {
             round_operands: Vec::new(),
             round_results: Vec::new(),
             gadget_batches: Vec::new(),
-            witness_sources: Vec::new(),
+            witness_sources: vec![WitnessSource::One],
             num_inputs: 3,
             slots: SlotCounts::default(),
             num_public_witness: 1,
         })
+        .expect("the fixture program is well formed")
     }
 
     fn fr(values: [u64; 3]) -> Vec<Fr> {

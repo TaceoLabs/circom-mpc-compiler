@@ -787,7 +787,7 @@ pub(crate) fn plain_trace_requested(
 /// full-CSR-request wrapper over `plain_trace_requested` for a host that wants to precompute a
 /// `TACEO_PRECOMPUTATION_Poseidon2` site's trace outside a `Vm::run`. `states` may mix
 /// `InputValue::Public` and `InputValue::Secret` - a site's inputs need not all be secret, only
-/// at least one of them (see `Program::validate_encoding`).
+/// at least one of them (see `Program::new`).
 ///
 /// # Errors
 ///

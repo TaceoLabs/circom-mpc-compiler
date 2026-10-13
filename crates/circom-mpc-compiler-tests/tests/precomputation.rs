@@ -34,7 +34,7 @@ fn precomputed_poseidon2_site_is_its_own_batch() {
             .unwrap();
     assert_eq!(program.statistics().gadget_batches, 1);
     assert_eq!(program.statistics().precomputed_batches, 1);
-    let batches = program.precomputed_batches().unwrap();
+    let batches = program.precomputed_batches();
     assert_eq!(batches.len(), 1);
     assert_eq!(
         batches[0].kind,
@@ -58,7 +58,7 @@ fn mixed_precomputed_and_gadget_sites_never_share_a_batch() {
     let stats = program.statistics();
     assert_eq!(stats.gadget_batches, 2, "{stats:?}");
     assert_eq!(stats.precomputed_batches, 1, "{stats:?}");
-    let precomputed = program.precomputed_batches().unwrap();
+    let precomputed = program.precomputed_batches();
     assert_eq!(precomputed.len(), 1);
     assert_eq!(
         precomputed[0].kind,
@@ -210,7 +210,7 @@ fn an_all_public_precomputed_site_falls_back_to_an_ordinary_gadget() {
         circom_mpc_compiler::compile(circuit_path("precomputation_all_public_test"), &config())
             .unwrap();
     assert_eq!(program.statistics().precomputed_batches, 0);
-    assert!(program.precomputed_batches().unwrap().is_empty());
+    assert!(program.precomputed_batches().is_empty());
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn batch_kind_precomputed_poseidon2_is_never_used_for_a_gadget_site() {
     assert_eq!(program.statistics().precomputed_batches, 0);
     // `precomputed_batches()` walks `BatchKind::PrecomputedPoseidon2` specifically - confirm the
     // ordinary driver-serviced path never produces one.
-    assert!(program.precomputed_batches().unwrap().is_empty());
+    assert!(program.precomputed_batches().is_empty());
     let _ = BatchKind::Gadget(GadgetKind::Poseidon2 {
         t: circom_mpc_program::Poseidon2Width::new(3).expect("3 is a supported width"),
     }); // kept in scope for the import

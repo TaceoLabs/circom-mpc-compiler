@@ -11,6 +11,7 @@ use circom_mpc_program::{
     Opcode, Program, ProgramParts, ResultSlot, ResultTarget, RoundEntry, RoundIdx, SiteInput, Slot,
     SlotCounts, WitnessSource,
 };
+use eyre::WrapErr;
 
 use crate::{
     ir::{GadgetKind, Graph, Node, Op, RoundId, ValueId},
@@ -958,7 +959,7 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
     let witness_sources = build_witness_sources(graph, &emitter.slot)?;
     let num_public_witness = num_public_witness(graph, &reservation.input_signals)?;
 
-    Ok(Program::new(ProgramParts {
+    Program::new(ProgramParts {
         instructions: emitter.out.instructions,
         constants: reservation.constants,
         input_domains: reservation.input_domains,
@@ -976,7 +977,8 @@ pub(crate) fn compile(graph: &Graph) -> eyre::Result<Program> {
             local: emitter.arena.l.next,
         },
         num_public_witness,
-    }))
+    })
+    .wrap_err("codegen: emitted a malformed Program - this is a compiler bug, not a bad input")
 }
 
 #[cfg(test)]
@@ -1009,6 +1011,7 @@ mod tests {
         let graph = Graph::from_parts(GraphParts {
             nodes,
             outputs: vec![(SignalIdx::new(0), ValueId::new(8))],
+            signal_to_witness: vec![0, 1],
             num_outputs: 1,
             num_signals: 2,
             ..Default::default()
@@ -1070,10 +1073,14 @@ mod tests {
         sites: Vec<GadgetSite>,
         num_inputs: usize,
     ) -> Graph {
+        // A witness over every signal and one input signal covering every input, so `compile`'s
+        // `Program::new` sees a complete program.
         Graph::from_parts(GraphParts {
             nodes,
             outputs,
             gadget_sites: sites,
+            signal_to_witness: (0..num_inputs + 4).collect(),
+            input_list: vec![("in".to_owned(), 0, num_inputs)],
             num_inputs,
             num_outputs: 1,
             num_signals: num_inputs + 4,
@@ -1596,11 +1603,11 @@ mod tests {
     /// *within the survivors*, not at its original logical index.
     #[test]
     fn sparse_result_slots_are_compacted_in_order() {
-        // A capacity-3 site (1 output + 2 intermediates) where only logical slots 0 and 2 survive -
+        // A capacity-3 site (Num2Bits(3)'s 3 bits) where only logical slots 0 and 2 survive -
         // slot 1's `GadgetResult` node simply never exists, exactly as `dead_code` + `gc`
         // would leave it.
         let site = GadgetSite {
-            kind: GadgetKind::IsZero,
+            kind: GadgetKind::Num2Bits { n: 3 },
             precomputed: false,
         };
         let nodes = vec![
