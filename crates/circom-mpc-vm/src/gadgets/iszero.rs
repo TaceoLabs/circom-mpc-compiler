@@ -24,6 +24,26 @@ pub fn plain_trace(x: Fr) -> [Fr; 2] {
     }
 }
 
+/// [`plain_trace`] over every site of a batch, flattened site-major. Uses one batch inversion
+/// (Montgomery's trick: a single field inversion plus three multiplications per input) instead of
+/// one inversion per site; zeros are skipped, matching `plain_trace`'s `inv = 0` for `x = 0`.
+#[must_use]
+pub fn plain_trace_many(inputs: &[Fr]) -> Vec<Fr> {
+    let mut inverses = inputs.to_vec();
+    ark_ff::batch_inversion(&mut inverses);
+    inputs
+        .iter()
+        .zip(inverses)
+        .flat_map(|(x, inv)| {
+            if x.is_zero() {
+                [Fr::one(), Fr::zero()]
+            } else {
+                [Fr::zero(), inv]
+            }
+        })
+        .collect()
+}
+
 /// The rep3 twin of [`plain_trace`], batched across every site in one `Vm::run_batch` call (dispatched at `Opcode::Gadget`)
 /// (the same technique the co-snarks gadget uses, `circom-mpc-vm/src/gadget.rs`'s
 /// `register_iszero`, generalized from one value to a batch): convert every input to binary with
@@ -120,6 +140,14 @@ mod tests {
 
     use super::*;
     use crate::gadgets::test_support::run3_with_a2b;
+
+    #[test]
+    fn plain_trace_many_agrees_with_plain_trace() {
+        let values = [0u64, 7, 0, 0, 1, 12345, 0].map(Fr::from);
+        let expected: Vec<Fr> = values.iter().flat_map(|&x| plain_trace(x)).collect();
+        assert_eq!(plain_trace_many(&values), expected);
+        assert_eq!(plain_trace_many(&[]), Vec::<Fr>::new());
+    }
 
     #[test]
     fn rep3_agrees_with_plain_on_zero_and_nonzero() {

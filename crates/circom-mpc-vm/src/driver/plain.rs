@@ -68,10 +68,7 @@ impl VmDriver for PlainDriver {
     }
 
     fn is_zero_traces(&mut self, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
-        Ok(inputs
-            .iter()
-            .flat_map(|&x| iszero::plain_trace(x))
-            .collect())
+        Ok(iszero::plain_trace_many(inputs))
     }
 
     fn is_zero_reveal_traces(&mut self, inputs: &[Fr]) -> eyre::Result<Vec<IsZeroRevealTrace<Fr>>> {
