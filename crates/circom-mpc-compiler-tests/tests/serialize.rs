@@ -220,15 +220,20 @@ fn validation_rejects_out_of_range_witness_and_batch_targets() {
         bank: Bank::Shared,
         slot: Slot::new(invalid_witness.slots.shared),
     };
-    let invalid_witness = Program::new(invalid_witness);
-    assert!(invalid_witness.validate_encoding().is_err());
-    assert!(invalid_witness.write(&mut Vec::new()).is_err());
+    let err =
+        Program::new(invalid_witness).expect_err("a witness slot past the Shared bank is invalid");
+    assert!(
+        err.to_string().contains("witness source references"),
+        "{err}"
+    );
 
     let mut invalid_batch = program("gadget_iszero_test").into_parts();
     invalid_batch.gadget_batches[0].result_targets[0].slot = Slot::new(invalid_batch.slots.shared);
-    assert!(Program::new(invalid_batch).validate_encoding().is_err());
+    let err =
+        Program::new(invalid_batch).expect_err("a batch target past the Shared bank is invalid");
+    assert!(err.to_string().contains("bank size is"), "{err}");
 
-    // An unsupported Poseidon2 width is now rejected at construction, not at
-    // `validate_encoding` time - `Poseidon2Width` can never hold one.
+    // An unsupported Poseidon2 width is rejected by `Poseidon2Width::new`, before a `Program` even
+    // exists - `Poseidon2Width` can never hold one.
     assert!(Poseidon2Width::new(5).is_err());
 }

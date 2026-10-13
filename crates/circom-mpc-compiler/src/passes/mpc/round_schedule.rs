@@ -112,9 +112,11 @@ mod tests {
             nodes,
             outputs: vec![(SignalIdx::new(0), output)],
             gadget_sites: sites,
+            signal_to_witness: (0..5).collect(),
+            input_list: vec![("in".to_owned(), 0, 3)],
             num_inputs: 3,
             num_outputs: 1,
-            num_signals: 4,
+            num_signals: 5,
             ..Default::default()
         })
     }

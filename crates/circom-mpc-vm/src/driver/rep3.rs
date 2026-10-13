@@ -26,17 +26,15 @@ pub struct Rep3Driver<'a, N: Network> {
 }
 
 impl<'a, N: Network> Rep3Driver<'a, N> {
-    /// Validates `program`, derives its checked mask budget from executable shared-Poseidon2
-    /// instructions, and prepares the complete fresh pool in three rounds (or zero rounds when the
-    /// budget is zero). The derived budget is runtime state and is not part of program serialization.
+    /// Derives `program`'s checked mask budget from executable shared-Poseidon2 instructions, and
+    /// prepares the complete fresh pool in three rounds (or zero rounds when the budget is zero).
+    /// The derived budget is runtime state and is not part of program serialization.
     ///
     /// # Errors
     ///
-    /// Returns an error if `program` fails its own encoding checks, or preparing the Poseidon2
-    /// mask pool fails.
+    /// Returns an error if the mask budget can't be derived, or preparing the Poseidon2 mask pool
+    /// fails.
     pub fn new(net: &'a N, state: &'a mut Rep3State, program: &Program) -> eyre::Result<Self> {
-        // Never communicate for a malformed public Program value.
-        program.validate_encoding()?;
         let mask_budget = gadgets::poseidon2::mask_budget(program)?;
         let poseidon2 = gadgets::poseidon2::preprocess_rep3(mask_budget, net, state)?;
         Ok(Self {
