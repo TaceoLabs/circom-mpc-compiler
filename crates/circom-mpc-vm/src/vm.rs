@@ -650,10 +650,7 @@ fn run_plain_batch(kind: GadgetKind, inputs: &[Fr]) -> eyre::Result<Vec<Fr>> {
             .iter()
             .flat_map(|&x| num2bits::plain_trace(x, n))
             .collect(),
-        GadgetKind::IsZero => inputs
-            .iter()
-            .flat_map(|&x| iszero::plain_trace(x))
-            .collect(),
+        GadgetKind::IsZero => iszero::plain_trace_many(inputs),
         GadgetKind::AliasCheck => {
             eyre::ensure!(
                 inputs.len().is_multiple_of(254),
