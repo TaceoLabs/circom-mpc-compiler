@@ -17,7 +17,6 @@ eyre.workspace = true
 mpc-core.workspace = true
 mpc-net.workspace = true
 num-bigint.workspace = true
-num-traits.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
