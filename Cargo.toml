@@ -20,10 +20,11 @@ circom-parser = { package = "parser", git = "https://github.com/iden3/circom", r
 circom-program_structure = { package = "program_structure", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
 circom-type_analysis = { package = "type_analysis", git = "https://github.com/iden3/circom", rev = "ad44e915a12bb047b05745c2884aad9cc8326bc6", version = "2.2.3" }
 circom-types = { package = "taceo-circom-types", version = "0.3.1" }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "string"] }
 co-circom-types = { git = "https://github.com/TaceoLabs/co-snarks", rev = "ea197004880ef48d664ad8027c65a24308dfd61e", version = "0.6.0" }
 co-groth16 = { git = "https://github.com/TaceoLabs/co-snarks", rev = "ea197004880ef48d664ad8027c65a24308dfd61e", version = "0.10.0" }
 eyre = "0.6.12"
+git-version = "0.3"
 mpc-core = { git = "https://github.com/TaceoLabs/co-snarks", rev = "ea197004880ef48d664ad8027c65a24308dfd61e", version = "0.10.0" }
 mpc-net = { git = "https://github.com/TaceoLabs/co-snarks", rev = "ea197004880ef48d664ad8027c65a24308dfd61e", version = "0.5.0" }
 num-bigint = { version = "0.4.6" }

@@ -10,8 +10,20 @@ use std::{fs::File, io::BufWriter, path::PathBuf};
 use circom_mpc_compiler::{CompilerConfig, OptLevel};
 use clap::Parser;
 
+fn version() -> String {
+    format!(
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GIT_HASH").unwrap_or(git_version::git_version!(fallback = "UNKNOWN"))
+    )
+}
+
 #[derive(Parser)]
-#[command(about = "Compiles a circom circuit into a circom-mpc-program::Program file")]
+#[command(
+    name = "circom-mpc-compile",
+    version = version(),
+    about = "Compiles a circom circuit into a circom-mpc-program::Program file"
+)]
 struct Cli {
     /// Path to the circom main file to compile.
     circuit: PathBuf,
