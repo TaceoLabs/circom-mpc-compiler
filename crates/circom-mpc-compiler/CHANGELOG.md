@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/TaceoLabs/circom-mpc-compiler/compare/taceo-circom-mpc-compiler-v0.1.0...taceo-circom-mpc-compiler-v0.1.1)
+
+### ⛰️ Features
+
+
+- *(cli)* Adds version flag - ([6196a62](https://github.com/TaceoLabs/circom-mpc-compiler/commit/6196a6208b81478e3ae5206a54122aa1c6033e73))
+
+
 ## [0.1.0]
 
 ### ⛰️ Features
