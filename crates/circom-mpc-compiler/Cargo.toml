@@ -1,6 +1,6 @@
 [package]
 name = "taceo-circom-mpc-compiler"
-version = "0.1.0"
+version = "0.1.1"
 description = "Compiles circom circuits into a circom-mpc-program witness-extension procedure"
 edition.workspace = true
 rust-version.workspace = true
